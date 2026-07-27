@@ -14,6 +14,7 @@ except ModuleNotFoundError:  # pragma: no cover - Python 3.10
 from .errors import ConfigurationError
 
 SUPPORTED_ENGINES = {"pdflatex", "xelatex", "lualatex"}
+SUPPORTED_RUNTIMES = {"codex", "claude_code", "antigravity"}
 DEFAULT_PROFILES = {
     "quick": ("substantive_review", "copyedit"),
     "full": ("substantive_review", "copyedit", "consistency", "figure_review"),
@@ -47,6 +48,8 @@ class RouteConfig:
     model: str
     input_usd_per_million: float
     output_usd_per_million: float
+    runtime: str = "codex"
+    runtime_version: str | None = None
     reasoning_effort: str = "high"
     pricing_configured: bool = True
 
@@ -136,10 +139,23 @@ def load_local_config(repo: Path) -> LocalConfig:
     roles = {str(key): str(value) for key, value in data.get("roles", {}).items()}
     routes: dict[str, RouteConfig] = {}
     for name, route in data.get("routes", {}).items():
+        if "runtime_version" in route:
+            raise ConfigurationError(
+                f"Route {name!r} cannot configure runtime_version; Scriptorium freezes it automatically"
+            )
         model = str(route.get("model", "")).strip()
         provider = str(route.get("model_provider", "")).strip()
+        runtime = str(route.get("runtime", "codex")).strip()
         if not model or not provider:
             raise ConfigurationError(f"Route {name!r} requires model and model_provider")
+        if runtime not in SUPPORTED_RUNTIMES:
+            raise ConfigurationError(
+                f"Route {name!r} has unsupported runtime {runtime!r}; expected one of {sorted(SUPPORTED_RUNTIMES)}"
+            )
+        if runtime == "claude_code" and provider != "anthropic":
+            raise ConfigurationError(f"Route {name!r} with runtime 'claude_code' requires model_provider 'anthropic'")
+        if runtime == "antigravity" and provider != "gemini":
+            raise ConfigurationError(f"Route {name!r} with runtime 'antigravity' requires model_provider 'gemini'")
         input_price = float(route.get("input_usd_per_million", 0))
         output_price = float(route.get("output_usd_per_million", 0))
         if not math.isfinite(input_price) or not math.isfinite(output_price):
@@ -152,6 +168,7 @@ def load_local_config(repo: Path) -> LocalConfig:
             model=model,
             input_usd_per_million=input_price,
             output_usd_per_million=output_price,
+            runtime=runtime,
             reasoning_effort=str(route.get("reasoning_effort", "high")),
             pricing_configured={
                 "input_usd_per_million",
@@ -214,6 +231,7 @@ def initialize_project(repo: Path, main: str, engine: str) -> None:
         'revision = "primary"\n'
         'verification = "primary"\n\n'
         "[routes.primary]\n"
+        'runtime = "codex"\n'
         'model_provider = "openai"\n'
         f'model = "{MODEL_PLACEHOLDER}"\n'
         "input_usd_per_million = 0\n"

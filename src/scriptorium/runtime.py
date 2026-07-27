@@ -14,6 +14,13 @@ from .domain import ROLE_CATALOG, AgentRole
 
 AgentStatus = Literal["completed", "failed", "interrupted"]
 CODEX_SDK_VERSION = "0.144.4"
+CLAUDE_SDK_VERSION = "0.2.128"
+ANTIGRAVITY_SDK_VERSION = "0.1.8"
+RUNTIME_SDK_VERSIONS = {
+    "codex": CODEX_SDK_VERSION,
+    "claude_code": CLAUDE_SDK_VERSION,
+    "antigravity": ANTIGRAVITY_SDK_VERSION,
+}
 
 
 class RuntimeUnavailable(RuntimeError):
@@ -51,9 +58,18 @@ class AgentRuntime(Protocol):
         role: AgentRole,
         workspace: Path,
         schema: Mapping[str, object],
+        session_dir: Path,
     ) -> AgentResult: ...
 
-    async def resume_agent(self, thread_id: str, task: str) -> AgentResult: ...
+    async def resume_agent(
+        self,
+        thread_id: str,
+        task: str,
+        role: AgentRole,
+        workspace: Path,
+        schema: Mapping[str, object],
+        session_dir: Path,
+    ) -> AgentResult: ...
 
 
 class CodexAgentRuntime:
@@ -99,6 +115,7 @@ class CodexAgentRuntime:
         role: AgentRole,
         workspace: Path,
         schema: Mapping[str, object],
+        session_dir: Path,
     ) -> AgentResult:
         thread_id: str | None = None
         notifications: list[dict[str, Any]] = []
@@ -134,7 +151,15 @@ class CodexAgentRuntime:
             return self._failed_result(thread_id, exc, notifications)
         return self._normalize_result(thread_id, turn, notifications)
 
-    async def resume_agent(self, thread_id: str, task: str) -> AgentResult:
+    async def resume_agent(
+        self,
+        thread_id: str,
+        task: str,
+        role: AgentRole,
+        workspace: Path,
+        schema: Mapping[str, object],
+        session_dir: Path,
+    ) -> AgentResult:
         notifications: list[dict[str, Any]] = []
         try:
             async with self._client_factory() as client:
@@ -145,6 +170,8 @@ class CodexAgentRuntime:
                         "model_reasoning_effort": self.reasoning,
                         "project_root_markers": ["manifest.json"],
                     },
+                    cwd=str(workspace.resolve()),
+                    developer_instructions=_role_instructions(role),
                     model=self.model,
                     model_provider=self.provider,
                     sandbox=self._sandbox,
@@ -156,6 +183,7 @@ class CodexAgentRuntime:
                     {
                         "effort": self.reasoning,
                         "model": self.model,
+                        "output_schema": dict(schema),
                         "sandbox": self._sandbox,
                     },
                     notifications,

@@ -35,7 +35,7 @@ from .domain import (
 )
 from .errors import InfrastructureError, StateError
 from .manuscript import BuildResult, FrozenRevision, ManuscriptBundle, ManuscriptManager, SourceFile
-from .runtime import CODEX_SDK_VERSION, AgentRuntime, CodexAgentRuntime
+from .runtime import RUNTIME_SDK_VERSIONS, AgentRuntime, CodexAgentRuntime, RuntimeUnavailable
 from .schemas import ExactEdit, ReviewOutput, RevisionOutput, VerificationOutput, output_schema, parse_output
 from .storage import Database
 
@@ -64,7 +64,7 @@ class Armarius:
         self.database = database
         self.artifacts = artifacts
         self.manuscript = manuscript
-        self.runtime_factory = runtime_factory or self._codex_runtime
+        self.runtime_factory = runtime_factory or self._runtime_for_route
         self.state_dir = repo / ".scriptorium"
         self.runs_dir = self.state_dir / "runs"
         self.runs_dir.mkdir(parents=True, exist_ok=True)
@@ -395,6 +395,7 @@ class Armarius:
         run: Run,
         route_override: str | None = None,
         feedback: str | None = None,
+        resume_attempt: Attempt | None = None,
     ) -> None:
         confirmed = self.database.list_findings(run.id, [FindingStatus.CONFIRMED])
         if not confirmed:
@@ -402,7 +403,6 @@ class Armarius:
             return
         route = self._route_for_run(run, AgentRole.REVISION, route_override)
         prompt = self._revision_prompt(run, confirmed, feedback)
-        resume_thread = self._latest_thread(run.id, "revision") if feedback else None
         outcome = await self._execute_task(
             run=run,
             stage="revision",
@@ -417,7 +417,7 @@ class Armarius:
                 self._sources_for_run(run),
                 self._run_dir(run.id) / "snapshot",
             ),
-            resume_thread=resume_thread,
+            resume_attempt=resume_attempt,
         )
         if outcome is None:
             if self.database.get_run(run.id).status != RunStatus.WAITING_BUDGET:
@@ -447,6 +447,7 @@ class Armarius:
             diff_digest=diff_artifact.digest,
             summary=output.summary,
             edits=tuple(edit.model_dump(mode="json") for edit in output.edits),
+            attempt_id=outcome.attempt.id,
             build_succeeded=True,
         )
         target = candidate.parent / patch.id
@@ -488,8 +489,25 @@ class Armarius:
         if patch.status == PatchStatus.REJECTED:
             decisions = self.database.list_decisions("patch", patch.id)
             feedback = decisions[-1].reason
+            resume_attempt = None
+            route_override = None
+            if patch.attempt_id is not None:
+                resume_attempt = self.database.get_attempt(patch.attempt_id)
+                generating_task = self.database.get_task(resume_attempt.task_id)
+                if (
+                    generating_task.run_id != run.id
+                    or generating_task.stage != "revision"
+                    or generating_task.role != AgentRole.REVISION
+                ):
+                    raise InfrastructureError(f"patch {patch.id} has an invalid generating attempt")
+                route_override = generating_task.route
             self.database.update_run(run.id, RunStatus.REVISING)
-            await self._run_revision(self.database.get_run(run.id), feedback=feedback)
+            await self._run_revision(
+                self.database.get_run(run.id),
+                route_override=route_override,
+                feedback=feedback,
+                resume_attempt=resume_attempt,
+            )
             return
         if patch.status == PatchStatus.APPROVED:
             self.database.update_run(run.id, RunStatus.VERIFYING)
@@ -584,7 +602,7 @@ class Armarius:
         schema_kind: str,
         base_bundle: ManuscriptBundle,
         validator: Callable[[Any], None],
-        resume_thread: str | None = None,
+        resume_attempt: Attempt | None = None,
     ) -> TaskOutcome | None:
         schema = dict(run.frozen_config["schemas"][schema_kind]["content"])
         prompt_artifact = self._record_text(prompt, "text/markdown; charset=utf-8")
@@ -626,24 +644,36 @@ class Armarius:
 
         workspace = self._task_workspace(run.id, task.id, base_bundle.workspace, prompt)
         bundle_digest = self._directory_digest(workspace)
+        session_dir = self._session_dir(run.id, role, route)
         runtime = self.runtime_factory(route)
         previous_attempts = self.database.list_attempts(task.id)
         previous = previous_attempts[-1] if previous_attempts else None
-        thread_id = resume_thread or (
-            previous.thread_id
-            if previous and previous.status in {AttemptStatus.FAILED, AttemptStatus.INTERRUPTED}
-            else None
-        )
+        if resume_attempt is not None and not self._attempt_matches_route(resume_attempt, route):
+            raise InfrastructureError(
+                f"attempt {resume_attempt.id} does not belong to frozen runtime route {route.name!r}"
+            )
+        thread_id = resume_attempt.thread_id if resume_attempt is not None else None
+        if (
+            resume_attempt is None
+            and previous is not None
+            and previous.status in {AttemptStatus.FAILED, AttemptStatus.INTERRUPTED}
+            and self._attempt_matches_route(previous, route)
+        ):
+            thread_id = previous.thread_id
         invocation_prompt = prompt
         invocation_prompt_digest = prompt_artifact.digest
         correction_used = False
         if (
-            resume_thread is None
+            resume_attempt is None
             and previous is not None
             and previous.error
             and previous.error.startswith("invalid structured output:")
         ):
-            if previous.prompt_digest == prompt_artifact.digest and previous.thread_id:
+            if (
+                previous.prompt_digest == prompt_artifact.digest
+                and previous.thread_id
+                and self._attempt_matches_route(previous, route)
+            ):
                 invocation_prompt = self._correction_prompt(previous.error)
                 invocation_prompt_digest = self._record_text(
                     invocation_prompt,
@@ -655,8 +685,8 @@ class Armarius:
         while True:
             attempt = self.database.begin_attempt(
                 task.id,
-                runtime_name=run.frozen_config["runtime"]["name"],
-                runtime_version=run.frozen_config["runtime"]["version"],
+                runtime_name=route.runtime,
+                runtime_version=route.runtime_version,
                 model=route.model,
                 model_provider=route.model_provider,
                 prompt_digest=invocation_prompt_digest,
@@ -664,9 +694,22 @@ class Armarius:
                 bundle_digest=bundle_digest,
             )
             if thread_id is None:
-                result = await runtime.run_agent(invocation_prompt, role, workspace, schema)
+                result = await runtime.run_agent(
+                    invocation_prompt,
+                    role,
+                    workspace,
+                    schema,
+                    session_dir,
+                )
             else:
-                result = await runtime.resume_agent(thread_id, invocation_prompt)
+                result = await runtime.resume_agent(
+                    thread_id,
+                    invocation_prompt,
+                    role,
+                    workspace,
+                    schema,
+                    session_dir,
+                )
             output_artifact = (
                 self._record_text(result.final_response, "application/json")
                 if result.final_response is not None
@@ -678,20 +721,26 @@ class Armarius:
             )
             error = result.error
             parsed: ReviewOutput | RevisionOutput | VerificationOutput | None = None
-            if result.status == "completed" and result.final_response is None:
+            provenance_error = self._result_provenance_error(result, route)
+            if provenance_error is not None:
+                error = provenance_error
+            if provenance_error is None and result.status == "completed" and result.final_response is None:
                 error = "invalid structured output: completed agent turn returned no final response"
-            if result.status == "completed" and result.final_response is not None:
+            if result.status == "completed" and result.final_response is not None and provenance_error is None:
                 try:
                     parsed = parse_output(schema_kind, result.final_response)
                     validator(parsed)
                 except (ValidationError, ValueError, StateError) as exc:
                     parsed = None
                     error = f"invalid structured output: {exc}"
-            terminal = (
-                AttemptStatus.COMPLETED
-                if result.status == "completed" and parsed is not None
-                else AttemptStatus.INTERRUPTED if result.status == "interrupted" else AttemptStatus.FAILED
-            )
+            if provenance_error is not None:
+                terminal = AttemptStatus.FAILED
+            elif result.status == "completed" and parsed is not None:
+                terminal = AttemptStatus.COMPLETED
+            elif result.status == "interrupted":
+                terminal = AttemptStatus.INTERRUPTED
+            else:
+                terminal = AttemptStatus.FAILED
             cost = route.estimate_cost(
                 result.usage.input_tokens,
                 result.usage.cached_input_tokens,
@@ -854,16 +903,18 @@ class Armarius:
             kind: {"digest": digest_json(output_schema(kind)), "content": output_schema(kind)}
             for kind in ("review", "revision", "verification")
         }
+        frozen_local = self.local_config.frozen_dict()
+        for route in frozen_local["routes"].values():
+            route["runtime_version"] = RUNTIME_SDK_VERSIONS[route["runtime"]]
         return {
             "project": project.frozen_dict(),
-            "local": self.local_config.frozen_dict(),
+            "local": frozen_local,
             "config_files": {
                 "scriptorium.toml": {
                     "digest": ArtifactStore.digest_bytes(project_config_text.encode("utf-8")),
                     "content": project_config_text,
                 }
             },
-            "runtime": {"name": "codex", "version": CODEX_SDK_VERSION},
             "profile_roles": list(project.profiles[profile]),
             "role_routes": {role: self.local_config.roles[role] for role in roles},
             "prompts": prompts,
@@ -926,9 +977,15 @@ class Armarius:
         local = run.frozen_config["local"]
         route_name = override or run.frozen_config["role_routes"][role.value]
         try:
-            values = local["routes"][route_name]
+            values = dict(local["routes"][route_name])
         except KeyError as exc:
             raise StateError(f"route {route_name!r} was not frozen for run {run.id}") from exc
+        if "runtime" not in values:
+            legacy_runtime = run.frozen_config.get("runtime", {})
+            values["runtime"] = legacy_runtime.get("name", "codex")
+        if not values.get("runtime_version"):
+            legacy_runtime = run.frozen_config.get("runtime", {})
+            values["runtime_version"] = legacy_runtime.get("version") or RUNTIME_SDK_VERSIONS[values["runtime"]]
         return RouteConfig(**values)
 
     def _project_for_run(self, run: Run) -> ProjectConfig:
@@ -987,15 +1044,26 @@ class Armarius:
             )
         )
 
-    def _latest_thread(self, run_id: str, stage: str) -> str | None:
-        attempts = [
-            attempt
-            for task in self.database.list_tasks(run_id)
-            if task.stage == stage
-            for attempt in self.database.list_attempts(task.id)
-            if attempt.thread_id
-        ]
-        return attempts[-1].thread_id if attempts else None
+    @staticmethod
+    def _attempt_matches_route(attempt: Attempt, route: RouteConfig) -> bool:
+        return (
+            attempt.runtime_name == route.runtime
+            and attempt.runtime_version == route.runtime_version
+            and attempt.model == route.model
+            and attempt.model_provider == route.model_provider
+        )
+
+    @staticmethod
+    def _result_provenance_error(result: Any, route: RouteConfig) -> str | None:
+        expected = (route.runtime, route.runtime_version, route.model, route.model_provider)
+        actual = (result.runtime_name, result.runtime_version, result.model, result.model_provider)
+        if actual == expected:
+            return None
+        return (
+            "runtime provenance mismatch: "
+            f"expected {expected[0]}=={expected[1]} {expected[3]}/{expected[2]}, "
+            f"got {actual[0]}=={actual[1]} {actual[3]}/{actual[2]}"
+        )
 
     def _status_before_failure(self, run_id: str) -> RunStatus:
         for event in reversed(self.database.list_events(run_id)):
@@ -1019,6 +1087,18 @@ class Armarius:
         shutil.copytree(source, workspace)
         (workspace / "task.md").write_text(prompt, encoding="utf-8")
         return workspace
+
+    def _session_dir(self, run_id: str, role: AgentRole, route: RouteConfig) -> Path:
+        identity = digest_json(
+            {
+                "runtime": route.runtime,
+                "role": role.value,
+                "route": route.name,
+            }
+        )
+        path = self._run_dir(run_id) / "sessions" / identity
+        path.mkdir(parents=True, exist_ok=True)
+        return path
 
     def _build_copy(self, source: Path, destination: Path, manuscript: ManuscriptConfig) -> BuildResult:
         if destination.exists():
@@ -1086,8 +1166,29 @@ class Armarius:
             self.database.update_run(run_id, RunStatus.FAILED, str(exc))
 
     @staticmethod
-    def _codex_runtime(route: RouteConfig) -> AgentRuntime:
-        return CodexAgentRuntime(
+    def _runtime_for_route(route: RouteConfig) -> AgentRuntime:
+        expected_version = RUNTIME_SDK_VERSIONS.get(route.runtime)
+        if expected_version is None:
+            raise RuntimeUnavailable(f"Unsupported runtime: {route.runtime}")
+        if route.runtime_version != expected_version:
+            raise RuntimeUnavailable(
+                f"Frozen route {route.name!r} requires {route.runtime}=={route.runtime_version}, "
+                f"but this Scriptorium build supports {expected_version}."
+            )
+        runtime_type: type[AgentRuntime]
+        if route.runtime == "codex":
+            runtime_type = CodexAgentRuntime
+        elif route.runtime == "claude_code":
+            from .claude_runtime import ClaudeCodeAgentRuntime
+
+            runtime_type = ClaudeCodeAgentRuntime
+        elif route.runtime == "antigravity":
+            from .antigravity_runtime import AntigravityAgentRuntime
+
+            runtime_type = AntigravityAgentRuntime
+        else:
+            raise RuntimeUnavailable(f"Unsupported runtime: {route.runtime}")
+        return runtime_type(
             route=route.name,
             model=route.model,
             provider=route.model_provider,

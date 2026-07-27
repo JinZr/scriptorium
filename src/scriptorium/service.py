@@ -6,6 +6,7 @@ from enum import Enum
 import fcntl
 from hashlib import sha256
 from importlib import metadata
+import os
 from pathlib import Path
 import shutil
 import sqlite3
@@ -17,7 +18,7 @@ from .config import find_repo, load_local_config, load_project_config, validate_
 from .domain import FindingSeverity, FindingStatus, Patch, PatchStatus, RunStatus, TaskStatus, VerificationResult
 from .errors import ConfigurationError, InfrastructureError, NotFoundError, StateError
 from .manuscript import ManuscriptManager
-from .runtime import CODEX_SDK_VERSION
+from .runtime import RUNTIME_SDK_VERSIONS
 from .storage import ConflictError, Database, NotFoundError as StorageNotFoundError, StorageError
 from .workflow import Armarius, RuntimeFactory
 
@@ -106,19 +107,41 @@ class ScriptoriumService:
             engine or f"{self.project_config.manuscript.engine} was not found",
         )
         try:
-            version = metadata.version("openai-codex")
-            codex_ok = version == CODEX_SDK_VERSION
-            codex_message = version
-        except metadata.PackageNotFoundError:
-            codex_ok = False
-            codex_message = "openai-codex is not installed"
-        check("codex_sdk", codex_ok, codex_message)
-        try:
             validate_ready(self.project_config, self.local_config, selected_profile, budget_usd)
         except ConfigurationError as exc:
             check("model_routes", False, str(exc))
+            selected_runtimes: set[str] = set()
         else:
             check("model_routes", True, f"profile {selected_profile}")
+            role_keys = (*self.project_config.profiles[selected_profile], "revision", "verification")
+            selected_runtimes = {self.local_config.route_for_role(role_key).runtime for role_key in role_keys}
+        package_names = {
+            "codex": "openai-codex",
+            "claude_code": "claude-agent-sdk",
+            "antigravity": "google-antigravity",
+        }
+        runtime_check_names: set[str] = set()
+        for runtime_name in sorted(selected_runtimes):
+            package_name = package_names[runtime_name]
+            check_name = "codex_sdk" if runtime_name == "codex" else f"runtime_{runtime_name}_sdk"
+            runtime_check_names.add(check_name)
+            try:
+                version = metadata.version(package_name)
+                expected = RUNTIME_SDK_VERSIONS[runtime_name]
+                ok = version == expected
+                message = version if ok else f"expected {expected}, found {version}"
+            except metadata.PackageNotFoundError:
+                ok = False
+                message = f"{package_name} is not installed"
+            check(check_name, ok, message)
+        if "antigravity" in selected_runtimes:
+            antigravity_auth_ok = bool(os.environ.get("GEMINI_API_KEY", "").strip())
+            check(
+                "antigravity_auth",
+                antigravity_auth_ok,
+                "GEMINI_API_KEY is set" if antigravity_auth_ok else "GEMINI_API_KEY is not set",
+            )
+            runtime_check_names.add("antigravity_auth")
         check("sqlite", True, str(self.state_dir / "state.sqlite3"))
 
         failed = [item for item in checks if not item["ok"]]
@@ -127,9 +150,8 @@ class ScriptoriumService:
             "manuscript_main",
             "latexmk",
             "latex_engine",
-            "codex_sdk",
             "sqlite",
-        }
+        } | runtime_check_names
         exit_code = 3 if any(item["name"] in infrastructure_names for item in failed) else 2 if failed else 0
         return {
             "ok": not failed,

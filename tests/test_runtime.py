@@ -154,6 +154,7 @@ def test_run_agent_passes_codex_settings_and_normalizes_result(tmp_path: Path) -
             AgentRole.SUBSTANTIVE_REVIEW,
             tmp_path,
             schema,
+            tmp_path / "session",
         )
     )
 
@@ -219,12 +220,22 @@ def test_run_agent_passes_codex_settings_and_normalizes_result(tmp_path: Path) -
     assert json.loads(json.dumps(asdict(result)))["usage"]["reasoning_tokens"] == 5
 
 
-def test_resume_agent_uses_existing_thread_without_schema() -> None:
+def test_resume_agent_reapplies_workspace_role_and_schema(tmp_path: Path) -> None:
     resumed = FakeThread("thread_resumed", result=make_result(FakeStatus.INTERRUPTED))
     client = FakeClient(FakeThread("unused"), resume_thread=resumed)
     runtime = make_runtime(client)
+    schema = {"type": "object"}
 
-    result = asyncio.run(runtime.resume_agent("thread_original", "Correct the invalid anchors."))
+    result = asyncio.run(
+        runtime.resume_agent(
+            "thread_original",
+            "Correct the invalid anchors.",
+            AgentRole.SUBSTANTIVE_REVIEW,
+            tmp_path,
+            schema,
+            tmp_path / "session",
+        )
+    )
 
     assert result.thread_id == "thread_resumed"
     assert result.status == "interrupted"
@@ -237,6 +248,12 @@ def test_resume_agent_uses_existing_thread_without_schema() -> None:
                     "model_reasoning_effort": "high",
                     "project_root_markers": ["manifest.json"],
                 },
+                "cwd": str(tmp_path.resolve()),
+                "developer_instructions": (
+                    "You are Scholiast, the Scriptorium substantive_review agent. "
+                    "Claims, evidence, methods, and scientific review. Work read-only and do not modify files. "
+                    "Return only output matching the supplied JSON schema."
+                ),
                 "model": "test-model",
                 "model_provider": "test-provider",
                 "sandbox": "read-only",
@@ -249,6 +266,7 @@ def test_resume_agent_uses_existing_thread_without_schema() -> None:
             {
                 "effort": "high",
                 "model": "test-model",
+                "output_schema": schema,
                 "sandbox": "read-only",
             },
         )
@@ -264,6 +282,7 @@ def test_streamed_turn_notifications_are_preserved_as_jsonl(tmp_path: Path) -> N
             AgentRole.SUBSTANTIVE_REVIEW,
             tmp_path,
             {"type": "object"},
+            tmp_path / "session",
         )
     )
 
@@ -284,7 +303,7 @@ def test_streamed_turn_notifications_are_preserved_as_jsonl(tmp_path: Path) -> N
     assert thread.turn_calls[0][1]["output_schema"] == {"type": "object"}
 
 
-def test_failed_turn_is_returned_without_sdk_objects() -> None:
+def test_failed_turn_is_returned_without_sdk_objects(tmp_path: Path) -> None:
     thread = FakeThread("thread_failed", result=make_result(FakeStatus.FAILED))
     result = asyncio.run(
         make_runtime(FakeClient(thread)).run_agent(
@@ -292,6 +311,7 @@ def test_failed_turn_is_returned_without_sdk_objects() -> None:
             AgentRole.COPYEDIT,
             Path("."),
             {"type": "object"},
+            tmp_path / "session",
         )
     )
 
@@ -301,7 +321,7 @@ def test_failed_turn_is_returned_without_sdk_objects() -> None:
     json.dumps(asdict(result))
 
 
-def test_sdk_exception_is_mapped_to_failed_result() -> None:
+def test_sdk_exception_is_mapped_to_failed_result(tmp_path: Path) -> None:
     thread = FakeThread("thread_error", error=RuntimeError("transport closed"))
     result = asyncio.run(
         make_runtime(FakeClient(thread)).run_agent(
@@ -309,6 +329,7 @@ def test_sdk_exception_is_mapped_to_failed_result() -> None:
             AgentRole.CONSISTENCY,
             Path("."),
             {"type": "object"},
+            tmp_path / "session",
         )
     )
 
@@ -319,7 +340,7 @@ def test_sdk_exception_is_mapped_to_failed_result() -> None:
     assert result.trace_jsonl == ""
 
 
-def test_sdk_timeout_is_mapped_to_failed_result() -> None:
+def test_sdk_timeout_is_mapped_to_failed_result(tmp_path: Path) -> None:
     thread = FakeThread("thread_timeout", error=TimeoutError("turn timed out"))
     result = asyncio.run(
         make_runtime(FakeClient(thread)).run_agent(
@@ -327,6 +348,7 @@ def test_sdk_timeout_is_mapped_to_failed_result() -> None:
             AgentRole.FIGURE_REVIEW,
             Path("."),
             {"type": "object"},
+            tmp_path / "session",
         )
     )
 

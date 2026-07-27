@@ -313,6 +313,7 @@ class Patch:
     created_at: str = field(default_factory=utc_now)
     updated_at: str = field(default_factory=utc_now)
     applied_at: str | None = None
+    attempt_id: str | None = None
 
 
 @dataclass(frozen=True)

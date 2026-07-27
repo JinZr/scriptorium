@@ -31,7 +31,7 @@ from scriptorium.domain import (
     validate_task_transition,
 )
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 
 _MIGRATION_1 = """
@@ -221,6 +221,14 @@ COMMIT;
 """
 
 
+_MIGRATION_2 = """
+BEGIN IMMEDIATE;
+ALTER TABLE patches ADD COLUMN attempt_id TEXT REFERENCES attempts(id) ON DELETE RESTRICT;
+INSERT INTO schema_migrations (version, applied_at) VALUES (2, CURRENT_TIMESTAMP);
+COMMIT;
+"""
+
+
 class StorageError(RuntimeError):
     pass
 
@@ -262,6 +270,9 @@ class Database:
                 )
             if version == 0:
                 self.connection.executescript(_MIGRATION_1)
+                version = 1
+            if version == 1:
+                self.connection.executescript(_MIGRATION_2)
 
     @contextmanager
     def transaction(self) -> Iterator[sqlite3.Connection]:
@@ -973,14 +984,16 @@ class Database:
         return decision
 
     def create_patch(self, patch: Patch) -> Patch:
+        if patch.attempt_id is None:
+            raise ValueError("new patches require a generating attempt_id")
         with self.transaction() as connection:
             try:
                 connection.execute(
                     """
                     INSERT INTO patches (
-                        id, run_id, base_commit, diff_digest, summary, edits_json, status,
-                        build_succeeded, created_at, updated_at, applied_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        id, run_id, base_commit, diff_digest, summary, edits_json, attempt_id,
+                        status, build_succeeded, created_at, updated_at, applied_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         patch.id,
@@ -989,6 +1002,7 @@ class Database:
                         patch.diff_digest,
                         patch.summary,
                         canonical_json(patch.edits),
+                        patch.attempt_id,
                         patch.status.value,
                         int(patch.build_succeeded),
                         patch.created_at,
@@ -1005,7 +1019,11 @@ class Database:
                     event_type="patch.created",
                     entity_type="patch",
                     entity_id=patch.id,
-                    payload={"status": patch.status.value, "diff_digest": patch.diff_digest},
+                    payload={
+                        "status": patch.status.value,
+                        "diff_digest": patch.diff_digest,
+                        "attempt_id": patch.attempt_id,
+                    },
                 ),
             )
         return patch
@@ -1353,6 +1371,7 @@ class Database:
             diff_digest=row["diff_digest"],
             summary=row["summary"],
             edits=tuple(json.loads(row["edits_json"])),
+            attempt_id=row["attempt_id"],
             status=PatchStatus(row["status"]),
             build_succeeded=bool(row["build_succeeded"]),
             created_at=row["created_at"],
