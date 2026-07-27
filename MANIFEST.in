@@ -1,0 +1,4 @@
+recursive-include .codex-plugin *
+recursive-include docs *.md
+recursive-include skills *.md *.yaml
+include requirements.txt requirements-dev.txt

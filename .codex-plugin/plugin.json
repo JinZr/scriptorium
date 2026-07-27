@@ -1,0 +1,25 @@
+{
+  "name": "scriptorium",
+  "version": "0.1.0",
+  "description": "Operate Scriptorium manuscript review, revision, and verification workflows through its CLI.",
+  "author": {
+    "name": "Scriptorium contributors"
+  },
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Scriptorium",
+    "shortDescription": "Review and revise Git-managed LaTeX manuscripts",
+    "longDescription": "Start, inspect, resume, and complete auditable Scriptorium review workflows without bypassing the CLI or human approval gates.",
+    "developerName": "Scriptorium contributors",
+    "category": "Productivity",
+    "capabilities": [
+      "Read",
+      "Write"
+    ],
+    "defaultPrompt": [
+      "Check whether this LaTeX project is ready for a Scriptorium review.",
+      "Show the status and unresolved findings for a Scriptorium run.",
+      "Resume an interrupted Scriptorium review after checking its state."
+    ]
+  }
+}

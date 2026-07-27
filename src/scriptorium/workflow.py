@@ -1,0 +1,1095 @@
+from __future__ import annotations
+
+import asyncio
+from dataclasses import asdict, dataclass
+from importlib import resources
+import json
+import math
+from pathlib import Path
+import shutil
+from typing import Any, Callable
+
+from pydantic import ValidationError
+
+from .artifacts import ArtifactStore
+from .config import LocalConfig, ManuscriptConfig, ProjectConfig, RouteConfig, load_project_config, validate_ready
+from .domain import (
+    AgentRole,
+    Attempt,
+    AttemptStatus,
+    Event,
+    Finding,
+    FindingSeverity,
+    FindingStatus,
+    Patch,
+    PatchStatus,
+    Run,
+    RunStatus,
+    Task,
+    TaskStatus,
+    Verification,
+    VerificationResult,
+    canonical_json,
+    digest_json,
+    new_id,
+)
+from .errors import InfrastructureError, StateError
+from .manuscript import BuildResult, FrozenRevision, ManuscriptBundle, ManuscriptManager, SourceFile
+from .runtime import CODEX_SDK_VERSION, AgentRuntime, CodexAgentRuntime
+from .schemas import ExactEdit, ReviewOutput, RevisionOutput, VerificationOutput, output_schema, parse_output
+from .storage import Database
+
+RuntimeFactory = Callable[[RouteConfig], AgentRuntime]
+
+
+@dataclass(frozen=True)
+class TaskOutcome:
+    task: Task
+    attempt: Attempt
+    output: ReviewOutput | RevisionOutput | VerificationOutput
+
+
+class Armarius:
+    def __init__(
+        self,
+        repo: Path,
+        local_config: LocalConfig,
+        database: Database,
+        artifacts: ArtifactStore,
+        manuscript: ManuscriptManager,
+        runtime_factory: RuntimeFactory | None = None,
+    ) -> None:
+        self.repo = repo
+        self.local_config = local_config
+        self.database = database
+        self.artifacts = artifacts
+        self.manuscript = manuscript
+        self.runtime_factory = runtime_factory or self._codex_runtime
+        self.state_dir = repo / ".scriptorium"
+        self.runs_dir = self.state_dir / "runs"
+        self.runs_dir.mkdir(parents=True, exist_ok=True)
+
+    async def start_run(
+        self,
+        revision_name: str,
+        profile: str,
+        budget_usd: float | None,
+    ) -> Run:
+        if budget_usd is not None and (not math.isfinite(budget_usd) or budget_usd < 0):
+            raise StateError("budget_usd must be a finite non-negative number")
+        revision = self.manuscript.resolve_revision(revision_name)
+        run_id = new_id("run")
+        run_dir = self._run_dir(run_id)
+        snapshot = run_dir / "snapshot"
+        self.manuscript.create_snapshot(revision, snapshot)
+        project = load_project_config(snapshot)
+        validate_ready(project, self.local_config, profile, budget_usd)
+        sources = self.manuscript.scan_sources(snapshot, project.manuscript.main)
+        frozen_config = self._freeze_config(
+            project,
+            profile,
+            sources,
+            (snapshot / "scriptorium.toml").read_text(encoding="utf-8"),
+        )
+        run = Run(
+            id=run_id,
+            repository=str(self.repo),
+            commit_sha=revision.commit_sha,
+            tree_sha=revision.tree_sha,
+            profile=profile,
+            config_digest=digest_json(frozen_config),
+            frozen_config=frozen_config,
+            budget_usd=budget_usd,
+        )
+        self.database.create_run(run)
+        try:
+            await self._prepare_and_review(run, project, revision, sources)
+        except Exception as exc:
+            self._fail_active_run(run.id, exc)
+            raise
+        return self.database.get_run(run.id)
+
+    async def resume_run(self, run_id: str) -> Run:
+        self.database.interrupt_running_attempts(run_id)
+        run = self.database.get_run(run_id)
+        if run.status in {RunStatus.COMPLETED, RunStatus.CANCELLED}:
+            return run
+        if run.status == RunStatus.READY_TO_APPLY:
+            if not self.database.list_findings(run.id, [FindingStatus.CONFIRMED]):
+                return self.database.update_run(run.id, RunStatus.COMPLETED)
+            return run
+        if run.status == RunStatus.FAILED:
+            run = self.database.update_run(run.id, self._status_before_failure(run.id))
+        try:
+            if run.status == RunStatus.PREPARING:
+                project = self._project_for_run(run)
+                sources = self._sources_for_run(run)
+                revision = FrozenRevision(run.commit_sha, run.tree_sha)
+                await self._prepare_and_review(run, project, revision, sources)
+            elif run.status == RunStatus.REVIEWING:
+                await self._run_reviews(run)
+            elif run.status == RunStatus.AWAITING_DECISION:
+                await self._advance_after_decisions(run)
+            elif run.status == RunStatus.REVISING:
+                await self._run_revision(run)
+            elif run.status == RunStatus.AWAITING_PATCH_APPROVAL:
+                await self._advance_after_patch_decision(run)
+            elif run.status == RunStatus.VERIFYING:
+                await self._run_verification(run)
+            elif run.status == RunStatus.WAITING_BUDGET:
+                await self._resume_budget_wait(run)
+        except Exception as exc:
+            self._fail_active_run(run.id, exc)
+            raise
+        return self.database.get_run(run_id)
+
+    async def retry_task(self, run_id: str, task_id: str, route_override: str | None = None) -> Run:
+        self.database.interrupt_running_attempts(run_id)
+        run = self.database.get_run(run_id)
+        task = self.database.get_task(task_id)
+        if task.run_id != run_id:
+            raise StateError(f"task {task_id} does not belong to run {run_id}")
+        if task.status == TaskStatus.COMPLETED:
+            raise StateError(f"task {task_id} is already completed")
+        if run.status == RunStatus.FAILED:
+            target = {
+                "review": RunStatus.REVIEWING,
+                "revision": RunStatus.REVISING,
+                "verification": RunStatus.VERIFYING,
+            }.get(task.stage)
+            if target is None:
+                raise StateError(f"failed run cannot retry task stage {task.stage}")
+            run = self.database.update_run(run.id, target)
+        if run.status == RunStatus.WAITING_BUDGET:
+            target = {
+                "review": RunStatus.REVIEWING,
+                "revision": RunStatus.REVISING,
+                "verification": RunStatus.VERIFYING,
+            }.get(task.stage)
+            if target is None:
+                raise StateError(f"unknown task stage: {task.stage}")
+            run = self.database.update_run(run.id, target)
+        if task.stage == "review":
+            if run.status != RunStatus.REVIEWING:
+                raise StateError(f"review tasks cannot be retried while run is {run.status.value}")
+            await self._run_review_role(run, task.role, route_override)
+            await self._advance_review_if_complete(run)
+        elif task.stage == "revision":
+            if run.status != RunStatus.REVISING:
+                raise StateError(f"revision tasks cannot be retried while run is {run.status.value}")
+            await self._run_revision(run, route_override=route_override)
+        elif task.stage == "verification":
+            if run.status != RunStatus.VERIFYING:
+                raise StateError(f"verification tasks cannot be retried while run is {run.status.value}")
+            await self._run_verification(run, route_override=route_override)
+        else:
+            raise StateError(f"unknown task stage: {task.stage}")
+        return self.database.get_run(run_id)
+
+    async def _resume_budget_wait(self, run: Run) -> None:
+        incomplete = [
+            task
+            for task in self.database.list_tasks(run.id)
+            if task.status in {TaskStatus.PENDING, TaskStatus.FAILED, TaskStatus.INTERRUPTED}
+        ]
+        if not incomplete:
+            raise StateError("the run is waiting for budget but has no resumable task")
+        stage = incomplete[-1].stage
+        target = {
+            "review": RunStatus.REVIEWING,
+            "revision": RunStatus.REVISING,
+            "verification": RunStatus.VERIFYING,
+        }.get(stage)
+        if target is None:
+            raise StateError(f"unknown task stage: {stage}")
+        self.database.update_run(run.id, target)
+        current = self.database.get_run(run.id)
+        if stage == "review":
+            await self._run_reviews(current)
+        elif stage == "revision":
+            await self._run_revision(current)
+        else:
+            await self._run_verification(current)
+
+    def cancel_run(self, run_id: str, reason: str) -> Run:
+        if not reason.strip():
+            raise StateError("cancellation reason is required")
+        run = self.database.get_run(run_id)
+        if run.status in {RunStatus.COMPLETED, RunStatus.FAILED, RunStatus.CANCELLED}:
+            raise StateError(f"run cannot be cancelled while {run.status.value}")
+        self.database.interrupt_running_attempts(run_id)
+        self.database.cancel_incomplete_tasks(run_id)
+        cancelled = self.database.update_run(run_id, RunStatus.CANCELLED)
+        self.database.append_event(
+            Event(
+                run_id=run_id,
+                event_type="run.cancelled",
+                entity_type="run",
+                entity_id=run_id,
+                payload={"reason": reason},
+            )
+        )
+        return cancelled
+
+    async def _prepare_and_review(
+        self,
+        run: Run,
+        project: ProjectConfig,
+        revision: FrozenRevision,
+        sources: tuple[SourceFile, ...],
+    ) -> None:
+        run_dir = self._run_dir(run.id)
+        snapshot = run_dir / "snapshot"
+        build = self._build_copy(snapshot, run_dir / "build" / "base", project.manuscript)
+        self._record_text(build.log, "text/plain; charset=utf-8")
+        self._record_file(build.pdf_path, "application/pdf")
+        bundle = self.manuscript.create_bundle(
+            snapshot,
+            run_dir / "bundle",
+            revision,
+            sources,
+            build.pdf_path,
+        )
+        self._record_file(snapshot / "scriptorium.toml", "application/toml")
+        for source in sources:
+            self._record_file(snapshot / source.path, "application/octet-stream")
+        self._record_file(bundle.workspace / "manifest.json", "application/json")
+        self._record_file(bundle.workspace / "source-map.json", "application/json")
+        for page in sorted((bundle.workspace / "pages").glob("page-*.png")):
+            self._record_file(page, "image/png")
+        manifest = {
+            "run_id": run.id,
+            "commit_sha": revision.commit_sha,
+            "tree_sha": revision.tree_sha,
+            "profile": run.profile,
+            "config_digest": run.config_digest,
+            "budget_usd": run.budget_usd,
+            "sources": [asdict(source) for source in sources],
+            "bundle_digest": self._directory_digest(bundle.workspace),
+        }
+        self._write_json(run_dir / "manifest.json", manifest)
+        self._record_text(canonical_json(manifest), "application/json")
+        self.database.update_run(run.id, RunStatus.REVIEWING)
+        await self._run_reviews(self.database.get_run(run.id))
+
+    async def _run_reviews(self, run: Run) -> None:
+        roles = [AgentRole(role) for role in self._profile_roles(run)]
+        semaphore = asyncio.Semaphore(self._max_concurrency(run))
+
+        async def execute(role: AgentRole) -> TaskOutcome | None:
+            async with semaphore:
+                return await self._run_review_role(run, role)
+
+        await asyncio.gather(*(execute(role) for role in roles))
+        await self._advance_review_if_complete(run)
+
+    async def _run_review_role(
+        self,
+        run: Run,
+        role: AgentRole,
+        route_override: str | None = None,
+    ) -> TaskOutcome | None:
+        bundle = self._bundle_for_run(run)
+        route = self._route_for_run(run, role, route_override)
+        prompt = self._review_prompt(run, role)
+        outcome = await self._execute_task(
+            run=run,
+            stage="review",
+            role=role,
+            route=route,
+            prompt=prompt,
+            schema_kind="review",
+            base_bundle=bundle,
+            validator=lambda output: self._validate_review_output(
+                output,
+                self._sources_for_run(run),
+                bundle.pdf_pages,
+                self._run_dir(run.id) / "snapshot",
+            ),
+        )
+        if outcome is None:
+            return None
+        output = outcome.output
+        assert isinstance(output, ReviewOutput)
+        for candidate in output.findings:
+            evidence = tuple(item.model_dump(mode="json") for item in candidate.evidence)
+            fingerprint = digest_json(
+                {
+                    "category": candidate.category,
+                    "severity": candidate.severity.value,
+                    "title": candidate.title,
+                    "claim": candidate.claim,
+                    "evidence": evidence,
+                    "explanation": candidate.explanation,
+                    "suggested_action": candidate.suggested_action,
+                    "confidence": candidate.confidence,
+                }
+            )
+            finding = Finding(
+                run_id=run.id,
+                task_id=outcome.task.id,
+                attempt_id=outcome.attempt.id,
+                fingerprint=fingerprint,
+                role=role,
+                category=candidate.category,
+                severity=FindingSeverity(candidate.severity.value),
+                title=candidate.title,
+                claim=candidate.claim,
+                evidence=evidence,
+                explanation=candidate.explanation,
+                suggested_action=candidate.suggested_action,
+                confidence=candidate.confidence,
+            )
+            stored = self.database.get_or_create_finding(finding)
+            if stored.id != finding.id and (
+                stored.task_id != outcome.task.id or stored.attempt_id != outcome.attempt.id
+            ):
+                self.database.append_event(
+                    Event(
+                        run_id=run.id,
+                        event_type="finding.duplicate",
+                        entity_type="finding",
+                        entity_id=stored.id,
+                        payload={
+                            "task_id": outcome.task.id,
+                            "attempt_id": outcome.attempt.id,
+                            "role": role.value,
+                        },
+                    )
+                )
+        return outcome
+
+    async def _advance_review_if_complete(self, run: Run) -> None:
+        current = self.database.get_run(run.id)
+        if current.status == RunStatus.WAITING_BUDGET:
+            return
+        roles = {AgentRole(role) for role in self._profile_roles(run)}
+        completed_roles = {
+            task.role
+            for task in self.database.list_tasks(run.id)
+            if task.stage == "review" and task.status == TaskStatus.COMPLETED
+        }
+        if roles.issubset(completed_roles):
+            self.database.update_run(run.id, RunStatus.AWAITING_DECISION)
+        else:
+            self.database.update_run(
+                run.id,
+                RunStatus.REVIEWING,
+                "one or more review tasks failed or were interrupted",
+            )
+
+    async def _advance_after_decisions(self, run: Run) -> None:
+        findings = self.database.list_findings(run.id)
+        pending = [finding for finding in findings if finding.status == FindingStatus.PENDING]
+        if pending:
+            raise StateError(f"{len(pending)} findings still require a human decision")
+        confirmed = [finding for finding in findings if finding.status == FindingStatus.CONFIRMED]
+        if not confirmed:
+            self.database.update_run(run.id, RunStatus.COMPLETED)
+            return
+        self.database.update_run(run.id, RunStatus.REVISING)
+        await self._run_revision(self.database.get_run(run.id))
+
+    async def _run_revision(
+        self,
+        run: Run,
+        route_override: str | None = None,
+        feedback: str | None = None,
+    ) -> None:
+        confirmed = self.database.list_findings(run.id, [FindingStatus.CONFIRMED])
+        if not confirmed:
+            self.database.update_run(run.id, RunStatus.COMPLETED)
+            return
+        route = self._route_for_run(run, AgentRole.REVISION, route_override)
+        prompt = self._revision_prompt(run, confirmed, feedback)
+        resume_thread = self._latest_thread(run.id, "revision") if feedback else None
+        outcome = await self._execute_task(
+            run=run,
+            stage="revision",
+            role=AgentRole.REVISION,
+            route=route,
+            prompt=prompt,
+            schema_kind="revision",
+            base_bundle=self._bundle_for_run(run),
+            validator=lambda output: self._validate_revision_output(
+                output,
+                confirmed,
+                self._sources_for_run(run),
+                self._run_dir(run.id) / "snapshot",
+            ),
+            resume_thread=resume_thread,
+        )
+        if outcome is None:
+            if self.database.get_run(run.id).status != RunStatus.WAITING_BUDGET:
+                self.database.update_run(run.id, RunStatus.REVISING, "revision task failed or was interrupted")
+            return
+        output = outcome.output
+        assert isinstance(output, RevisionOutput)
+        candidate = self._run_dir(run.id) / "patched" / ".candidate"
+        candidate.parent.mkdir(parents=True, exist_ok=True)
+        diff, changed_paths = self.manuscript.apply_edits(
+            self._run_dir(run.id) / "snapshot",
+            candidate,
+            output.edits,
+        )
+        if not changed_paths:
+            raise StateError("the revision contains no manuscript changes")
+        build = self._build_copy(
+            candidate,
+            self._run_dir(run.id) / "build" / "patch-candidate",
+            self._manuscript_config(run),
+        )
+        diff_artifact = self._record_text(diff, "text/x-diff; charset=utf-8")
+        self._record_text(build.log, "text/plain; charset=utf-8")
+        patch = Patch(
+            run_id=run.id,
+            base_commit=run.commit_sha,
+            diff_digest=diff_artifact.digest,
+            summary=output.summary,
+            edits=tuple(edit.model_dump(mode="json") for edit in output.edits),
+            build_succeeded=True,
+        )
+        target = candidate.parent / patch.id
+        candidate.replace(target)
+        existing = next(
+            (
+                item
+                for item in self.database.list_patches(run.id)
+                if item.base_commit == patch.base_commit and item.diff_digest == patch.diff_digest
+            ),
+            None,
+        )
+        if existing is None:
+            self.database.create_patch(patch)
+        else:
+            shutil.rmtree(target)
+            patch = existing
+        self._write_json(
+            self._run_dir(run.id) / "patches" / f"{patch.id}.json",
+            {
+                "patch_id": patch.id,
+                "diff_digest": patch.diff_digest,
+                "changed_paths": list(changed_paths),
+                "edits": list(patch.edits),
+            },
+        )
+        self.database.update_run(run.id, RunStatus.AWAITING_PATCH_APPROVAL)
+
+    async def _advance_after_patch_decision(self, run: Run) -> None:
+        if not self.database.list_findings(run.id, [FindingStatus.CONFIRMED]):
+            self.database.update_run(run.id, RunStatus.COMPLETED)
+            return
+        patches = self.database.list_patches(run.id)
+        if not patches:
+            raise StateError("the run has no proposed patch")
+        patch = patches[-1]
+        if patch.status == PatchStatus.PROPOSED:
+            raise StateError(f"patch {patch.id} still requires a human decision")
+        if patch.status == PatchStatus.REJECTED:
+            decisions = self.database.list_decisions("patch", patch.id)
+            feedback = decisions[-1].reason
+            self.database.update_run(run.id, RunStatus.REVISING)
+            await self._run_revision(self.database.get_run(run.id), feedback=feedback)
+            return
+        if patch.status == PatchStatus.APPROVED:
+            self.database.update_run(run.id, RunStatus.VERIFYING)
+            await self._run_verification(self.database.get_run(run.id))
+            return
+        if patch.status == PatchStatus.VERIFIED:
+            self.database.update_run(run.id, RunStatus.VERIFYING)
+            self.database.update_run(run.id, RunStatus.READY_TO_APPLY)
+            return
+        raise StateError(f"patch {patch.id} cannot advance while {patch.status.value}")
+
+    async def _run_verification(
+        self,
+        run: Run,
+        route_override: str | None = None,
+    ) -> None:
+        if not self.database.list_findings(run.id, [FindingStatus.CONFIRMED]):
+            self.database.update_run(run.id, RunStatus.COMPLETED)
+            return
+        patches = self.database.list_patches(run.id)
+        approved = [patch for patch in patches if patch.status in {PatchStatus.APPROVED, PatchStatus.VERIFIED}]
+        if not approved:
+            raise StateError("verification requires an approved patch")
+        patch = approved[-1]
+        if patch.status == PatchStatus.VERIFIED:
+            self.database.update_run(run.id, RunStatus.READY_TO_APPLY)
+            return
+        patched = self._run_dir(run.id) / "patched" / patch.id
+        verification_workspace = self._run_dir(run.id) / "verifications" / patch.id / "bundle"
+        if (verification_workspace / "manifest.json").is_file():
+            verification_bundle = self._load_bundle(verification_workspace)
+        else:
+            build = self._build_copy(
+                patched,
+                self._run_dir(run.id) / "build" / f"verification-{patch.id}",
+                self._manuscript_config(run),
+            )
+            verification_bundle = self.manuscript.create_bundle(
+                patched,
+                verification_workspace,
+                FrozenRevision(run.commit_sha, run.tree_sha),
+                self.manuscript.scan_sources(patched, self._manuscript_config(run).main),
+                build.pdf_path,
+            )
+        confirmed = self.database.list_findings(run.id, [FindingStatus.CONFIRMED])
+        route = self._route_for_run(run, AgentRole.VERIFICATION, route_override)
+        prompt = self._verification_prompt(run, patch, confirmed)
+        outcome = await self._execute_task(
+            run=run,
+            stage="verification",
+            role=AgentRole.VERIFICATION,
+            route=route,
+            prompt=prompt,
+            schema_kind="verification",
+            base_bundle=verification_bundle,
+            validator=lambda output: self._validate_verification_output(
+                output,
+                confirmed,
+                verification_bundle.sources,
+                verification_bundle.pdf_pages,
+                patched,
+            ),
+        )
+        if outcome is None:
+            if self.database.get_run(run.id).status != RunStatus.WAITING_BUDGET:
+                self.database.update_run(run.id, RunStatus.VERIFYING, "verification task failed or was interrupted")
+            return
+        output = outcome.output
+        assert isinstance(output, VerificationOutput)
+        result = VerificationResult(output.verdict)
+        verification = Verification(
+            patch_id=patch.id,
+            attempt_id=outcome.attempt.id,
+            result=result,
+            summary=output.summary,
+            artifact_digest=outcome.attempt.output_artifact_digest,
+        )
+        self.database.create_verification(verification)
+        if result == VerificationResult.PASS:
+            self.database.update_run(run.id, RunStatus.READY_TO_APPLY)
+        else:
+            self.database.update_run(run.id, RunStatus.AWAITING_PATCH_APPROVAL)
+
+    async def _execute_task(
+        self,
+        *,
+        run: Run,
+        stage: str,
+        role: AgentRole,
+        route: RouteConfig,
+        prompt: str,
+        schema_kind: str,
+        base_bundle: ManuscriptBundle,
+        validator: Callable[[Any], None],
+        resume_thread: str | None = None,
+    ) -> TaskOutcome | None:
+        schema = dict(run.frozen_config["schemas"][schema_kind]["content"])
+        prompt_artifact = self._record_text(prompt, "text/markdown; charset=utf-8")
+        schema_artifact = self._record_text(canonical_json(schema), "application/schema+json")
+        input_digest = digest_json(
+            {
+                "prompt_digest": prompt_artifact.digest,
+                "schema_digest": schema_artifact.digest,
+                "bundle_digest": self._directory_digest(base_bundle.workspace),
+            }
+        )
+        task = self.database.find_task(run.id, stage, role, route.name, input_digest)
+        if task is None:
+            task = self.database.create_task(
+                Task(
+                    run_id=run.id,
+                    stage=stage,
+                    role=role,
+                    route=route.name,
+                    input_digest=input_digest,
+                )
+            )
+        if task.status == TaskStatus.COMPLETED:
+            attempts = self.database.list_attempts(task.id)
+            completed = next(attempt for attempt in reversed(attempts) if attempt.status == AttemptStatus.COMPLETED)
+            if completed.output_artifact_digest is None:
+                raise InfrastructureError(f"completed attempt {completed.id} has no output artifact")
+            output = parse_output(
+                schema_kind,
+                self.artifacts.get_bytes(completed.output_artifact_digest).decode("utf-8"),
+            )
+            validator(output)
+            return TaskOutcome(task, completed, output)
+        if not self._budget_available(run.id, route):
+            current = self.database.get_run(run.id)
+            if current.status != RunStatus.WAITING_BUDGET:
+                self.database.update_run(run.id, RunStatus.WAITING_BUDGET)
+            return None
+
+        workspace = self._task_workspace(run.id, task.id, base_bundle.workspace, prompt)
+        bundle_digest = self._directory_digest(workspace)
+        runtime = self.runtime_factory(route)
+        previous_attempts = self.database.list_attempts(task.id)
+        previous = previous_attempts[-1] if previous_attempts else None
+        thread_id = resume_thread or (
+            previous.thread_id
+            if previous and previous.status in {AttemptStatus.FAILED, AttemptStatus.INTERRUPTED}
+            else None
+        )
+        invocation_prompt = prompt
+        invocation_prompt_digest = prompt_artifact.digest
+        correction_used = False
+        if (
+            resume_thread is None
+            and previous is not None
+            and previous.error
+            and previous.error.startswith("invalid structured output:")
+        ):
+            if previous.prompt_digest == prompt_artifact.digest and previous.thread_id:
+                invocation_prompt = self._correction_prompt(previous.error)
+                invocation_prompt_digest = self._record_text(
+                    invocation_prompt,
+                    "text/markdown; charset=utf-8",
+                ).digest
+                correction_used = True
+            else:
+                thread_id = None
+        while True:
+            attempt = self.database.begin_attempt(
+                task.id,
+                runtime_name=run.frozen_config["runtime"]["name"],
+                runtime_version=run.frozen_config["runtime"]["version"],
+                model=route.model,
+                model_provider=route.model_provider,
+                prompt_digest=invocation_prompt_digest,
+                schema_digest=schema_artifact.digest,
+                bundle_digest=bundle_digest,
+            )
+            if thread_id is None:
+                result = await runtime.run_agent(invocation_prompt, role, workspace, schema)
+            else:
+                result = await runtime.resume_agent(thread_id, invocation_prompt)
+            output_artifact = (
+                self._record_text(result.final_response, "application/json")
+                if result.final_response is not None
+                else None
+            )
+            trace_artifact = self._record_text(
+                result.trace_jsonl,
+                "application/x-ndjson; charset=utf-8",
+            )
+            error = result.error
+            parsed: ReviewOutput | RevisionOutput | VerificationOutput | None = None
+            if result.status == "completed" and result.final_response is None:
+                error = "invalid structured output: completed agent turn returned no final response"
+            if result.status == "completed" and result.final_response is not None:
+                try:
+                    parsed = parse_output(schema_kind, result.final_response)
+                    validator(parsed)
+                except (ValidationError, ValueError, StateError) as exc:
+                    parsed = None
+                    error = f"invalid structured output: {exc}"
+            terminal = (
+                AttemptStatus.COMPLETED
+                if result.status == "completed" and parsed is not None
+                else AttemptStatus.INTERRUPTED if result.status == "interrupted" else AttemptStatus.FAILED
+            )
+            cost = route.estimate_cost(
+                result.usage.input_tokens,
+                result.usage.cached_input_tokens,
+                result.usage.output_tokens,
+                result.usage.reasoning_tokens,
+            )
+            finished = self.database.finish_attempt(
+                attempt.id,
+                terminal,
+                thread_id=result.thread_id,
+                runtime_name=result.runtime_name,
+                runtime_version=result.runtime_version,
+                model=result.model,
+                model_provider=result.model_provider,
+                input_tokens=result.usage.input_tokens,
+                cached_input_tokens=result.usage.cached_input_tokens,
+                output_tokens=result.usage.output_tokens,
+                reasoning_tokens=result.usage.reasoning_tokens,
+                estimated_cost_usd=cost,
+                trace_artifact_digest=trace_artifact.digest,
+                output_artifact_digest=output_artifact.digest if output_artifact else None,
+                duration_ms=result.duration_ms,
+                error=error,
+            )
+            if parsed is not None:
+                return TaskOutcome(self.database.get_task(task.id), finished, parsed)
+            if (
+                result.status == "completed"
+                and result.thread_id
+                and not correction_used
+                and error
+                and error.startswith("invalid structured output:")
+            ):
+                correction_used = True
+                thread_id = result.thread_id
+                invocation_prompt = self._correction_prompt(error)
+                invocation_prompt_digest = self._record_text(
+                    invocation_prompt,
+                    "text/markdown; charset=utf-8",
+                ).digest
+                continue
+            return None
+
+    @staticmethod
+    def _correction_prompt(error: str) -> str:
+        return (
+            "Correct your previous response. It was rejected for this reason:\n"
+            f"{error}\nReturn only one JSON object matching the original schema and valid manuscript anchors."
+        )
+
+    def _validate_review_output(
+        self,
+        output: ReviewOutput,
+        sources: tuple[SourceFile, ...],
+        pdf_pages: int,
+        source_root: Path,
+    ) -> None:
+        source_index = {source.path: source for source in sources}
+        for finding in output.findings:
+            for evidence in finding.evidence:
+                self._validate_evidence(evidence, source_index, pdf_pages, source_root)
+
+    def _validate_revision_output(
+        self,
+        output: RevisionOutput,
+        findings: list[Finding],
+        sources: tuple[SourceFile, ...],
+        snapshot: Path,
+    ) -> None:
+        source_index = {source.path: source for source in sources}
+        expected_ids = {finding.id for finding in findings}
+        covered_ids: set[str] = set()
+        if not output.edits:
+            raise ValueError("confirmed findings require at least one edit")
+        by_path: dict[str, list[ExactEdit]] = {}
+        for edit in output.edits:
+            try:
+                source = source_index[edit.path]
+            except KeyError as exc:
+                raise ValueError(f"edit path is outside the frozen source manifest: {edit.path}") from exc
+            if edit.source_digest != source.digest:
+                raise ValueError(f"source digest does not match for {edit.path}")
+            if edit.end_line > source.lines:
+                raise ValueError(f"edit range exceeds {edit.path}")
+            unknown = set(edit.finding_ids) - expected_ids
+            if unknown:
+                raise ValueError(f"edit references unknown findings: {sorted(unknown)}")
+            covered_ids.update(edit.finding_ids)
+            excerpt = self._line_excerpt(snapshot / edit.path, edit.start_line, edit.end_line)
+            if excerpt != edit.before and excerpt.rstrip("\r\n") != edit.before:
+                raise ValueError(f"before text does not exactly match {edit.path}")
+            by_path.setdefault(edit.path, []).append(edit)
+        missing = expected_ids - covered_ids
+        if missing:
+            raise ValueError(f"confirmed findings are not covered: {sorted(missing)}")
+        for path, edits in by_path.items():
+            ordered = sorted(edits, key=lambda item: (item.start_line, item.end_line))
+            for previous, current in zip(ordered, ordered[1:]):
+                if current.start_line <= previous.end_line:
+                    raise ValueError(f"edits overlap in {path}")
+
+    def _validate_verification_output(
+        self,
+        output: VerificationOutput,
+        findings: list[Finding],
+        sources: tuple[SourceFile, ...],
+        pdf_pages: int,
+        source_root: Path,
+    ) -> None:
+        expected_ids = {finding.id for finding in findings}
+        unknown = set(output.resolved_finding_ids) - expected_ids
+        if unknown:
+            raise ValueError(f"verification references unknown findings: {sorted(unknown)}")
+        if output.verdict == "pass" and set(output.resolved_finding_ids) != expected_ids:
+            raise ValueError("passing verification must cover every confirmed finding")
+        source_index = {source.path: source for source in sources}
+        for issue in output.issues:
+            for evidence in issue.evidence:
+                self._validate_evidence(evidence, source_index, pdf_pages, source_root)
+
+    def _validate_evidence(
+        self,
+        evidence: Any,
+        source_index: dict[str, SourceFile],
+        pdf_pages: int,
+        source_root: Path,
+    ) -> None:
+        if evidence.page is not None and evidence.page > pdf_pages:
+            raise ValueError(f"PDF page {evidence.page} is outside the manuscript")
+        if evidence.start_line is None:
+            if evidence.source_path != "manuscript.pdf":
+                raise ValueError("page-only evidence must use source_path manuscript.pdf")
+            return
+        try:
+            source = source_index[evidence.source_path]
+        except KeyError as exc:
+            raise ValueError(f"evidence path is outside the frozen source manifest: {evidence.source_path}") from exc
+        if evidence.source_digest != source.digest:
+            raise ValueError(f"source digest does not match for {evidence.source_path}")
+        if evidence.end_line > source.lines:
+            raise ValueError(f"evidence range exceeds {evidence.source_path}")
+        excerpt = self._line_excerpt(
+            source_root / evidence.source_path,
+            evidence.start_line,
+            evidence.end_line,
+        )
+        if evidence.quoted_text not in excerpt:
+            raise ValueError(f"quoted evidence does not match {evidence.source_path}")
+
+    def _freeze_config(
+        self,
+        project: ProjectConfig,
+        profile: str,
+        sources: tuple[SourceFile, ...],
+        project_config_text: str,
+    ) -> dict[str, Any]:
+        roles = (*project.profiles[profile], AgentRole.REVISION.value, AgentRole.VERIFICATION.value)
+        prompts = {role: self._prompt_record(AgentRole(role)) for role in roles}
+        schemas = {
+            kind: {"digest": digest_json(output_schema(kind)), "content": output_schema(kind)}
+            for kind in ("review", "revision", "verification")
+        }
+        return {
+            "project": project.frozen_dict(),
+            "local": self.local_config.frozen_dict(),
+            "config_files": {
+                "scriptorium.toml": {
+                    "digest": ArtifactStore.digest_bytes(project_config_text.encode("utf-8")),
+                    "content": project_config_text,
+                }
+            },
+            "runtime": {"name": "codex", "version": CODEX_SDK_VERSION},
+            "profile_roles": list(project.profiles[profile]),
+            "role_routes": {role: self.local_config.roles[role] for role in roles},
+            "prompts": prompts,
+            "schemas": schemas,
+            "sources": [asdict(source) for source in sources],
+        }
+
+    def _review_prompt(self, run: Run, role: AgentRole) -> str:
+        role_prompt = run.frozen_config["prompts"][role.value]["content"]
+        return (
+            f"{role_prompt}\n\n"
+            "Review the frozen manuscript in sources/, manuscript.pdf, and pages/. "
+            "Every finding must cite exact source lines and digest or a valid PDF page. "
+            "Do not modify files. Return only the ReviewOutput JSON object."
+        )
+
+    def _revision_prompt(self, run: Run, findings: list[Finding], feedback: str | None) -> str:
+        role_prompt = run.frozen_config["prompts"][AgentRole.REVISION.value]["content"]
+        finding_data = [
+            {
+                "id": finding.id,
+                "category": finding.category,
+                "severity": finding.severity.value,
+                "title": finding.title,
+                "claim": finding.claim,
+                "evidence": list(finding.evidence),
+                "explanation": finding.explanation,
+                "suggested_action": finding.suggested_action,
+            }
+            for finding in findings
+        ]
+        feedback_text = f"\nHuman rejection feedback:\n{feedback}\n" if feedback else ""
+        return (
+            f"{role_prompt}\n\nConfirmed findings:\n{json.dumps(finding_data, indent=2, ensure_ascii=False)}\n"
+            f"{feedback_text}"
+            "Propose exact, non-overlapping source replacements. Do not modify files. "
+            "Return only the RevisionOutput JSON object."
+        )
+
+    def _verification_prompt(self, run: Run, patch: Patch, findings: list[Finding]) -> str:
+        role_prompt = run.frozen_config["prompts"][AgentRole.VERIFICATION.value]["content"]
+        finding_data = [
+            {"id": finding.id, "title": finding.title, "claim": finding.claim, "evidence": list(finding.evidence)}
+            for finding in findings
+        ]
+        diff = self.artifacts.get_bytes(patch.diff_digest).decode("utf-8")
+        return (
+            f"{role_prompt}\n\nConfirmed findings:\n{json.dumps(finding_data, indent=2, ensure_ascii=False)}\n\n"
+            f"Approved diff:\n{diff}\n\n"
+            "Verify the patched manuscript independently for resolution, factual or numeric changes, "
+            "citation/figure consistency, and regressions. Return only the VerificationOutput JSON object."
+        )
+
+    def _route_for_run(
+        self,
+        run: Run,
+        role: AgentRole,
+        override: str | None = None,
+    ) -> RouteConfig:
+        local = run.frozen_config["local"]
+        route_name = override or run.frozen_config["role_routes"][role.value]
+        try:
+            values = local["routes"][route_name]
+        except KeyError as exc:
+            raise StateError(f"route {route_name!r} was not frozen for run {run.id}") from exc
+        return RouteConfig(**values)
+
+    def _project_for_run(self, run: Run) -> ProjectConfig:
+        project = run.frozen_config["project"]
+        manuscript = ManuscriptConfig(**project["manuscript"])
+        profiles = {name: tuple(roles) for name, roles in project["profiles"].items()}
+        return ProjectConfig(manuscript, profiles)
+
+    def _manuscript_config(self, run: Run) -> ManuscriptConfig:
+        return ManuscriptConfig(**run.frozen_config["project"]["manuscript"])
+
+    def _sources_for_run(self, run: Run) -> tuple[SourceFile, ...]:
+        return tuple(SourceFile(**source) for source in run.frozen_config["sources"])
+
+    def _profile_roles(self, run: Run) -> tuple[str, ...]:
+        return tuple(run.frozen_config["profile_roles"])
+
+    def _max_concurrency(self, run: Run) -> int:
+        return int(run.frozen_config["local"]["max_concurrency"])
+
+    def _bundle_for_run(self, run: Run) -> ManuscriptBundle:
+        return self._load_bundle(self._run_dir(run.id) / "bundle")
+
+    @staticmethod
+    def _load_bundle(workspace: Path) -> ManuscriptBundle:
+        manifest = json.loads((workspace / "manifest.json").read_text(encoding="utf-8"))
+        sources = tuple(SourceFile(**source) for source in manifest["sources"])
+        pdf_pages = int(manifest["pdf_pages"])
+        pdf = workspace / "manuscript.pdf"
+        if not pdf.is_file():
+            raise InfrastructureError(f"bundle PDF is missing: {workspace}")
+        if ArtifactStore.digest_file(pdf) != manifest["pdf_digest"]:
+            raise InfrastructureError(f"bundle PDF digest does not match: {workspace}")
+        pages = list((workspace / "pages").glob("page-*.png"))
+        if len(pages) != pdf_pages or len(manifest["pages"]) != pdf_pages:
+            raise InfrastructureError(f"bundle page render is incomplete: {workspace}")
+        for source in sources:
+            path = workspace / "sources" / source.path
+            if not path.is_file() or ArtifactStore.digest_file(path) != source.digest:
+                raise InfrastructureError(f"bundle source digest does not match: {source.path}")
+        for page in manifest["pages"]:
+            path = workspace / page["path"]
+            if not path.is_file() or ArtifactStore.digest_file(path) != page["digest"]:
+                raise InfrastructureError(f"bundle page digest does not match: {page['path']}")
+        return ManuscriptBundle(workspace, sources, pdf_pages)
+
+    def _budget_available(self, run_id: str, route: RouteConfig) -> bool:
+        run = self.database.get_run(run_id)
+        return (
+            run.budget_usd is None
+            or run.estimated_cost_usd < run.budget_usd
+            or (
+                run.estimated_cost_usd <= run.budget_usd
+                and route.input_usd_per_million == 0
+                and route.output_usd_per_million == 0
+            )
+        )
+
+    def _latest_thread(self, run_id: str, stage: str) -> str | None:
+        attempts = [
+            attempt
+            for task in self.database.list_tasks(run_id)
+            if task.stage == stage
+            for attempt in self.database.list_attempts(task.id)
+            if attempt.thread_id
+        ]
+        return attempts[-1].thread_id if attempts else None
+
+    def _status_before_failure(self, run_id: str) -> RunStatus:
+        for event in reversed(self.database.list_events(run_id)):
+            if event.event_type != "run.status_changed" or event.payload.get("to") != RunStatus.FAILED.value:
+                continue
+            previous = RunStatus(event.payload["from"])
+            if previous in {
+                RunStatus.PREPARING,
+                RunStatus.REVIEWING,
+                RunStatus.REVISING,
+                RunStatus.VERIFYING,
+            }:
+                return previous
+            break
+        raise StateError("this failed run cannot be resumed safely; start a new run")
+
+    def _task_workspace(self, run_id: str, task_id: str, source: Path, prompt: str) -> Path:
+        workspace = self._run_dir(run_id) / "workspaces" / task_id
+        if workspace.exists():
+            shutil.rmtree(workspace)
+        shutil.copytree(source, workspace)
+        (workspace / "task.md").write_text(prompt, encoding="utf-8")
+        return workspace
+
+    def _build_copy(self, source: Path, destination: Path, manuscript: ManuscriptConfig) -> BuildResult:
+        if destination.exists():
+            shutil.rmtree(destination)
+        shutil.copytree(source, destination)
+        return self.manuscript.build(destination, manuscript)
+
+    def _run_dir(self, run_id: str) -> Path:
+        return self.runs_dir / run_id
+
+    def _record_text(self, value: str, media_type: str):
+        artifact = self.artifacts.put_text(value, media_type)
+        return self.database.record_artifact(artifact)
+
+    def _record_file(self, path: Path, media_type: str):
+        artifact = self.artifacts.put_file(path, media_type)
+        return self.database.record_artifact(artifact)
+
+    def _prompt_record(self, role: AgentRole) -> dict[str, str]:
+        content = self._load_prompt(role)
+        return {"digest": self.artifacts.digest_bytes(content.encode("utf-8")), "content": content}
+
+    @staticmethod
+    def _load_prompt(role: AgentRole) -> str:
+        return resources.files("scriptorium").joinpath("prompts", f"{role.value}.md").read_text(encoding="utf-8")
+
+    @staticmethod
+    def _directory_digest(path: Path) -> str:
+        files = []
+        for file_path in sorted(item for item in path.rglob("*") if item.is_file()):
+            data = file_path.read_bytes()
+            files.append(
+                {
+                    "path": file_path.relative_to(path).as_posix(),
+                    "digest": ArtifactStore.digest_bytes(data),
+                    "size": len(data),
+                }
+            )
+        return digest_json(files)
+
+    @staticmethod
+    def _line_excerpt(path: Path, start_line: int, end_line: int) -> str:
+        try:
+            lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
+        except UnicodeDecodeError as exc:
+            raise ValueError(f"source anchor is not UTF-8 text: {path.name}") from exc
+        return "".join(lines[start_line - 1 : end_line])
+
+    @staticmethod
+    def _write_json(path: Path, value: Any) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = path.with_name(f".{path.name}.tmp")
+        temporary.write_text(json.dumps(value, indent=2, ensure_ascii=False, sort_keys=True) + "\n", encoding="utf-8")
+        temporary.replace(path)
+
+    def _fail_active_run(self, run_id: str, exc: Exception) -> None:
+        run = self.database.get_run(run_id)
+        if run.status in {
+            RunStatus.PREPARING,
+            RunStatus.REVIEWING,
+            RunStatus.REVISING,
+            RunStatus.VERIFYING,
+            RunStatus.READY_TO_APPLY,
+        }:
+            self.database.update_run(run_id, RunStatus.FAILED, str(exc))
+
+    @staticmethod
+    def _codex_runtime(route: RouteConfig) -> AgentRuntime:
+        return CodexAgentRuntime(
+            route=route.name,
+            model=route.model,
+            provider=route.model_provider,
+            reasoning=route.reasoning_effort,
+        )

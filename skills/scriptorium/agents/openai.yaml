@@ -1,0 +1,4 @@
+interface:
+  display_name: "Scriptorium"
+  short_description: "Operate auditable LaTeX manuscript review runs"
+  default_prompt: "Use $scriptorium to check this repository and show the next safe manuscript-review action."
