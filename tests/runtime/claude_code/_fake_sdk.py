@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from scriptorium.runtime import CLAUDE_SDK_VERSION
@@ -39,14 +40,27 @@ class FakeResultMessage:
     total_cost_usd: float | None = None
 
 
+@dataclass
+class FakeMirrorErrorMessage:
+    subtype: str = "mirror_error"
+    error: str = "mirror failed"
+
+
 class FakeQuery:
     def __init__(self, responses: list[list[Any]]) -> None:
         self.responses = responses
         self.calls: list[tuple[str, FakeOptions]] = []
         self.loaded_sessions: list[list[dict[str, Any]] | None] = []
+        self.native_config_dirs: list[Path] = []
+        self.native_configs_ready: list[bool] = []
 
     def __call__(self, *, prompt: str, options: FakeOptions):
         self.calls.append((prompt, options))
+        native_config_dir = Path(options.env["CLAUDE_CONFIG_DIR"])
+        self.native_config_dirs.append(native_config_dir)
+        self.native_configs_ready.append(
+            native_config_dir.is_dir() and (native_config_dir / ".credentials.json").is_file()
+        )
         messages = self.responses.pop(0)
 
         async def stream():
@@ -81,8 +95,13 @@ def _sdk(query: Any, version: str = CLAUDE_SDK_VERSION) -> Any:
             "ClaudeAgentOptions": FakeOptions,
             "HookMatcher": FakeHookMatcher,
             "ResultMessage": FakeResultMessage,
+            "_copy_auth_files": staticmethod(_copy_auth_files),
         },
     )
+
+
+def _copy_auth_files(directory: Path, _env: dict[str, str]) -> None:
+    (directory / ".credentials.json").write_text("{}", encoding="utf-8")
 
 
 def _runtime(query: Any) -> ClaudeCodeAgentRuntime:

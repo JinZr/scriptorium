@@ -4,18 +4,25 @@ import asyncio
 import json
 from pathlib import Path
 
+import pytest
+
 from scriptorium.domain import AgentRole
 from scriptorium.runtime import CLAUDE_SDK_VERSION, AgentResult, AgentUsage
 
 from ._fake_sdk import FakeAssistantMessage, FakeQuery, _runtime, _success
 
 
-def test_run_agent_uses_isolated_read_only_options_and_normalizes_result(tmp_path: Path) -> None:
+def test_run_agent_uses_isolated_read_only_options_and_normalizes_result(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     query = FakeQuery([[FakeAssistantMessage("working"), _success()]])
     runtime = _runtime(query)
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     session_dir = tmp_path / "session"
+    ambient_config_dir = tmp_path / "ambient-claude"
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(ambient_config_dir))
     schema = {
         "type": "object",
         "properties": {"answer": {"type": "string"}, "z": {"type": "integer"}},
@@ -63,6 +70,12 @@ def test_run_agent_uses_isolated_read_only_options_and_normalizes_result(tmp_pat
     assert options.fallback_model is None
     assert options.effort == "high"
     assert options.output_format == {"type": "json_schema", "schema": schema}
+    native_config_dir = Path(options.env["CLAUDE_CONFIG_DIR"])
+    assert native_config_dir != ambient_config_dir
+    assert native_config_dir.name.startswith("scriptorium-claude-")
+    assert not native_config_dir.is_relative_to(session_dir.resolve())
+    assert query.native_configs_ready == [True]
+    assert not native_config_dir.exists()
     assert options.mcp_servers == {}
     assert options.strict_mcp_config is True
     assert options.settings is None

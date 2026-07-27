@@ -44,6 +44,9 @@ def test_resume_uses_original_session_store_and_reapplies_schema_and_workspace(t
     assert options.output_format == {"type": "json_schema", "schema": schema}
     assert "Corrector" in options.system_prompt
     assert query.loaded_sessions and query.loaded_sessions[0]
+    assert len(query.native_config_dirs) == 2
+    assert query.native_config_dirs[0] != query.native_config_dirs[1]
+    assert all(not path.exists() for path in query.native_config_dirs)
 
 
 def test_resume_fails_without_persisted_session_instead_of_starting_fresh(tmp_path: Path) -> None:

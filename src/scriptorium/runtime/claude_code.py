@@ -2,13 +2,14 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Callable, Mapping
-from dataclasses import asdict, is_dataclass
+from dataclasses import asdict, is_dataclass, replace
 from enum import Enum
 import hashlib
 from importlib import import_module
 from importlib.metadata import PackageNotFoundError, version as package_version
 import json
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from typing import Any
 
 from ..domain import AgentRole
@@ -54,6 +55,11 @@ class ClaudeCodeAgentRuntime:
         self._hook_matcher_type = sdk.HookMatcher
         self._result_type = sdk.ResultMessage
         self._runtime_version = version
+        self._copy_auth_files = (
+            getattr(import_module("claude_agent_sdk._internal.session_resume"), "_copy_auth_files")
+            if sdk_loader is None
+            else sdk._copy_auth_files
+        )
 
     async def run_agent(
         self,
@@ -101,7 +107,8 @@ class ClaudeCodeAgentRuntime:
         session_dir: Path,
     ) -> AgentResult:
         resolved_workspace = workspace.resolve()
-        store = _FileSessionStore(session_dir.resolve())
+        resolved_session_dir = session_dir.resolve()
+        store = _FileSessionStore(resolved_session_dir)
         if thread_id is not None and not store.contains(thread_id):
             return self._failed_result(
                 thread_id,
@@ -110,58 +117,62 @@ class ClaudeCodeAgentRuntime:
             )
 
         guard = _workspace_guard(resolved_workspace)
-        options = self._options_type(
-            tools=sorted(_READ_TOOLS),
-            allowed_tools=[],
-            system_prompt=_role_instructions(role),
-            mcp_servers={},
-            strict_mcp_config=True,
-            permission_mode="dontAsk",
-            resume=thread_id,
-            disallowed_tools=[],
-            model=self.model,
-            fallback_model=None,
-            cwd=resolved_workspace,
-            settings=None,
-            add_dirs=[],
-            hooks={
-                "PreToolUse": [
-                    self._hook_matcher_type(
-                        matcher=None,
-                        hooks=[guard],
-                    )
-                ]
-            },
-            agents=None,
-            setting_sources=[],
-            skills=[],
-            plugins=[],
-            effort=self.reasoning,
-            output_format={"type": "json_schema", "schema": dict(schema)},
-            session_store=store,
-            session_store_flush="eager",
-        )
+        with TemporaryDirectory(prefix="scriptorium-claude-") as native_dir:
+            native_config_dir = Path(native_dir)
+            self._copy_auth_files(native_config_dir, {})
+            options = self._options_type(
+                tools=sorted(_READ_TOOLS),
+                allowed_tools=[],
+                system_prompt=_role_instructions(role),
+                mcp_servers={},
+                strict_mcp_config=True,
+                permission_mode="dontAsk",
+                resume=thread_id,
+                disallowed_tools=[],
+                model=self.model,
+                fallback_model=None,
+                cwd=resolved_workspace,
+                settings=None,
+                add_dirs=[],
+                hooks={
+                    "PreToolUse": [
+                        self._hook_matcher_type(
+                            matcher=None,
+                            hooks=[guard],
+                        )
+                    ]
+                },
+                agents=None,
+                setting_sources=[],
+                skills=[],
+                plugins=[],
+                effort=self.reasoning,
+                output_format={"type": "json_schema", "schema": dict(schema)},
+                env={"CLAUDE_CONFIG_DIR": str(native_config_dir)},
+                session_store=store,
+                session_store_flush="eager",
+            )
 
-        messages: list[Any] = []
-        result_message: Any = None
-        current_thread_id = thread_id
-        stream: Any = None
-        try:
-            stream = self._query(prompt=task, options=options)
-            async for message in stream:
-                messages.append(message)
-                message_thread_id = _message_session_id(message)
-                if message_thread_id is not None:
-                    current_thread_id = message_thread_id
-                if isinstance(message, self._result_type):
-                    result_message = message
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:
-            return self._failed_result(current_thread_id, exc, messages)
-        finally:
-            if stream is not None and hasattr(stream, "aclose"):
-                await stream.aclose()
+            messages: list[Any] = []
+            result_message: Any = None
+            current_thread_id = thread_id
+            stream: Any = None
+            try:
+                stream = self._query(prompt=task, options=options)
+                async for message in stream:
+                    messages.append(message)
+                    message_thread_id = _message_session_id(message)
+                    if message_thread_id is not None:
+                        current_thread_id = message_thread_id
+                    if isinstance(message, self._result_type):
+                        result_message = message
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                return self._failed_result(current_thread_id, exc, messages)
+            finally:
+                if stream is not None and hasattr(stream, "aclose"):
+                    await stream.aclose()
 
         if result_message is None:
             return self._failed_result(
@@ -169,7 +180,18 @@ class ClaudeCodeAgentRuntime:
                 RuntimeError("Claude result message not received."),
                 messages,
             )
-        return self._normalize_result(result_message, messages)
+        result = self._normalize_result(result_message, messages)
+        mirror_failed = any(getattr(message, "subtype", None) == "mirror_error" for message in messages)
+        session_persisted = result.thread_id is not None and store.contains(result.thread_id)
+        if result.status == "completed" and (mirror_failed or not session_persisted):
+            return replace(
+                result,
+                status="failed",
+                final_response=None,
+                trace_jsonl=_trace_jsonl(messages, "failed", result.usage),
+                error="Claude session state could not be persisted.",
+            )
+        return result
 
     def _normalize_result(self, result: Any, messages: list[Any]) -> AgentResult:
         thread_id = _optional_string(getattr(result, "session_id", None))

@@ -9,7 +9,15 @@ import pytest
 from scriptorium.domain import AgentRole
 from scriptorium.runtime import AgentUsage
 
-from ._fake_sdk import CancellingStream, FakeQuery, FakeResultMessage, RaisingQuery, _runtime
+from ._fake_sdk import (
+    CancellingStream,
+    FakeMirrorErrorMessage,
+    FakeQuery,
+    FakeResultMessage,
+    RaisingQuery,
+    _runtime,
+    _success,
+)
 
 
 @pytest.mark.parametrize(
@@ -100,9 +108,56 @@ def test_query_exception_preserves_known_session_and_trace(tmp_path: Path) -> No
     assert trace[-1]["status"] == "failed"
 
 
+def test_completed_result_fails_when_session_mirror_is_missing(tmp_path: Path) -> None:
+    async def stream():
+        yield _success()
+
+    runtime = _runtime(lambda **_kwargs: stream())
+
+    result = asyncio.run(
+        runtime.run_agent(
+            "Review",
+            AgentRole.SUBSTANTIVE_REVIEW,
+            tmp_path,
+            {"type": "object"},
+            tmp_path / "session",
+        )
+    )
+
+    assert result.status == "failed"
+    assert result.final_response is None
+    assert result.error == "Claude session state could not be persisted."
+    assert result.usage.input_tokens == 18
+
+
+def test_completed_result_fails_after_session_mirror_error(tmp_path: Path) -> None:
+    runtime = _runtime(FakeQuery([[FakeMirrorErrorMessage(), _success()]]))
+
+    result = asyncio.run(
+        runtime.run_agent(
+            "Review",
+            AgentRole.SUBSTANTIVE_REVIEW,
+            tmp_path,
+            {"type": "object"},
+            tmp_path / "session",
+        )
+    )
+
+    assert result.status == "failed"
+    assert result.final_response is None
+    assert result.error == "Claude session state could not be persisted."
+    assert result.usage.input_tokens == 18
+
+
 def test_cancellation_closes_native_query_and_propagates(tmp_path: Path) -> None:
     stream = CancellingStream()
-    runtime = _runtime(lambda **_kwargs: stream)
+    native_config_dirs: list[Path] = []
+
+    def query(**kwargs):
+        native_config_dirs.append(Path(kwargs["options"].env["CLAUDE_CONFIG_DIR"]))
+        return stream
+
+    runtime = _runtime(query)
 
     with pytest.raises(asyncio.CancelledError):
         asyncio.run(
@@ -116,3 +171,5 @@ def test_cancellation_closes_native_query_and_propagates(tmp_path: Path) -> None
         )
 
     assert stream.closed is True
+    assert len(native_config_dirs) == 1
+    assert not native_config_dirs[0].exists()
