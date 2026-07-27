@@ -56,10 +56,19 @@ class AntigravityAgentRuntime:
         api_key = os.environ.get("GEMINI_API_KEY")
         if not api_key:
             raise RuntimeUnavailable("The Antigravity runtime requires GEMINI_API_KEY for Gemini API authentication.")
+        try:
+            thinking_level = sdk_types.ThinkingLevel(reasoning)
+        except ValueError as exc:
+            supported = ", ".join(level.value for level in sdk_types.ThinkingLevel)
+            raise RuntimeUnavailable(
+                f"The Antigravity runtime does not support reasoning_effort {reasoning!r}; "
+                f"expected one of: {supported}."
+            ) from exc
 
         self._sdk = sdk
         self._types = sdk_types
         self._api_key = api_key
+        self._thinking_level = thinking_level
         self._runtime_version = runtime_version
 
     async def run_agent(
@@ -137,7 +146,14 @@ class AntigravityAgentRuntime:
             "save_dir": str(save_dir),
             "app_data_dir": str(app_data_dir),
             "response_schema": dict(schema),
-            "model": self.model,
+            "model": self._types.ModelTarget(
+                name=self.model,
+                types=[self._types.ModelType.TEXT],
+                endpoint=self._types.GeminiAPIEndpoint(
+                    api_key=self._api_key,
+                    options=self._types.GeminiModelOptions(thinking_level=self._thinking_level),
+                ),
+            ),
             "api_key": self._api_key,
             "vertex": False,
         }

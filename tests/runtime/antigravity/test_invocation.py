@@ -9,7 +9,17 @@ import pytest
 from scriptorium.domain import AgentRole
 from scriptorium.runtime import AgentResult, AgentUsage
 
-from ._fake_sdk import FakeAgent, FakeBuiltinTools, FakeResponse, FakeStep, FakeUsage, make_runtime, make_sdk
+from ._fake_sdk import (
+    FakeAgent,
+    FakeBuiltinTools,
+    FakeModelType,
+    FakeResponse,
+    FakeStep,
+    FakeThinkingLevel,
+    FakeUsage,
+    make_runtime,
+    make_sdk,
+)
 
 
 def test_run_agent_uses_gemini_read_only_config_and_normalizes_result(
@@ -23,7 +33,7 @@ def test_run_agent_uses_gemini_read_only_config_and_normalizes_result(
         current_steps=current,
         prior_history=prior,
     )
-    runtime = make_runtime(monkeypatch, sdk)
+    runtime = make_runtime(monkeypatch, sdk, reasoning="low")
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     session_dir = tmp_path / "state"
@@ -68,7 +78,10 @@ def test_run_agent_uses_gemini_read_only_config_and_normalizes_result(
     assert config["save_dir"] == str((session_dir / "save").resolve())
     assert config["app_data_dir"] == str((session_dir / "app").resolve())
     assert config["response_schema"] == schema
-    assert config["model"] == "gemini-test"
+    assert config["model"].name == "gemini-test"
+    assert config["model"].types == [FakeModelType.TEXT]
+    assert config["model"].endpoint.api_key == "test-gemini-key"
+    assert config["model"].endpoint.options.thinking_level is FakeThinkingLevel.LOW
     assert config["api_key"] == "test-gemini-key"
     assert config["vertex"] is False
     assert config["tools"] == []

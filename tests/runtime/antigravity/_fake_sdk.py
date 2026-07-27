@@ -31,6 +31,19 @@ class FakeSessionContinuationMode(str, Enum):
     CREATE_OR_RESUME = "create_or_resume"
 
 
+class FakeThinkingLevel(str, Enum):
+    MINIMAL = "minimal"
+    LOW = "low"
+    MEDIUM = "medium"
+    HIGH = "high"
+    EXTRA_HIGH = "extra_high"
+
+
+class FakeModelType(str, Enum):
+    TEXT = "text"
+    IMAGE = "image"
+
+
 class FakeAntigravityCancelledError(asyncio.CancelledError):
     pass
 
@@ -39,6 +52,24 @@ class FakeAntigravityCancelledError(asyncio.CancelledError):
 class FakeCapabilitiesConfig:
     enabled_tools: list[FakeBuiltinTools]
     enable_subagents: bool
+
+
+@dataclass
+class FakeGeminiModelOptions:
+    thinking_level: FakeThinkingLevel
+
+
+@dataclass
+class FakeGeminiAPIEndpoint:
+    api_key: str
+    options: FakeGeminiModelOptions
+
+
+@dataclass
+class FakeModelTarget:
+    name: str
+    types: list[FakeModelType]
+    endpoint: FakeGeminiAPIEndpoint
 
 
 @dataclass
@@ -142,7 +173,12 @@ def make_sdk(
         AntigravityCancelledError=FakeAntigravityCancelledError,
         BuiltinTools=FakeBuiltinTools,
         CapabilitiesConfig=FakeCapabilitiesConfig,
+        GeminiAPIEndpoint=FakeGeminiAPIEndpoint,
+        GeminiModelOptions=FakeGeminiModelOptions,
+        ModelTarget=FakeModelTarget,
+        ModelType=FakeModelType,
         SessionContinuationMode=FakeSessionContinuationMode,
+        ThinkingLevel=FakeThinkingLevel,
     )
     return SimpleNamespace(
         Agent=FakeAgent,
@@ -151,12 +187,17 @@ def make_sdk(
     )
 
 
-def make_runtime(monkeypatch: pytest.MonkeyPatch, sdk: Any) -> AntigravityAgentRuntime:
+def make_runtime(
+    monkeypatch: pytest.MonkeyPatch,
+    sdk: Any,
+    *,
+    reasoning: str = "high",
+) -> AntigravityAgentRuntime:
     monkeypatch.setenv("GEMINI_API_KEY", "test-gemini-key")
     return AntigravityAgentRuntime(
         route="gemini_review",
         model="gemini-test",
         provider="gemini",
-        reasoning="high",
+        reasoning=reasoning,
         sdk=sdk,
     )

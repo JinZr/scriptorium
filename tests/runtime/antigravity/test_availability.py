@@ -49,3 +49,17 @@ def test_missing_key_and_sdk_version_fail_clearly(monkeypatch: pytest.MonkeyPatc
             provider="gemini",
             reasoning="high",
         )
+
+
+def test_unsupported_reasoning_effort_fails_clearly(monkeypatch: pytest.MonkeyPatch) -> None:
+    sdk = make_sdk(response=FakeResponse(), current_steps=[])
+    monkeypatch.setenv("GEMINI_API_KEY", "test-key")
+
+    with pytest.raises(RuntimeUnavailable, match="does not support reasoning_effort 'xhigh'"):
+        AntigravityAgentRuntime(
+            route="gemini",
+            model="gemini-test",
+            provider="gemini",
+            reasoning="xhigh",
+            sdk=sdk,
+        )
