@@ -35,7 +35,7 @@ from .domain import (
 )
 from .errors import InfrastructureError, StateError
 from .manuscript import BuildResult, FrozenRevision, ManuscriptBundle, ManuscriptManager, SourceFile
-from .runtime import RUNTIME_SDK_VERSIONS, AgentRuntime, CodexAgentRuntime, RuntimeUnavailable
+from .runtime import RUNTIME_SDK_VERSIONS, AgentRuntime, RuntimeUnavailable
 from .schemas import ExactEdit, ReviewOutput, RevisionOutput, VerificationOutput, output_schema, parse_output
 from .storage import Database
 
@@ -1177,13 +1177,15 @@ class Armarius:
             )
         runtime_type: type[AgentRuntime]
         if route.runtime == "codex":
+            from .runtime.codex import CodexAgentRuntime
+
             runtime_type = CodexAgentRuntime
         elif route.runtime == "claude_code":
-            from .claude_runtime import ClaudeCodeAgentRuntime
+            from .runtime.claude_code import ClaudeCodeAgentRuntime
 
             runtime_type = ClaudeCodeAgentRuntime
         elif route.runtime == "antigravity":
-            from .antigravity_runtime import AntigravityAgentRuntime
+            from .runtime.antigravity import AntigravityAgentRuntime
 
             runtime_type = AntigravityAgentRuntime
         else:

@@ -1,4 +1,5 @@
 recursive-include .codex-plugin *
 recursive-include docs *.md
 recursive-include skills *.md *.yaml
+recursive-include tests *.md *.py
 include requirements.txt requirements-dev.txt

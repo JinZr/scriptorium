@@ -109,7 +109,7 @@ Claude Code uses its native login or API configuration:
 ```bash
 SCRIPTORIUM_LIVE_CLAUDE=1 \
 SCRIPTORIUM_LIVE_CLAUDE_MODEL=MODEL_NAME \
-python -m pytest -m live_harness tests/test_live_harness.py
+python -m pytest -m live_harness tests/live/test_native_harnesses.py
 ```
 
 Antigravity requires its supported API key:
@@ -118,7 +118,7 @@ Antigravity requires its supported API key:
 SCRIPTORIUM_LIVE_ANTIGRAVITY=1 \
 SCRIPTORIUM_LIVE_ANTIGRAVITY_MODEL=MODEL_NAME \
 GEMINI_API_KEY=SECRET \
-python -m pytest -m live_harness tests/test_live_harness.py
+python -m pytest -m live_harness tests/live/test_native_harnesses.py
 ```
 
 Setting a model name alone does not opt in. Treat these as paid, credentialed integration checks; regular CI must not set either `SCRIPTORIUM_LIVE_*` switch.
