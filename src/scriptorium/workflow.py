@@ -401,6 +401,13 @@ class Armarius:
         if not confirmed:
             self.database.update_run(run.id, RunStatus.COMPLETED)
             return
+        if feedback is None:
+            recovered = self._rejected_patch_revision_context(run)
+            if recovered is not None:
+                feedback, generating_route, generating_attempt = recovered
+                if route_override is None:
+                    route_override = generating_route
+                    resume_attempt = generating_attempt
         route = self._route_for_run(run, AgentRole.REVISION, route_override)
         prompt = self._revision_prompt(run, confirmed, feedback)
         outcome = await self._execute_task(
@@ -450,8 +457,6 @@ class Armarius:
             attempt_id=outcome.attempt.id,
             build_succeeded=True,
         )
-        target = candidate.parent / patch.id
-        candidate.replace(target)
         existing = next(
             (
                 item
@@ -461,14 +466,26 @@ class Armarius:
             None,
         )
         if existing is None:
+            target = candidate.parent / patch.id
+            candidate.replace(target)
             self.database.create_patch(patch)
         else:
-            shutil.rmtree(target)
-            patch = existing
+            shutil.rmtree(candidate)
+            if existing.status == PatchStatus.REJECTED:
+                patch = self.database.repropose_patch(
+                    existing.id,
+                    attempt_id=outcome.attempt.id,
+                    summary=patch.summary,
+                    edits=patch.edits,
+                    build_succeeded=patch.build_succeeded,
+                )
+            else:
+                patch = existing
         self._write_json(
             self._run_dir(run.id) / "patches" / f"{patch.id}.json",
             {
                 "patch_id": patch.id,
+                "attempt_id": patch.attempt_id,
                 "diff_digest": patch.diff_digest,
                 "changed_paths": list(changed_paths),
                 "edits": list(patch.edits),
@@ -487,27 +504,8 @@ class Armarius:
         if patch.status == PatchStatus.PROPOSED:
             raise StateError(f"patch {patch.id} still requires a human decision")
         if patch.status == PatchStatus.REJECTED:
-            decisions = self.database.list_decisions("patch", patch.id)
-            feedback = decisions[-1].reason
-            resume_attempt = None
-            route_override = None
-            if patch.attempt_id is not None:
-                resume_attempt = self.database.get_attempt(patch.attempt_id)
-                generating_task = self.database.get_task(resume_attempt.task_id)
-                if (
-                    generating_task.run_id != run.id
-                    or generating_task.stage != "revision"
-                    or generating_task.role != AgentRole.REVISION
-                ):
-                    raise InfrastructureError(f"patch {patch.id} has an invalid generating attempt")
-                route_override = generating_task.route
             self.database.update_run(run.id, RunStatus.REVISING)
-            await self._run_revision(
-                self.database.get_run(run.id),
-                route_override=route_override,
-                feedback=feedback,
-                resume_attempt=resume_attempt,
-            )
+            await self._run_revision(self.database.get_run(run.id))
             return
         if patch.status == PatchStatus.APPROVED:
             self.database.update_run(run.id, RunStatus.VERIFYING)
@@ -518,6 +516,24 @@ class Armarius:
             self.database.update_run(run.id, RunStatus.READY_TO_APPLY)
             return
         raise StateError(f"patch {patch.id} cannot advance while {patch.status.value}")
+
+    def _rejected_patch_revision_context(
+        self,
+        run: Run,
+    ) -> tuple[str, str | None, Attempt | None] | None:
+        patches = self.database.list_patches(run.id)
+        if not patches or patches[-1].status != PatchStatus.REJECTED:
+            return None
+        patch = patches[-1]
+        decisions = self.database.list_decisions("patch", patch.id)
+        feedback = decisions[-1].reason
+        if patch.attempt_id is None:
+            return feedback, None, None
+        attempt = self.database.get_attempt(patch.attempt_id)
+        task = self.database.get_task(attempt.task_id)
+        if task.run_id != run.id or task.stage != "revision" or task.role != AgentRole.REVISION:
+            raise InfrastructureError(f"patch {patch.id} has an invalid generating attempt")
+        return feedback, task.route, attempt
 
     async def _run_verification(
         self,
@@ -654,21 +670,15 @@ class Armarius:
             )
         thread_id = resume_attempt.thread_id if resume_attempt is not None else None
         if (
-            resume_attempt is None
-            and previous is not None
+            previous is not None
             and previous.status in {AttemptStatus.FAILED, AttemptStatus.INTERRUPTED}
             and self._attempt_matches_route(previous, route)
         ):
-            thread_id = previous.thread_id
+            thread_id = previous.thread_id or thread_id
         invocation_prompt = prompt
         invocation_prompt_digest = prompt_artifact.digest
         correction_used = False
-        if (
-            resume_attempt is None
-            and previous is not None
-            and previous.error
-            and previous.error.startswith("invalid structured output:")
-        ):
+        if previous is not None and previous.error and previous.error.startswith("invalid structured output:"):
             if (
                 previous.prompt_digest == prompt_artifact.digest
                 and previous.thread_id

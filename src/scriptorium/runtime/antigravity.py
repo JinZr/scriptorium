@@ -249,14 +249,20 @@ async def _cancel_active(response: Any, agent: Any) -> None:
 
 def _turn_status(steps: list[Any], structured_output: Any) -> tuple[AgentStatus, str | None]:
     for step in reversed(steps):
+        step_type = getattr(getattr(step, "type", None), "value", getattr(step, "type", None))
+        if step_type != "FINISH":
+            continue
         status = getattr(getattr(step, "status", None), "value", getattr(step, "status", None))
         if status in {"CANCELED", "CANCELLED"}:
             return "interrupted", _step_error(step) or "Antigravity turn was cancelled."
         if status == "ERROR":
             return "failed", _step_error(step) or "Antigravity turn failed."
+        if status == "DONE" and structured_output is not None:
+            return "completed", None
+        break
     if structured_output is None:
         return "failed", "Antigravity turn did not return structured output."
-    return "completed", None
+    return "failed", "Antigravity turn did not complete with a successful FINISH step."
 
 
 def _step_error(step: Any) -> str | None:

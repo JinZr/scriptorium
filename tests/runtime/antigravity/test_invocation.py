@@ -17,7 +17,7 @@ def test_run_agent_uses_gemini_read_only_config_and_normalizes_result(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     prior = [FakeStep("old", "DONE", "old turn")]
-    current = [FakeStep("new", "DONE", "new turn")]
+    current = [FakeStep("new", "DONE", "new turn", type="FINISH")]
     sdk = make_sdk(
         response=FakeResponse(structured_output={"summary": "ok"}, usage=FakeUsage()),
         current_steps=current,

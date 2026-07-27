@@ -1,7 +1,17 @@
 import pytest
 
-from scriptorium.domain import Artifact, Patch, PatchStatus, Verification, VerificationResult
-from scriptorium.storage import Database
+from scriptorium.domain import (
+    AgentRole,
+    Artifact,
+    Attempt,
+    AttemptStatus,
+    Patch,
+    PatchStatus,
+    Task,
+    Verification,
+    VerificationResult,
+)
+from scriptorium.storage import ConflictError, Database
 
 from ._factories import create_completed_attempt, make_run
 
@@ -83,4 +93,92 @@ def test_new_patch_requires_a_generating_attempt(tmp_path) -> None:
                     summary="Missing provenance",
                     edits=(),
                 )
+            )
+
+
+def test_repropose_rejected_patch_updates_lineage_and_preserves_decision(tmp_path) -> None:
+    with Database(tmp_path / "state.sqlite3") as database:
+        run = database.create_run(make_run())
+        _, first_attempt = create_completed_attempt(database, run)
+        artifact = database.add_artifact(
+            Artifact(
+                digest="1" * 64,
+                relative_path="sha256/11/" + "1" * 62,
+                size=12,
+                media_type="text/x-diff",
+            )
+        )
+        patch = database.create_patch(
+            Patch(
+                run_id=run.id,
+                base_commit=run.commit_sha,
+                diff_digest=artifact.digest,
+                summary="Initial wording.",
+                edits=({"path": "main.tex", "after": "first"},),
+                attempt_id=first_attempt.id,
+            )
+        )
+        decision = database.decide_patch(patch.id, "reject", "Use more precise wording.")
+        second_artifact = database.add_artifact(
+            Artifact(
+                digest="2" * 64,
+                relative_path="sha256/22/" + "2" * 62,
+                size=14,
+                media_type="text/x-diff",
+            )
+        )
+        second_patch = database.create_patch(
+            Patch(
+                run_id=run.id,
+                base_commit=run.commit_sha,
+                diff_digest=second_artifact.digest,
+                summary="Different wording.",
+                edits=({"path": "main.tex", "after": "different"},),
+                attempt_id=first_attempt.id,
+            )
+        )
+        database.decide_patch(second_patch.id, "reject", "Return to the earlier wording.")
+        task = database.create_task(
+            Task(
+                run_id=run.id,
+                stage="revision",
+                role=AgentRole.REVISION,
+                route="primary",
+                input_digest="2" * 64,
+            )
+        )
+        second_attempt = database.create_attempt(Attempt(task_id=task.id, ordinal=1))
+        second_attempt = database.finish_attempt(second_attempt.id, AttemptStatus.COMPLETED)
+
+        reproposed = database.repropose_patch(
+            patch.id,
+            attempt_id=second_attempt.id,
+            summary="Revised wording.",
+            edits=({"path": "main.tex", "after": "second"},),
+            build_succeeded=True,
+        )
+
+        assert reproposed.id == patch.id
+        assert reproposed.status == PatchStatus.PROPOSED
+        assert reproposed.attempt_id == second_attempt.id
+        assert reproposed.summary == "Revised wording."
+        assert reproposed.edits == ({"path": "main.tex", "after": "second"},)
+        assert database.list_decisions("patch", patch.id) == [decision]
+        assert database.list_patches(run.id)[-1].id == patch.id
+        event = next(event for event in database.list_events(run.id) if event.event_type == "patch.reproposed")
+        assert event.payload == {
+            "from": "rejected",
+            "to": "proposed",
+            "previous_attempt_id": first_attempt.id,
+            "attempt_id": second_attempt.id,
+            "diff_digest": artifact.digest,
+        }
+
+        with pytest.raises(ConflictError, match="cannot be reproposed in status proposed"):
+            database.repropose_patch(
+                patch.id,
+                attempt_id=second_attempt.id,
+                summary="Third wording.",
+                edits=(),
+                build_succeeded=True,
             )

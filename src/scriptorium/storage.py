@@ -5,7 +5,7 @@ import json
 from pathlib import Path
 import sqlite3
 import threading
-from typing import Any, Iterator, Sequence
+from typing import Any, Iterator, Mapping, Sequence
 
 from scriptorium.domain import (
     AgentRole,
@@ -1036,10 +1036,63 @@ class Database:
 
     def list_patches(self, run_id: str) -> list[Patch]:
         rows = self.connection.execute(
-            "SELECT * FROM patches WHERE run_id = ? ORDER BY created_at, id",
+            "SELECT * FROM patches WHERE run_id = ? ORDER BY updated_at, id",
             (run_id,),
         ).fetchall()
         return [self._patch_from_row(row) for row in rows]
+
+    def repropose_patch(
+        self,
+        patch_id: str,
+        *,
+        attempt_id: str,
+        summary: str,
+        edits: Sequence[Mapping[str, Any]],
+        build_succeeded: bool,
+    ) -> Patch:
+        with self.transaction() as connection:
+            row = connection.execute("SELECT * FROM patches WHERE id = ?", (patch_id,)).fetchone()
+            if row is None:
+                raise NotFoundError(f"patch not found: {patch_id}")
+            current = PatchStatus(row["status"])
+            if current != PatchStatus.REJECTED:
+                raise ConflictError(f"patch cannot be reproposed in status {current.value}")
+            updated_at = utc_now()
+            connection.execute(
+                """
+                UPDATE patches
+                SET summary = ?, edits_json = ?, attempt_id = ?, status = ?,
+                    build_succeeded = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (
+                    summary,
+                    canonical_json(edits),
+                    attempt_id,
+                    PatchStatus.PROPOSED.value,
+                    int(build_succeeded),
+                    updated_at,
+                    patch_id,
+                ),
+            )
+            self._append_event_row(
+                connection,
+                Event(
+                    run_id=row["run_id"],
+                    event_type="patch.reproposed",
+                    entity_type="patch",
+                    entity_id=patch_id,
+                    payload={
+                        "from": current.value,
+                        "to": PatchStatus.PROPOSED.value,
+                        "previous_attempt_id": row["attempt_id"],
+                        "attempt_id": attempt_id,
+                        "diff_digest": row["diff_digest"],
+                    },
+                ),
+            )
+            row = connection.execute("SELECT * FROM patches WHERE id = ?", (patch_id,)).fetchone()
+        return self._patch_from_row(row)
 
     def decide_patch(self, patch_id: str, decision: str, reason: str, actor: str = "user") -> Decision:
         status_by_decision = {"approve": PatchStatus.APPROVED, "reject": PatchStatus.REJECTED}

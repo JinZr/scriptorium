@@ -17,7 +17,7 @@ def test_missing_structured_output_and_sdk_errors_are_failed_results(
 ) -> None:
     missing_output_sdk = make_sdk(
         response=FakeResponse(structured_output=None, usage=FakeUsage()),
-        current_steps=[FakeStep("finish", "DONE")],
+        current_steps=[FakeStep("finish", "DONE", type="FINISH")],
     )
     missing_output = asyncio.run(
         make_runtime(monkeypatch, missing_output_sdk).run_agent(
@@ -51,6 +51,93 @@ def test_missing_structured_output_and_sdk_errors_are_failed_results(
     assert failed.error == "resume state missing"
     assert failed.thread_id == "abcdef12-1234-1234-1234-123456789012"
     assert json.loads(failed.trace_jsonl.splitlines()[0])["step"]["id"] == "error"
+
+
+@pytest.mark.parametrize("recoverable_status", ["ERROR", "CANCELED"])
+def test_recoverable_step_failure_before_successful_finish_is_completed(
+    recoverable_status: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sdk = make_sdk(
+        response=FakeResponse(structured_output={"summary": "ok"}, usage=FakeUsage()),
+        current_steps=[
+            FakeStep("recoverable", recoverable_status, error="tool failed"),
+            FakeStep("finish", "DONE", type="FINISH"),
+        ],
+    )
+
+    result = asyncio.run(
+        make_runtime(monkeypatch, sdk).run_agent(
+            "Review.",
+            AgentRole.CONSISTENCY,
+            tmp_path,
+            {"type": "object"},
+            tmp_path / "state",
+        )
+    )
+
+    assert result.status == "completed"
+    assert result.final_response == '{"summary":"ok"}'
+    assert result.error is None
+
+
+@pytest.mark.parametrize(
+    ("finish_status", "expected_status"),
+    [("ERROR", "failed"), ("CANCELED", "interrupted")],
+)
+def test_terminal_finish_failure_controls_turn_status(
+    finish_status: str,
+    expected_status: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sdk = make_sdk(
+        response=FakeResponse(structured_output={"summary": "stale"}, usage=FakeUsage()),
+        current_steps=[
+            FakeStep("finish", finish_status, error="terminal failure", type="FINISH"),
+        ],
+    )
+
+    result = asyncio.run(
+        make_runtime(monkeypatch, sdk).run_agent(
+            "Review.",
+            AgentRole.CONSISTENCY,
+            tmp_path,
+            {"type": "object"},
+            tmp_path / "state",
+        )
+    )
+
+    assert result.status == expected_status
+    assert result.final_response is None
+    assert result.error == "terminal failure"
+
+
+def test_structured_output_without_current_finish_is_failed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sdk = make_sdk(
+        response=FakeResponse(structured_output={"summary": "from prior turn"}, usage=FakeUsage()),
+        current_steps=[FakeStep("tool", "DONE", type="TOOL")],
+        prior_history=[FakeStep("old-finish", "DONE", type="FINISH")],
+    )
+
+    result = asyncio.run(
+        make_runtime(monkeypatch, sdk).resume_agent(
+            "abcdef12-1234-1234-1234-123456789012",
+            "Resume.",
+            AgentRole.REVISION,
+            tmp_path,
+            {"type": "object"},
+            tmp_path / "state",
+        )
+    )
+
+    assert result.status == "failed"
+    assert result.final_response is None
+    assert result.error == "Antigravity turn did not complete with a successful FINISH step."
 
 
 def test_sdk_cancellation_is_interrupted_and_external_cancellation_is_reraised(

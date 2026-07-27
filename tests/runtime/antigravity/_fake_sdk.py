@@ -56,6 +56,7 @@ class FakeStep:
     status: str
     content: str = ""
     error: str = ""
+    type: str = "UNKNOWN"
 
 
 class FakeResponse:

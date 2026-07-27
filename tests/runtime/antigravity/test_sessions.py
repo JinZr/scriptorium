@@ -16,7 +16,7 @@ def test_resume_is_strict_and_reuses_session_directories(
 ) -> None:
     sdk = make_sdk(
         response=FakeResponse(structured_output={"corrected": True}, usage=FakeUsage()),
-        current_steps=[FakeStep("resume-step", "DONE")],
+        current_steps=[FakeStep("resume-step", "DONE", type="FINISH")],
     )
     runtime = make_runtime(monkeypatch, sdk)
     workspace = tmp_path / "workspace"
