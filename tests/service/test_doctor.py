@@ -6,7 +6,14 @@ import pytest
 from scriptorium.service import ScriptoriumService
 
 
-def make_repository(tmp_path: Path, runtime: str, provider: str) -> Path:
+def make_repository(
+    tmp_path: Path,
+    runtime: str,
+    provider: str,
+    *,
+    model: str = "model",
+    include_prices: bool = True,
+) -> Path:
     repo = tmp_path / "paper"
     repo.mkdir()
     (repo / ".git").mkdir()
@@ -32,9 +39,8 @@ def make_repository(tmp_path: Path, runtime: str, provider: str) -> Path:
             "[routes.primary]\n"
             f'runtime = "{runtime}"\n'
             f'model_provider = "{provider}"\n'
-            'model = "model"\n'
-            "input_usd_per_million = 0\n"
-            "output_usd_per_million = 0\n"
+            f'model = "{model}"\n'
+            + ("input_usd_per_million = 0\n" "output_usd_per_million = 0\n" if include_prices else "")
         ),
         encoding="utf-8",
     )
@@ -108,3 +114,68 @@ def test_doctor_reports_wrong_runtime_sdk_version_as_infrastructure_failure(
         "ok": False,
         "message": "expected 0.2.128, found 0.2.127",
     }
+
+
+def test_doctor_checks_runtime_when_model_is_not_ready(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo = make_repository(
+        tmp_path,
+        "claude_code",
+        "anthropic",
+        model="USER_CONFIGURED_MODEL",
+    )
+    prepare_doctor(monkeypatch)
+    monkeypatch.setattr("scriptorium.service.metadata.version", lambda package: "0.2.128")
+
+    with ScriptoriumService(repo) as service:
+        result = service.doctor(profile="quick")
+
+    assert result["exit_code"] == 2
+    assert not next(item for item in result["checks"] if item["name"] == "model_routes")["ok"]
+    assert next(item for item in result["checks"] if item["name"] == "runtime_claude_code_sdk")["ok"]
+
+
+def test_doctor_reports_runtime_failure_when_model_is_not_ready(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo = make_repository(
+        tmp_path,
+        "claude_code",
+        "anthropic",
+        model="USER_CONFIGURED_MODEL",
+    )
+    prepare_doctor(monkeypatch)
+    monkeypatch.setattr("scriptorium.service.metadata.version", lambda package: "0.2.127")
+
+    with ScriptoriumService(repo) as service:
+        result = service.doctor(profile="quick")
+
+    assert result["exit_code"] == 3
+    assert not next(item for item in result["checks"] if item["name"] == "model_routes")["ok"]
+    assert not next(item for item in result["checks"] if item["name"] == "runtime_claude_code_sdk")["ok"]
+
+
+def test_doctor_checks_antigravity_auth_when_budget_is_not_ready(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo = make_repository(
+        tmp_path,
+        "antigravity",
+        "gemini",
+        include_prices=False,
+    )
+    prepare_doctor(monkeypatch)
+    monkeypatch.setattr("scriptorium.service.metadata.version", lambda package: "0.1.8")
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+
+    with ScriptoriumService(repo) as service:
+        result = service.doctor(profile="quick", budget_usd=1)
+
+    assert result["exit_code"] == 3
+    assert not next(item for item in result["checks"] if item["name"] == "model_routes")["ok"]
+    assert next(item for item in result["checks"] if item["name"] == "runtime_antigravity_sdk")["ok"]
+    assert not next(item for item in result["checks"] if item["name"] == "antigravity_auth")["ok"]

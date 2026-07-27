@@ -34,8 +34,9 @@ Runtime-native session state stays under the stable run session directory, outsi
 ## Modules
 
 - `domain`: entities, enums, invariants, and state transitions.
-- `runtime`: runtime-neutral DTOs, `AgentRuntime`, and the Codex adapter.
-- `claude_runtime` and `antigravity_runtime`: optional, lazily imported native harness adapters.
+- `runtime/base.py`: runtime-neutral DTOs and `AgentRuntime`.
+- `runtime/codex.py`: the Codex adapter.
+- `runtime/claude_code.py` and `runtime/antigravity.py`: optional, lazily imported native harness adapters.
 - `workflow`: the deterministic `Armarius` scheduler, budgets, recovery, approval gates, and release gate.
 - `storage`: `sqlite3` migrations, transactions, and queries.
 - `artifacts`: SHA-256 content addressing and atomic publication.

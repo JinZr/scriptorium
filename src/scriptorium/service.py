@@ -107,14 +107,21 @@ class ScriptoriumService:
             engine or f"{self.project_config.manuscript.engine} was not found",
         )
         try:
+            role_keys = (*self.project_config.profiles[selected_profile], "revision", "verification")
+        except KeyError:
+            role_keys = ()
+        selected_runtimes: set[str] = set()
+        for role_key in role_keys:
+            try:
+                selected_runtimes.add(self.local_config.route_for_role(role_key).runtime)
+            except ConfigurationError:
+                continue
+        try:
             validate_ready(self.project_config, self.local_config, selected_profile, budget_usd)
         except ConfigurationError as exc:
             check("model_routes", False, str(exc))
-            selected_runtimes: set[str] = set()
         else:
             check("model_routes", True, f"profile {selected_profile}")
-            role_keys = (*self.project_config.profiles[selected_profile], "revision", "verification")
-            selected_runtimes = {self.local_config.route_for_role(role_key).runtime for role_key in role_keys}
         package_names = {
             "codex": "openai-codex",
             "claude_code": "claude-agent-sdk",
