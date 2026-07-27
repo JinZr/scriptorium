@@ -2,16 +2,18 @@
 
 ![Scriptorium manuscript review workflow](docs/assets/scriptorium-banner.png)
 
-Scriptorium is a local, single-user, Git-native workflow for reviewing, revising, and verifying LaTeX manuscripts with Codex. Git commits are the authority for manuscript content, SQLite records workflow state and human decisions, and a content-addressed artifact store preserves immutable inputs, model outputs, and evidence.
+Scriptorium is a lab-local, single-user, Git-native research tool for reviewing, revising, and verifying LaTeX manuscripts. Git commits are the authority for manuscript content, SQLite records durable workflow state and human decisions, and a content-addressed artifact store preserves immutable inputs, model outputs, and evidence.
 
-The v1 workflow is:
+The workflow is:
 
 ```text
 prepare → review → human decision → revision proposal
 → patch approval → verification → patch apply → completed
 ```
 
-`Armarius` is deterministic Python orchestration, not a model agent. Model work crosses one narrow `AgentRuntime` boundary and is implemented by the pinned Codex Python SDK. Scriptorium does not use LangGraph, an HTTP service, background workers, or native OpenAI, Anthropic, or Google model clients.
+Codex is the outer, user-facing harness: it starts and operates Scriptorium as part of the laboratory workflow. Inside Scriptorium, `Armarius` is deterministic Python orchestration, not a model agent. It dispatches each frozen role/route to one of three sibling native runtimes: `codex`, `claude_code`, or `antigravity`. The workers do not choose routes, create secondary subagents, or fall back to another runtime or model.
+
+Scriptorium intentionally has no LangGraph layer, HTTP service, or background queue.
 
 ## Requirements
 
@@ -19,15 +21,29 @@ prepare → review → human decision → revision proposal
 - Git
 - `latexmk` and a supported LaTeX engine (`pdflatex`, `xelatex`, or `lualatex`)
 - PDF rendering support for review bundles
-- Codex provider credentials and endpoint configuration outside the manuscript repository
+- Credentials or native login for every runtime referenced by the selected routes
+
+The base package includes the pinned Codex runtime:
+
+```bash
+python -m pip install .
+```
+
+Install native harnesses only when their routes are used:
+
+```bash
+python -m pip install '.[claude]'       # claude-agent-sdk==0.2.128
+python -m pip install '.[antigravity]'  # google-antigravity==0.1.8
+python -m pip install '.[all]'          # both optional runtimes
+```
 
 Install for development:
 
 ```bash
-python -m pip install -r requirements-dev.txt
+python -m pip install -e '.[dev,all]'
 ```
 
-For runtime dependencies only, use `python -m pip install -r requirements.txt`.
+`requirements.txt` and `requirements-dev.txt` retain the base Codex installation. Choose an extra explicitly when exercising a native Claude Code or Antigravity route.
 
 ## Quick start
 
@@ -71,9 +87,10 @@ Exit codes are `0` for command success or a passing gate, `1` for a valid domain
 ## Safety and authority
 
 - `.scriptorium/` is project-local and Git-ignored.
-- Codex receives only a generated manuscript bundle, never the repository's `.codex/`, `AGENTS.md`, scripts, unrelated files, or uncommitted content.
-- All v1 model roles are read-only. The Scribe returns structured edits; it cannot edit the manuscript.
-- Scriptorium does not silently fall back between models or routes.
+- A runtime receives only a generated manuscript bundle, never the repository's `.codex/`, `AGENTS.md`, scripts, unrelated files, or uncommitted content.
+- Model roles are read-only. Codex runs with a read-only sandbox and deny-all approvals; Claude Code is limited to `Read`, `Glob`, and `Grep`; Antigravity is limited to directory listing, search, find, view, and finish.
+- Bash, write/edit tools, web access, MCP, plugins, skills, external settings, and native subagents are unavailable to native workers.
+- Scriptorium accepts only structured output and never silently falls back between runtimes, models, providers, or routes.
 - Applying a patch rechecks source digests and stops if the worktree is stale.
 - Scriptorium never switches branches, merges, commits, pushes, or applies an unapproved patch.
 
@@ -100,3 +117,5 @@ python -m flake8 . --count --statistics
 python -m pytest -q
 python -m build
 ```
+
+Live native-harness smoke tests are skipped by default. They require an explicit per-runtime environment switch, a model name, and working native authentication; see [Operations and recovery](docs/operations.md#live-native-harness-smoke-tests).

@@ -2,58 +2,16 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Callable, Mapping
-from dataclasses import asdict, dataclass, is_dataclass
+from dataclasses import asdict, is_dataclass
 from enum import Enum
 from importlib import import_module
 import json
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, Literal, Protocol, runtime_checkable
+from typing import Any
 
-from .domain import ROLE_CATALOG, AgentRole
-
-AgentStatus = Literal["completed", "failed", "interrupted"]
-CODEX_SDK_VERSION = "0.144.4"
-
-
-class RuntimeUnavailable(RuntimeError):
-    pass
-
-
-@dataclass(frozen=True, slots=True)
-class AgentUsage:
-    input_tokens: int = 0
-    cached_input_tokens: int = 0
-    output_tokens: int = 0
-    reasoning_tokens: int = 0
-
-
-@dataclass(frozen=True, slots=True)
-class AgentResult:
-    thread_id: str | None
-    status: AgentStatus
-    final_response: str | None
-    usage: AgentUsage
-    trace_jsonl: str
-    runtime_name: str
-    runtime_version: str
-    model: str
-    model_provider: str
-    duration_ms: int | None
-    error: str | None
-
-
-@runtime_checkable
-class AgentRuntime(Protocol):
-    async def run_agent(
-        self,
-        task: str,
-        role: AgentRole,
-        workspace: Path,
-        schema: Mapping[str, object],
-    ) -> AgentResult: ...
-
-    async def resume_agent(self, thread_id: str, task: str) -> AgentResult: ...
+from ..domain import AgentRole
+from .base import CODEX_SDK_VERSION, AgentResult, AgentStatus, AgentUsage, RuntimeUnavailable, _role_instructions
 
 
 class CodexAgentRuntime:
@@ -99,6 +57,7 @@ class CodexAgentRuntime:
         role: AgentRole,
         workspace: Path,
         schema: Mapping[str, object],
+        session_dir: Path,
     ) -> AgentResult:
         thread_id: str | None = None
         notifications: list[dict[str, Any]] = []
@@ -134,7 +93,15 @@ class CodexAgentRuntime:
             return self._failed_result(thread_id, exc, notifications)
         return self._normalize_result(thread_id, turn, notifications)
 
-    async def resume_agent(self, thread_id: str, task: str) -> AgentResult:
+    async def resume_agent(
+        self,
+        thread_id: str,
+        task: str,
+        role: AgentRole,
+        workspace: Path,
+        schema: Mapping[str, object],
+        session_dir: Path,
+    ) -> AgentResult:
         notifications: list[dict[str, Any]] = []
         try:
             async with self._client_factory() as client:
@@ -145,6 +112,8 @@ class CodexAgentRuntime:
                         "model_reasoning_effort": self.reasoning,
                         "project_root_markers": ["manifest.json"],
                     },
+                    cwd=str(workspace.resolve()),
+                    developer_instructions=_role_instructions(role),
                     model=self.model,
                     model_provider=self.provider,
                     sandbox=self._sandbox,
@@ -156,6 +125,7 @@ class CodexAgentRuntime:
                     {
                         "effort": self.reasoning,
                         "model": self.model,
+                        "output_schema": dict(schema),
                         "sandbox": self._sandbox,
                     },
                     notifications,
@@ -217,14 +187,6 @@ class CodexAgentRuntime:
             duration_ms=None,
             error=str(exc) or "Codex runtime failed",
         )
-
-
-def _role_instructions(role: AgentRole) -> str:
-    spec = ROLE_CATALOG[role]
-    return (
-        f"You are {spec.display_name}, the Scriptorium {role.value} agent. {spec.description}. "
-        "Work read-only and do not modify files. Return only output matching the supplied JSON schema."
-    )
 
 
 def _normalize_status(value: Any) -> AgentStatus:

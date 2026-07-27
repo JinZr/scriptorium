@@ -5,7 +5,7 @@ import json
 from pathlib import Path
 import sqlite3
 import threading
-from typing import Any, Iterator, Sequence
+from typing import Any, Iterator, Mapping, Sequence
 
 from scriptorium.domain import (
     AgentRole,
@@ -31,7 +31,7 @@ from scriptorium.domain import (
     validate_task_transition,
 )
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 
 _MIGRATION_1 = """
@@ -221,6 +221,14 @@ COMMIT;
 """
 
 
+_MIGRATION_2 = """
+BEGIN IMMEDIATE;
+ALTER TABLE patches ADD COLUMN attempt_id TEXT REFERENCES attempts(id) ON DELETE RESTRICT;
+INSERT INTO schema_migrations (version, applied_at) VALUES (2, CURRENT_TIMESTAMP);
+COMMIT;
+"""
+
+
 class StorageError(RuntimeError):
     pass
 
@@ -262,6 +270,9 @@ class Database:
                 )
             if version == 0:
                 self.connection.executescript(_MIGRATION_1)
+                version = 1
+            if version == 1:
+                self.connection.executescript(_MIGRATION_2)
 
     @contextmanager
     def transaction(self) -> Iterator[sqlite3.Connection]:
@@ -973,14 +984,16 @@ class Database:
         return decision
 
     def create_patch(self, patch: Patch) -> Patch:
+        if patch.attempt_id is None:
+            raise ValueError("new patches require a generating attempt_id")
         with self.transaction() as connection:
             try:
                 connection.execute(
                     """
                     INSERT INTO patches (
-                        id, run_id, base_commit, diff_digest, summary, edits_json, status,
-                        build_succeeded, created_at, updated_at, applied_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        id, run_id, base_commit, diff_digest, summary, edits_json, attempt_id,
+                        status, build_succeeded, created_at, updated_at, applied_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         patch.id,
@@ -989,6 +1002,7 @@ class Database:
                         patch.diff_digest,
                         patch.summary,
                         canonical_json(patch.edits),
+                        patch.attempt_id,
                         patch.status.value,
                         int(patch.build_succeeded),
                         patch.created_at,
@@ -1005,7 +1019,11 @@ class Database:
                     event_type="patch.created",
                     entity_type="patch",
                     entity_id=patch.id,
-                    payload={"status": patch.status.value, "diff_digest": patch.diff_digest},
+                    payload={
+                        "status": patch.status.value,
+                        "diff_digest": patch.diff_digest,
+                        "attempt_id": patch.attempt_id,
+                    },
                 ),
             )
         return patch
@@ -1018,10 +1036,63 @@ class Database:
 
     def list_patches(self, run_id: str) -> list[Patch]:
         rows = self.connection.execute(
-            "SELECT * FROM patches WHERE run_id = ? ORDER BY created_at, id",
+            "SELECT * FROM patches WHERE run_id = ? ORDER BY updated_at, id",
             (run_id,),
         ).fetchall()
         return [self._patch_from_row(row) for row in rows]
+
+    def repropose_patch(
+        self,
+        patch_id: str,
+        *,
+        attempt_id: str,
+        summary: str,
+        edits: Sequence[Mapping[str, Any]],
+        build_succeeded: bool,
+    ) -> Patch:
+        with self.transaction() as connection:
+            row = connection.execute("SELECT * FROM patches WHERE id = ?", (patch_id,)).fetchone()
+            if row is None:
+                raise NotFoundError(f"patch not found: {patch_id}")
+            current = PatchStatus(row["status"])
+            if current != PatchStatus.REJECTED:
+                raise ConflictError(f"patch cannot be reproposed in status {current.value}")
+            updated_at = utc_now()
+            connection.execute(
+                """
+                UPDATE patches
+                SET summary = ?, edits_json = ?, attempt_id = ?, status = ?,
+                    build_succeeded = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (
+                    summary,
+                    canonical_json(edits),
+                    attempt_id,
+                    PatchStatus.PROPOSED.value,
+                    int(build_succeeded),
+                    updated_at,
+                    patch_id,
+                ),
+            )
+            self._append_event_row(
+                connection,
+                Event(
+                    run_id=row["run_id"],
+                    event_type="patch.reproposed",
+                    entity_type="patch",
+                    entity_id=patch_id,
+                    payload={
+                        "from": current.value,
+                        "to": PatchStatus.PROPOSED.value,
+                        "previous_attempt_id": row["attempt_id"],
+                        "attempt_id": attempt_id,
+                        "diff_digest": row["diff_digest"],
+                    },
+                ),
+            )
+            row = connection.execute("SELECT * FROM patches WHERE id = ?", (patch_id,)).fetchone()
+        return self._patch_from_row(row)
 
     def decide_patch(self, patch_id: str, decision: str, reason: str, actor: str = "user") -> Decision:
         status_by_decision = {"approve": PatchStatus.APPROVED, "reject": PatchStatus.REJECTED}
@@ -1353,6 +1424,7 @@ class Database:
             diff_digest=row["diff_digest"],
             summary=row["summary"],
             edits=tuple(json.loads(row["edits_json"])),
+            attempt_id=row["attempt_id"],
             status=PatchStatus(row["status"]),
             build_succeeded=bool(row["build_succeeded"]),
             created_at=row["created_at"],
