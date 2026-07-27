@@ -1,5 +1,7 @@
 # Scriptorium
 
+![Scriptorium manuscript review workflow](docs/assets/scriptorium-banner.png)
+
 Scriptorium is a local, single-user, Git-native workflow for reviewing, revising, and verifying LaTeX manuscripts with Codex. Git commits are the authority for manuscript content, SQLite records workflow state and human decisions, and a content-addressed artifact store preserves immutable inputs, model outputs, and evidence.
 
 The v1 workflow is:
