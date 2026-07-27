@@ -6,6 +6,7 @@ from dataclasses import asdict, is_dataclass
 from enum import Enum
 import hashlib
 from importlib import import_module
+from importlib.metadata import PackageNotFoundError, version as package_version
 import json
 from pathlib import Path
 from typing import Any
@@ -34,12 +35,14 @@ class ClaudeCodeAgentRuntime:
 
         try:
             sdk = (sdk_loader or (lambda: import_module("claude_agent_sdk")))()
-        except ImportError as exc:
+            version = (
+                str(package_version("claude-agent-sdk")) if sdk_loader is None else str(getattr(sdk, "__version__", ""))
+            )
+        except (ImportError, PackageNotFoundError) as exc:
             raise RuntimeUnavailable(
                 f"The Claude Code runtime requires claude-agent-sdk=={CLAUDE_SDK_VERSION}. "
                 "Install Scriptorium with the claude extra before running this route."
             ) from exc
-        version = str(getattr(sdk, "__version__", ""))
         if version != CLAUDE_SDK_VERSION:
             raise RuntimeUnavailable(
                 f"The Claude Code runtime requires claude-agent-sdk=={CLAUDE_SDK_VERSION}, "
