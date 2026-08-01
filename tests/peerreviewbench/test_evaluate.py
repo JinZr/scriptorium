@@ -438,6 +438,162 @@ def test_pinned_dataset_launcher_honors_upstream_script_path_bootstrap(tmp_path,
     assert output.read_text(encoding="utf-8") == "evaluation:root"
 
 
+def test_rubric_counts_launcher_emits_only_counts_and_pins_dataset_revision(tmp_path, monkeypatch, capsys) -> None:
+    calls = []
+    datasets = ModuleType("datasets")
+
+    def fake_load_dataset(path, *args, **kwargs):
+        calls.append((path, kwargs.get("revision")))
+
+    datasets.load_dataset = fake_load_dataset
+    build_rubric = ModuleType("build_rubric")
+
+    def build_rubric_with_texts():
+        datasets.load_dataset("owner/dataset")
+        print("gold rubric text must stay out of stdout")
+        return {1: [{"text": "secret"}, {"text": "secret"}], 2: [{"text": "secret"}]}, []
+
+    build_rubric.build_rubric_with_texts = build_rubric_with_texts
+    monkeypatch.setitem(sys.modules, "datasets", datasets)
+    monkeypatch.setitem(sys.modules, "build_rubric", build_rubric)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["launcher", "owner/dataset", "revision-1", str(tmp_path / "evaluation")],
+    )
+
+    exec(benchmark_evaluate.RUBRIC_COUNTS_LAUNCHER, {})
+
+    captured = capsys.readouterr()
+    assert json.loads(captured.out) == {"1": 2, "2": 1}
+    assert "gold rubric text" not in captured.out
+    assert "gold rubric text" in captured.err
+    assert calls == [("owner/dataset", "revision-1")]
+
+
+def test_load_rubric_counts_validates_total_and_returns_selected_subset(tmp_path) -> None:
+    def fake_runner(command, *, check, capture_output, text, input):
+        assert command[0] == sys.executable
+        assert command[2] == benchmark_evaluate.RUBRIC_COUNTS_LAUNCHER
+        assert command[-3:] == ["owner/dataset", "revision-1", str(tmp_path / "upstream/peerreview_bench/evaluation")]
+        assert check is False and capture_output is True and text is True and input is None
+        return subprocess.CompletedProcess(command, 0, stdout='{"1": 2, "2": 3}', stderr="")
+
+    counts = benchmark_evaluate.load_rubric_counts(
+        tmp_path / "upstream",
+        dataset_id="owner/dataset",
+        dataset_revision="revision-1",
+        paper_ids=[2],
+        expected_total=5,
+        runner=fake_runner,
+    )
+
+    assert counts == {"2": 3}
+
+
+@pytest.mark.parametrize(
+    ("returncode", "stdout", "expected_total", "paper_ids", "message"),
+    [
+        (1, "", 2, [1], "exited with 1"),
+        (0, "not-json", 2, [1], "invalid JSON"),
+        (0, "[]", 2, [1], "invalid counts"),
+        (0, '{"01": 2}', 2, [1], "invalid counts"),
+        (0, '{"1": true}', 1, [1], "invalid counts"),
+        (0, '{"1": 0}', 0, [1], "invalid counts"),
+        (0, '{"1": 2}', 3, [1], "rubric total differs"),
+        (0, '{"1": 2}', 2, [2], "paper2"),
+    ],
+)
+def test_load_rubric_counts_rejects_invalid_preflight_output(
+    tmp_path,
+    returncode: int,
+    stdout: str,
+    expected_total: int,
+    paper_ids: list[int],
+    message: str,
+) -> None:
+    def fake_runner(command, **kwargs):
+        return subprocess.CompletedProcess(command, returncode, stdout=stdout, stderr="")
+
+    with pytest.raises(benchmark_evaluate.BenchmarkError, match=message):
+        benchmark_evaluate.load_rubric_counts(
+            tmp_path / "upstream",
+            dataset_id="owner/dataset",
+            dataset_revision="revision-1",
+            paper_ids=paper_ids,
+            expected_total=expected_total,
+            runner=fake_runner,
+        )
+
+
+def test_rubric_count_failure_precedes_evaluation_view_and_judges(tmp_path, monkeypatch) -> None:
+    monkeypatch.delenv("LITELLM_API_KEY", raising=False)
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    evaluations_root = tmp_path / "evaluations"
+    upstream = {
+        "repository": "https://example.invalid/upstream",
+        "commit": "commit-1",
+        "archive_sha256": "archive-digest",
+    }
+    lock = {
+        "dataset": {"id": "owner/dataset", "revision": "revision-1", "rubric_items": 2},
+        "upstream": upstream,
+        "precision": {"container_image": "precision:test"},
+        "defaults": {
+            "similarity_model": "similarity-model",
+            "judge_model": "precision-model",
+            "recall_concurrency": 2,
+            "recall_temperature": 0.0,
+        },
+    }
+    run_manifest = {
+        "run_id": "benchmark-run",
+        "frozen_inputs": {
+            "dataset": {"id": "owner/dataset", "revision": "revision-1"},
+            "upstream": upstream,
+        },
+    }
+    exports = {1: benchmark_evaluate.export_findings([_finding(AgentRole.SUBSTANTIVE_REVIEW, 1)])}
+    calls = []
+
+    def fake_runner(command, **kwargs):
+        calls.append("rubric")
+        return subprocess.CompletedProcess(command, 0, stdout='{"2": 2}', stderr="")
+
+    monkeypatch.setattr(benchmark_evaluate, "load_lock", lambda: lock)
+    monkeypatch.setattr(benchmark_evaluate, "load_run_manifest", lambda path: run_manifest)
+    monkeypatch.setattr(
+        benchmark_evaluate,
+        "collect_exports",
+        lambda *args, **kwargs: (exports, _selection_stats()),
+    )
+    monkeypatch.setattr(
+        benchmark_evaluate,
+        "DatasetClient",
+        lambda *args: type("Client", (), {"assert_current_revision": lambda self: None})(),
+    )
+    monkeypatch.setattr(benchmark_evaluate, "prepare_upstream", lambda *args: tmp_path / "upstream")
+    monkeypatch.setattr(benchmark_evaluate, "resolve_precision_image", lambda image: PRECISION_IMAGE_ID)
+    monkeypatch.setattr(
+        benchmark_evaluate,
+        "prepare_evaluation_view",
+        lambda *args, **kwargs: pytest.fail("evaluation view must not be created"),
+    )
+
+    with pytest.raises(benchmark_evaluate.BenchmarkError, match="paper1"):
+        benchmark_evaluate.evaluate_benchmark(
+            run_dir=run_dir,
+            finding_mode="all",
+            cache_root=tmp_path / "cache",
+            evaluations_root=evaluations_root,
+            runner=fake_runner,
+        )
+
+    assert calls == ["rubric"]
+    assert not evaluations_root.exists()
+
+
 @pytest.mark.parametrize("temperature", [float("nan"), float("inf"), float("-inf")])
 def test_evaluate_rejects_non_finite_temperature(tmp_path, monkeypatch, temperature) -> None:
     monkeypatch.setattr(
@@ -614,7 +770,7 @@ def test_component_output_validation_reports_missing_and_errored_judgments() -> 
         ],
     }
 
-    errors = benchmark_evaluate.validate_component_outputs(recall, precision, exports)
+    errors = benchmark_evaluate.validate_component_outputs(recall, precision, exports, {"1": 1, "2": 1})
 
     assert any("recall papers differ" in error for error in errors)
     assert any("precision papers differ" in error for error in errors)
@@ -627,14 +783,36 @@ def test_component_output_validation_rejects_partial_pairs_and_invalid_labels() 
     exports = {1: benchmark_evaluate.export_findings([_finding(AgentRole.SUBSTANTIVE_REVIEW, 1)])}
     recall, precision = _valid_component_outputs()
 
-    assert benchmark_evaluate.validate_component_outputs(recall, precision, exports) == []
+    assert benchmark_evaluate.validate_component_outputs(recall, precision, exports, {"1": 2}) == []
 
     recall["per_paper"][0]["pair_details"].pop()
     precision["per_item"][0]["evidence"] = None
-    errors = benchmark_evaluate.validate_component_outputs(recall, precision, exports)
+    errors = benchmark_evaluate.validate_component_outputs(recall, precision, exports, {"1": 2})
 
     assert any("pair identities are incomplete" in error for error in errors)
     assert any("precision judge labels are invalid" in error for error in errors)
+
+
+def test_recall_validation_rejects_self_consistent_truncated_rubric() -> None:
+    exports = {1: benchmark_evaluate.export_findings([_finding(AgentRole.SUBSTANTIVE_REVIEW, 1)])}
+    recall, _ = _valid_component_outputs()
+    row = recall["per_paper"][0]
+    row["n_rubric"] = 1
+    row["n_pairs_scored"] = 1
+    row["n_covered"] = 1
+    row["recall"] = 1.0
+    row["pair_details"] = row["pair_details"][:1]
+    recall["total_rubric_items"] = 1
+    recall["total_covered"] = 1
+    recall["overall_recall"] = 1.0
+    invalid_papers: set[int] = set()
+
+    errors = benchmark_evaluate._validate_recall_output(recall, exports, {"1": 2}, invalid_papers)
+
+    assert any("rubric count differs for paper1" in error for error in errors)
+    assert any("pair identities are incomplete for paper1" in error for error in errors)
+    assert any("rubric total differs: expected 2, found 1" in error for error in errors)
+    assert invalid_papers == {1}
 
 
 @pytest.mark.parametrize("field", ["paper_id", "item_number"])
@@ -661,7 +839,7 @@ def test_recall_validation_rejects_non_integer_identities(field: str, value: obj
         recall["per_paper"][0]["pair_details"][0][field] = value
         expected_error = "pair without valid identity"
 
-    errors = benchmark_evaluate._validate_recall_output(recall, exports)
+    errors = benchmark_evaluate._validate_recall_output(recall, exports, {"1": 2})
 
     assert any(expected_error in error for error in errors)
 
@@ -759,6 +937,7 @@ def test_recall_validation_identifies_only_the_bad_paper() -> None:
     errors = benchmark_evaluate._validate_recall_output(
         recall,
         exports,
+        {"1": 1, "2": 1},
         invalid_papers,
     )
 
@@ -773,7 +952,7 @@ def test_recall_validation_rejects_non_finite_per_paper_score(paper_recall: floa
     recall["per_paper"][0]["recall"] = paper_recall
     invalid_papers: set[int] = set()
 
-    errors = benchmark_evaluate._validate_recall_output(recall, exports, invalid_papers)
+    errors = benchmark_evaluate._validate_recall_output(recall, exports, {"1": 2}, invalid_papers)
 
     assert any("recall score is inconsistent for paper1" in error for error in errors)
     assert invalid_papers == {1}
@@ -791,6 +970,7 @@ def test_complete_summary_reuse_requires_unchanged_component_outputs(tmp_path) -
         "finding_mode": "all",
         "model_slug": "scriptorium_all",
         "paper_ids": [1],
+        "rubric_counts": {"1": 2},
         "similarity_model": "similarity-model",
         "judge_model": "precision-model",
     }
@@ -896,7 +1076,7 @@ def test_complete_evaluation_is_reused_without_reinvoking_judges(tmp_path, monke
     exports = {1: benchmark_evaluate.export_findings([_finding(AgentRole.SUBSTANTIVE_REVIEW, 1)])}
     selection = _selection_stats()
     lock = {
-        "dataset": {"id": "owner/dataset", "revision": "revision-1"},
+        "dataset": {"id": "owner/dataset", "revision": "revision-1", "rubric_items": 2},
         "upstream": {
             "repository": "https://example.invalid/upstream",
             "commit": "commit-1",
@@ -914,14 +1094,14 @@ def test_complete_evaluation_is_reused_without_reinvoking_judges(tmp_path, monke
         "run_id": "benchmark-run",
         "status": "complete",
         "frozen_inputs": {
-            "dataset": lock["dataset"],
+            "dataset": {"id": "owner/dataset", "revision": "revision-1"},
             "upstream": lock["upstream"],
             "paper_ids": [1],
         },
         "papers": {"1": {"prepared_manifest_digest": "prepared-digest"}},
         "reviewer_cost_usd": 1.25,
     }
-    component_calls = []
+    component_calls: list[str] = []
 
     class FakeDatasetClient:
         def __init__(self, dataset_id: str, revision: str) -> None:
@@ -946,11 +1126,16 @@ def test_complete_evaluation_is_reused_without_reinvoking_judges(tmp_path, monke
 
     def fake_runner(command, *, check, capture_output, text, input):
         assert check is False and capture_output is True and text is True
+        if command[0] == sys.executable and command[2] == benchmark_evaluate.RUBRIC_COUNTS_LAUNCHER:
+            assert input is None
+            component_calls.append("rubric")
+            return subprocess.CompletedProcess(command, 0, stdout='{"1": 2}', stderr="")
         if command[0] == "docker":
             assert json.loads(input) == {"api_key": "test-key", "base_url": None}
+            component_calls.append("precision")
         else:
             assert input is None
-        component_calls.append(command)
+            component_calls.append("recall")
         recall, precision = _valid_component_outputs()
         payload = recall if any(Path(part).name == "evaluate_recall.py" for part in command) else precision
         output = (
@@ -999,14 +1184,15 @@ def test_complete_evaluation_is_reused_without_reinvoking_judges(tmp_path, monke
         "image": "precision:test",
         "image_id": PRECISION_IMAGE_ID,
     }
+    assert frozen["rubric_counts"] == {"1": 2}
     assert second == first
     assert second_dir == first_dir
-    assert len(component_calls) == 2
+    assert component_calls == ["rubric", "recall", "precision", "rubric"]
 
 
 def test_evaluate_rejects_run_from_different_locked_dataset(tmp_path, monkeypatch) -> None:
     lock = {
-        "dataset": {"id": "owner/dataset", "revision": "revision-1"},
+        "dataset": {"id": "owner/dataset", "revision": "revision-1", "rubric_items": 2},
         "upstream": {
             "repository": "https://example.invalid/upstream",
             "commit": "commit-1",
@@ -1134,7 +1320,7 @@ def test_evaluate_summary_marks_judge_errors_incomplete_and_keeps_f1(tmp_path, m
         "reviewer_cost_usd": 1.25,
     }
     lock = {
-        "dataset": {"id": "owner/dataset", "revision": "revision-1"},
+        "dataset": {"id": "owner/dataset", "revision": "revision-1", "rubric_items": 2},
         "upstream": {
             "repository": "https://example.invalid/upstream",
             "commit": "commit-1",
@@ -1176,6 +1362,9 @@ def test_evaluate_summary_marks_judge_errors_incomplete_and_keeps_f1(tmp_path, m
         assert check is False
         assert capture_output is True
         assert text is True
+        if command[0] == sys.executable and command[2] == benchmark_evaluate.RUBRIC_COUNTS_LAUNCHER:
+            assert input is None
+            return subprocess.CompletedProcess(command, 0, stdout='{"1": 2}', stderr="")
         if command[0] == "docker":
             assert json.loads(input) == {"api_key": "test-key", "base_url": None}
         else:
@@ -1276,6 +1465,7 @@ def test_malformed_component_rows_are_reported_instead_of_raising() -> None:
         {"per_paper": [{}]},
         {"n_items": "invalid", "per_item": [{}]},
         exports,
+        {"1": 1},
     )
 
     assert any("valid paper_id" in error for error in errors)
@@ -1317,7 +1507,7 @@ def test_unattributable_component_errors_invalidate_all_selected_caches(tmp_path
         "reviewer_cost_usd": 1.25,
     }
     lock = {
-        "dataset": {"id": "owner/dataset", "revision": "revision-1"},
+        "dataset": {"id": "owner/dataset", "revision": "revision-1", "rubric_items": 2},
         "upstream": {
             "repository": "https://example.invalid/upstream",
             "commit": "commit-1",
@@ -1413,6 +1603,11 @@ def test_unattributable_component_errors_invalidate_all_selected_caches(tmp_path
         lambda dataset_id, revision: type("Client", (), {"assert_current_revision": lambda self: None})(),
     )
     monkeypatch.setattr(benchmark_evaluate, "prepare_upstream", lambda upstream, cache_root: tmp_path / "upstream")
+    monkeypatch.setattr(
+        benchmark_evaluate,
+        "load_rubric_counts",
+        lambda *args, **kwargs: {"1": 1, "2": 1},
+    )
     monkeypatch.setattr(benchmark_evaluate, "prepare_evaluation_view", fake_prepare_view)
     monkeypatch.setattr(benchmark_evaluate, "_validate_evaluation_view", lambda *args: None)
     monkeypatch.setattr(benchmark_evaluate, "_verify_prepared_inputs", lambda *args, **kwargs: None)

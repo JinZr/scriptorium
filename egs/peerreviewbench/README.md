@@ -164,6 +164,10 @@ interruption caches remain available. The summary reports overall recall, precis
 selection counts, reviewer cost, timing, and errors. Upstream judge cost is recorded as unavailable because the
 pinned components do not expose it.
 
+Before judging, the wrapper independently derives and freezes each selected paper's rubric-item count from the locked
+upstream code and dataset revision. Only counts enter the evaluation manifest; this preflight does not copy rubric
+text or reviewer or item identities into the BYOJ paper view, prepared manuscript workspace, or agent bundle.
+
 The terminal-capable OpenHands precision evaluator never runs directly on the host. It runs in a read-only container
 with all Linux capabilities dropped: the pinned upstream source and prepared papers are mounted read-only, while only
 `precision.json`, the precision trajectory directory, and a dedicated evaluator cache are writable. No host directory

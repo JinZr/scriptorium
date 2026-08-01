@@ -95,6 +95,30 @@ PINNED_DATASET_LAUNCHER = (
     "sys.argv = [script, *script_args]\n"
     "runpy.run_path(script, run_name='__main__')\n"
 )
+RUBRIC_COUNTS_LAUNCHER = (
+    "import contextlib, json, os, sys\n"
+    "os.environ.setdefault('HF_HUB_DISABLE_XET', '1')\n"
+    "os.environ.setdefault('HF_HUB_ENABLE_HF_TRANSFER', '0')\n"
+    "os.environ.setdefault('HF_HUB_DOWNLOAD_TIMEOUT', '120')\n"
+    "os.environ.setdefault('HF_HUB_ETAG_TIMEOUT', '120')\n"
+    "import datasets\n"
+    "dataset_id, revision, evaluation = sys.argv[1:4]\n"
+    "load_dataset = datasets.load_dataset\n"
+    "def pinned_load_dataset(path, *args, **kwargs):\n"
+    "    if path == dataset_id:\n"
+    "        requested = kwargs.get('revision')\n"
+    "        if requested not in (None, revision):\n"
+    "            raise RuntimeError('dataset revision conflicts with benchmark lock')\n"
+    "        kwargs['revision'] = revision\n"
+    "    return load_dataset(path, *args, **kwargs)\n"
+    "datasets.load_dataset = pinned_load_dataset\n"
+    "with contextlib.redirect_stdout(sys.stderr):\n"
+    "    sys.path.insert(0, evaluation)\n"
+    "    from build_rubric import build_rubric_with_texts\n"
+    "    rubric, _ = build_rubric_with_texts()\n"
+    "counts = {str(paper_id): len(items) for paper_id, items in sorted(rubric.items())}\n"
+    "json.dump(counts, sys.stdout, sort_keys=True)\n"
+)
 PRECISION_CONTAINER_LAUNCHER = (
     "import json, os, sys\n"
     "from pathlib import Path\n"
@@ -317,6 +341,7 @@ def _evaluation_frozen_inputs(
     temperature: float,
     precision_image: str,
     precision_image_id: str,
+    rubric_counts: dict[str, int],
     lock: dict[str, Any],
 ) -> dict[str, Any]:
     return {
@@ -328,6 +353,7 @@ def _evaluation_frozen_inputs(
         "model_slug": f"scriptorium_{finding_mode.replace('-', '_')}",
         "export_digests": {str(paper_id): json_digest(items) for paper_id, items in sorted(exports.items())},
         "paper_ids": sorted(exports),
+        "rubric_counts": rubric_counts,
         "similarity_model": similarity_model,
         "judge_model": judge_model,
         "judge_endpoint": judge_endpoint_identity(),
@@ -563,6 +589,55 @@ def build_component_commands(
     return recall, precision
 
 
+def load_rubric_counts(
+    upstream_root: Path,
+    *,
+    dataset_id: str,
+    dataset_revision: str,
+    paper_ids: Iterable[int],
+    expected_total: int,
+    runner: ComponentRunner = subprocess.run,
+) -> dict[str, int]:
+    selected_ids = sorted(paper_ids)
+    command = [
+        sys.executable,
+        "-c",
+        RUBRIC_COUNTS_LAUNCHER,
+        dataset_id,
+        dataset_revision,
+        str(upstream_root / "peerreview_bench" / "evaluation"),
+    ]
+    try:
+        result = runner(command, check=False, capture_output=True, text=True, input=None)
+    except OSError as exc:
+        raise BenchmarkError(f"Cannot compute locked rubric counts: {exc}") from exc
+    if result.returncode:
+        raise BenchmarkError(f"Locked rubric count preflight exited with {result.returncode}")
+    try:
+        payload = json.loads(result.stdout or "")
+    except json.JSONDecodeError as exc:
+        raise BenchmarkError("Locked rubric count preflight returned invalid JSON") from exc
+    if not isinstance(payload, dict):
+        raise BenchmarkError("Locked rubric count preflight returned invalid counts")
+
+    counts: dict[str, int] = {}
+    for paper_id, count in payload.items():
+        if not re.fullmatch(r"[1-9][0-9]*", paper_id) or type(count) is not int or count < 1:
+            raise BenchmarkError("Locked rubric count preflight returned invalid counts")
+        counts[paper_id] = count
+    actual_total = sum(counts.values())
+    if actual_total != expected_total:
+        raise BenchmarkError(f"Locked rubric total differs: expected {expected_total}, found {actual_total}")
+
+    selected = {str(paper_id): counts[str(paper_id)] for paper_id in selected_ids if str(paper_id) in counts}
+    missing = [str(paper_id) for paper_id in selected_ids if str(paper_id) not in selected]
+    if missing:
+        raise BenchmarkError(
+            f"Selected papers have no locked rubric items: {', '.join('paper' + item for item in missing)}"
+        )
+    return selected
+
+
 def run_component(
     name: str,
     command: list[str],
@@ -707,13 +782,15 @@ def validate_component_outputs(
     recall: dict[str, Any],
     precision: dict[str, Any],
     exports: dict[int, list[dict[str, Any]]],
+    rubric_counts: dict[str, int],
 ) -> list[str]:
-    return _validate_recall_output(recall, exports) + _validate_precision_output(precision, exports)
+    return _validate_recall_output(recall, exports, rubric_counts) + _validate_precision_output(precision, exports)
 
 
 def _validate_recall_output(
     recall: dict[str, Any],
     exports: dict[int, list[dict[str, Any]]],
+    rubric_counts: dict[str, int],
     invalid_papers: set[int] | None = None,
 ) -> list[str]:
     errors = []
@@ -745,10 +822,11 @@ def _validate_recall_output(
         if invalid_papers is not None:
             invalid_papers.update(expected_papers - set(rows_by_paper))
 
-    total_rubric = 0
+    total_rubric = sum(rubric_counts[str(paper_id)] for paper_id in expected_papers)
     total_covered = 0
     for paper_id in sorted(expected_papers & set(rows_by_paper)):
         row = rows_by_paper[paper_id]
+        expected_n_rubric = rubric_counts[str(paper_id)]
         numeric_fields = ("n_rubric", "n_ai", "n_pairs_scored", "n_covered")
         if any(not isinstance(row.get(field), int) or isinstance(row.get(field), bool) for field in numeric_fields):
             errors.append(f"recall counts are missing or invalid for paper{paper_id}")
@@ -761,8 +839,10 @@ def _validate_recall_output(
             n_pairs = row["n_pairs_scored"]
             n_covered = row["n_covered"]
         expected_numbers = {int(item["item_number"]) for item in exports[paper_id]}
-        if n_rubric < 1:
-            errors.append(f"recall rubric count is invalid for paper{paper_id}")
+        if n_rubric != expected_n_rubric:
+            errors.append(
+                f"recall rubric count differs for paper{paper_id}: " f"expected {expected_n_rubric}, found {n_rubric}"
+            )
             if invalid_papers is not None:
                 invalid_papers.add(paper_id)
         if n_ai != len(expected_numbers):
@@ -772,7 +852,7 @@ def _validate_recall_output(
             if invalid_papers is not None:
                 invalid_papers.add(paper_id)
         expected_pair_keys = {
-            (rubric_index, item_number) for rubric_index in range(max(n_rubric, 0)) for item_number in expected_numbers
+            (rubric_index, item_number) for rubric_index in range(expected_n_rubric) for item_number in expected_numbers
         }
         pairs = row.get("pair_details")
         if not isinstance(pairs, list):
@@ -826,7 +906,7 @@ def _validate_recall_output(
             errors.append(f"recall pair identities are incomplete for paper{paper_id}")
             if invalid_papers is not None:
                 invalid_papers.add(paper_id)
-        if n_covered != len(covered) or not 0 <= n_covered <= n_rubric:
+        if n_covered != len(covered) or not 0 <= n_covered <= expected_n_rubric:
             errors.append(f"recall covered count is invalid for paper{paper_id}")
             if invalid_papers is not None:
                 invalid_papers.add(paper_id)
@@ -837,12 +917,11 @@ def _validate_recall_output(
             if invalid_papers is not None:
                 invalid_papers.add(paper_id)
         else:
-            expected_recall = n_covered / n_rubric if n_rubric else 0.0
+            expected_recall = n_covered / expected_n_rubric
             if not math.isfinite(paper_recall) or abs(paper_recall - expected_recall) > 1e-12:
                 errors.append(f"recall score is inconsistent for paper{paper_id}")
                 if invalid_papers is not None:
                     invalid_papers.add(paper_id)
-        total_rubric += n_rubric
         total_covered += n_covered
 
     if recall.get("n_papers") != len(expected_papers):
@@ -1048,13 +1127,14 @@ def complete_summary_is_reusable(
     run_manifest: dict[str, Any],
 ) -> bool:
     try:
+        frozen_inputs = evaluation_manifest["frozen_inputs"]
         recall = _load_json(recall_path)
         precision = _load_json(precision_path)
         actual_digests = {
             "recall": file_digest(recall_path),
             "precision": file_digest(precision_path),
         }
-        output_errors = validate_component_outputs(recall, precision, exports)
+        output_errors = validate_component_outputs(recall, precision, exports, frozen_inputs["rubric_counts"])
         metric_errors: list[str] = []
         recall_value = metric_value(recall, "overall_recall", metric_errors)
         precision_value = metric_value(precision, "precision", metric_errors)
@@ -1065,7 +1145,6 @@ def complete_summary_is_reusable(
             if recall_value is not None and precision_value is not None and recall_value + precision_value
             else 0.0
         )
-        frozen_inputs = evaluation_manifest["frozen_inputs"]
         selection = evaluation_manifest["selection"]
         created_at = summary["created_at"]
         created = datetime.fromisoformat(created_at)
@@ -1175,6 +1254,14 @@ def evaluate_benchmark(
     client = DatasetClient(lock["dataset"]["id"], lock["dataset"]["revision"])
     client.assert_current_revision()
     upstream_root = prepare_upstream(lock["upstream"], cache_root)
+    rubric_counts = load_rubric_counts(
+        upstream_root,
+        dataset_id=lock["dataset"]["id"],
+        dataset_revision=lock["dataset"]["revision"],
+        paper_ids=exports,
+        expected_total=int(lock["dataset"]["rubric_items"]),
+        runner=runner,
+    )
     frozen_inputs = _evaluation_frozen_inputs(
         run_dir,
         run_manifest,
@@ -1186,6 +1273,7 @@ def evaluate_benchmark(
         temperature,
         precision_image,
         precision_image_id,
+        rubric_counts,
         lock,
     )
     evaluation_dir = safe_cache_directory(
@@ -1280,7 +1368,11 @@ def evaluate_benchmark(
             errors.append(str(exc))
     invalid_recall_papers: set[int] = set()
     invalid_precision_papers: set[int] = set()
-    recall_output_errors = _validate_recall_output(recall, exports, invalid_recall_papers) if recall_loaded else []
+    recall_output_errors = (
+        _validate_recall_output(recall, exports, frozen_inputs["rubric_counts"], invalid_recall_papers)
+        if recall_loaded
+        else []
+    )
     precision_output_errors = (
         _validate_precision_output(precision, exports, invalid_precision_papers) if precision_loaded else []
     )
