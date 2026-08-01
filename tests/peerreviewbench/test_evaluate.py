@@ -352,15 +352,30 @@ def test_precision_image_resolution_requires_an_immutable_image_id(monkeypatch) 
 
 
 def test_precision_launcher_keeps_judge_credentials_out_of_the_environment(tmp_path, monkeypatch) -> None:
-    script = tmp_path / "evaluate_precision.py"
+    upstream_root = tmp_path / "peerreview_bench"
+    evaluation_root = upstream_root / "evaluation"
+    evaluation_root.mkdir(parents=True)
+    (evaluation_root / "precision_evaluation_marker.py").write_text("VALUE = 'evaluation'\n", encoding="utf-8")
+    (upstream_root / "precision_root_marker.py").write_text("VALUE = 'root'\n", encoding="utf-8")
+    script = evaluation_root / "evaluate_precision.py"
     output = tmp_path / "credentials.json"
     script.write_text(
         "from pathlib import Path\n"
         "import json, os, sys\n"
+        "_HERE = Path(__file__).resolve().parent\n"
+        "_BENCH_DIR = _HERE.parent\n"
+        "for _path in (_HERE, _BENCH_DIR):\n"
+        "    if str(_path) not in sys.path:\n"
+        "        sys.path.insert(0, str(_path))\n"
+        "from precision_evaluation_marker import VALUE as EVALUATION_MARKER\n"
+        "from precision_root_marker import VALUE as ROOT_MARKER\n"
+        "for _path in (str(_HERE), str(_BENCH_DIR)):\n"
+        "    while _path in sys.path:\n"
+        "        sys.path.remove(_path)\n"
         "def main():\n"
         "    api_key = os.environ.get('LITELLM_API_KEY')\n"
         "    base_url = os.environ.get('LITELLM_BASE_URL')\n"
-        "    Path(sys.argv[1]).write_text(json.dumps([api_key, base_url]))\n"
+        "    Path(sys.argv[1]).write_text(json.dumps([api_key, base_url, EVALUATION_MARKER, ROOT_MARKER]))\n"
         "if __name__ == '__main__':\n"
         "    main()\n",
         encoding="utf-8",
@@ -379,9 +394,48 @@ def test_precision_launcher_keeps_judge_credentials_out_of_the_environment(tmp_p
 
     exec(benchmark_evaluate.PRECISION_CONTAINER_LAUNCHER, {})
 
-    assert json.loads(output.read_text(encoding="utf-8")) == ["judge-secret", "https://judge.test"]
+    assert json.loads(output.read_text(encoding="utf-8")) == [
+        "judge-secret",
+        "https://judge.test",
+        "evaluation",
+        "root",
+    ]
     assert "LITELLM_API_KEY" not in os.environ
     assert "LITELLM_BASE_URL" not in os.environ
+
+
+def test_pinned_dataset_launcher_honors_upstream_script_path_bootstrap(tmp_path, monkeypatch) -> None:
+    upstream_root = tmp_path / "peerreview_bench"
+    evaluation_root = upstream_root / "evaluation"
+    evaluation_root.mkdir(parents=True)
+    (evaluation_root / "recall_evaluation_marker.py").write_text("VALUE = 'evaluation'\n", encoding="utf-8")
+    (upstream_root / "recall_root_marker.py").write_text("VALUE = 'root'\n", encoding="utf-8")
+    script = evaluation_root / "evaluate_recall.py"
+    output = tmp_path / "markers.txt"
+    script.write_text(
+        "from pathlib import Path\n"
+        "import sys\n"
+        "_HERE = Path(__file__).resolve().parent\n"
+        "_BENCH_DIR = _HERE.parent\n"
+        "for _path in (_HERE, _BENCH_DIR):\n"
+        "    if str(_path) not in sys.path:\n"
+        "        sys.path.insert(0, str(_path))\n"
+        "from recall_evaluation_marker import VALUE as EVALUATION_MARKER\n"
+        "from recall_root_marker import VALUE as ROOT_MARKER\n"
+        "for _path in (str(_HERE), str(_BENCH_DIR)):\n"
+        "    while _path in sys.path:\n"
+        "        sys.path.remove(_path)\n"
+        "Path(sys.argv[1]).write_text(EVALUATION_MARKER + ':' + ROOT_MARKER)\n",
+        encoding="utf-8",
+    )
+    datasets = ModuleType("datasets")
+    datasets.load_dataset = lambda *args, **kwargs: None
+    monkeypatch.setitem(sys.modules, "datasets", datasets)
+    monkeypatch.setattr(sys, "argv", ["launcher", "owner/dataset", "revision-1", str(script), str(output)])
+
+    exec(benchmark_evaluate.PINNED_DATASET_LAUNCHER, {})
+
+    assert output.read_text(encoding="utf-8") == "evaluation:root"
 
 
 @pytest.mark.parametrize("temperature", [float("nan"), float("inf"), float("-inf")])
