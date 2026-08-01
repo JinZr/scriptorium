@@ -14,6 +14,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import textwrap
 from typing import Any
 from urllib.parse import unquote, urlparse
@@ -26,9 +27,9 @@ try:
 except ModuleNotFoundError:  # pragma: no cover - Python 3.10
     import tomli as tomllib
 
-from scriptorium.config import ManuscriptConfig
+from scriptorium.config import ManuscriptConfig, load_local_config, load_project_config, validate_ready
 from scriptorium.domain import RunStatus
-from scriptorium.errors import InfrastructureError, StateError
+from scriptorium.errors import ConfigurationError, InfrastructureError, StateError
 from scriptorium.manuscript import BuildResult, FrozenRevision, ManuscriptManager, SourceFile
 from scriptorium.service import ScriptoriumService
 from scriptorium.workflow import RuntimeFactory
@@ -858,6 +859,18 @@ async def run_benchmark(
         )
     routes_digest = file_digest(routes_path)
     routes_summary = route_config_summary(routes_path)
+    with tempfile.TemporaryDirectory(prefix="scriptorium-peerreviewbench-routes-") as temporary:
+        validation_project = Path(temporary) / "project"
+        create_paper_project(validation_project, routes_path)
+        try:
+            validate_ready(
+                load_project_config(validation_project),
+                load_local_config(validation_project),
+                "full",
+                budget_usd,
+            )
+        except ConfigurationError as exc:
+            raise BenchmarkError(f"Route configuration is not ready: {exc}") from exc
     prepared = available_prepared_papers(cache_root, dataset["revision"], dataset["id"])
 
     if resume is not None:

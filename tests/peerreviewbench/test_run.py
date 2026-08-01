@@ -10,7 +10,7 @@ import pytest
 from egs.peerreviewbench.prepare import BenchmarkError, file_digest, load_lock
 import egs.peerreviewbench.run as benchmark_run
 from egs.peerreviewbench.run import PeerReviewBenchManuscriptManager, create_paper_project, run_benchmark
-from scriptorium.config import load_project_config
+from scriptorium.config import MODEL_PLACEHOLDER, load_project_config
 from scriptorium.domain import AgentRole, AttemptStatus, RunStatus, TaskStatus
 from scriptorium.runtime import AgentResult, AgentUsage
 from scriptorium.service import ScriptoriumService
@@ -733,6 +733,39 @@ def test_route_configuration_change_stops_before_next_paper(
         )
 
     assert len(route_digests) == 1
+
+
+@pytest.mark.parametrize(
+    ("old", "new", "budget_usd", "message"),
+    [
+        ('model = "fake-model"', f'model = "{MODEL_PLACEHOLDER}"', None, MODEL_PLACEHOLDER),
+        ("output_usd_per_million = 3\n", "", 1.0, "needs input_usd_per_million"),
+        ('figure_review = "primary"\n', "", None, "No model route configured"),
+    ],
+)
+def test_unready_route_configuration_is_rejected_before_run_creation(
+    tmp_path: Path,
+    old: str,
+    new: str,
+    budget_usd: float | None,
+    message: str,
+) -> None:
+    routes = _routes(tmp_path / "routes.toml")
+    routes.write_text(routes.read_text(encoding="utf-8").replace(old, new), encoding="utf-8")
+    runs_root = tmp_path / "runs"
+
+    with pytest.raises(BenchmarkError, match=message):
+        asyncio.run(
+            run_benchmark(
+                paper_ids=[17],
+                budget_usd=budget_usd,
+                cache_root=tmp_path / "cache",
+                runs_root=runs_root,
+                routes_path=routes,
+            )
+        )
+
+    assert not runs_root.exists()
 
 
 @pytest.mark.parametrize("budget_usd", [float("nan"), float("inf"), float("-inf")])
