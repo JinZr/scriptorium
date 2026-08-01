@@ -1284,11 +1284,12 @@ def evaluate_benchmark(
         if not component_errors:
             continue
         try:
+            target_papers = sorted(invalid_papers) or frozen_inputs["paper_ids"]
             cache_invalidations[component] = invalidate_component_caches(
                 evaluation_dir,
                 frozen_inputs,
                 component,
-                sorted(invalid_papers),
+                target_papers,
             )
         except BenchmarkError as exc:
             errors.append(str(exc))

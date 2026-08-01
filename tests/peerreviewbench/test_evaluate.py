@@ -1185,3 +1185,163 @@ def test_malformed_component_rows_are_reported_instead_of_raising() -> None:
     assert any("valid paper_id" in error for error in errors)
     assert any("item identities differ" in error for error in errors)
     assert any("item count differs" in error for error in errors)
+
+
+def test_unattributable_component_errors_invalidate_all_selected_caches(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("LITELLM_API_KEY", "test-key")
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    evaluations_root = tmp_path / "evaluations"
+    exports = {
+        paper_id: [
+            {
+                "item_number": 1,
+                "scriptorium": {"role": "substantive_review"},
+            }
+        ]
+        for paper_id in (1, 2)
+    }
+    selection = _selection_stats(raw=2, selected=2)
+    run_manifest = {
+        "run_id": "benchmark-run",
+        "status": "complete",
+        "frozen_inputs": {
+            "dataset": {"id": "owner/dataset", "revision": "revision-1"},
+            "upstream": {
+                "repository": "https://example.invalid/upstream",
+                "commit": "commit-1",
+                "archive_sha256": "archive-digest",
+            },
+            "paper_ids": [1, 2],
+        },
+        "papers": {
+            "1": {"prepared_manifest_digest": "prepared-1"},
+            "2": {"prepared_manifest_digest": "prepared-2"},
+        },
+        "reviewer_cost_usd": 1.25,
+    }
+    lock = {
+        "dataset": {"id": "owner/dataset", "revision": "revision-1"},
+        "upstream": {
+            "repository": "https://example.invalid/upstream",
+            "commit": "commit-1",
+            "archive_sha256": "archive-digest",
+        },
+        "precision": {"container_image": "precision:test"},
+        "defaults": {
+            "similarity_model": "similarity-model",
+            "judge_model": "precision-model",
+            "recall_concurrency": 2,
+            "recall_temperature": 0.0,
+        },
+    }
+
+    def fake_prepare_view(evaluation_dir, frozen_inputs, selection_stats, actual_exports, cache_root):
+        del actual_exports, cache_root
+        evaluation_dir.mkdir(parents=True, exist_ok=True)
+        (evaluation_dir / "papers").mkdir()
+        for paper_id in frozen_inputs["paper_ids"]:
+            (evaluation_dir / "papers" / f"paper{paper_id}").mkdir()
+        precision_root = benchmark_evaluate._component_cache_root(evaluation_dir, frozen_inputs, "precision")
+        for paper_id in frozen_inputs["paper_ids"]:
+            prediction = precision_root / f"paper{paper_id}" / "prediction.json"
+            prediction.parent.mkdir(parents=True)
+            prediction.write_text("cached", encoding="utf-8")
+        manifest = {
+            "frozen_inputs": frozen_inputs,
+            "selection": selection_stats,
+            "package_versions": {},
+        }
+        (evaluation_dir / "evaluation_manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+        return manifest
+
+    recall = {
+        "n_papers": 2,
+        "total_rubric_items": 2,
+        "total_covered": 2,
+        "overall_recall": 1.0,
+        "per_paper": [
+            {
+                "paper_id": paper_id,
+                "n_rubric": 1,
+                "n_ai": 1,
+                "n_pairs_scored": 1,
+                "n_covered": 1,
+                "recall": 1.0,
+                "pair_details": [
+                    {
+                        "rubric_idx": 0,
+                        "ai_item_number": 1,
+                        "parsed_binary": "similar",
+                        "is_similar": True,
+                        "error": None,
+                    }
+                ],
+            }
+            for paper_id in (1, 2)
+        ],
+    }
+    precision = {
+        "n_papers": 2,
+        "n_items": 0,
+        "n_fully_good": 2,
+        "precision": 1.0,
+        "per_item": [
+            {
+                "paper_id": paper_id,
+                "item_number": 1,
+                "correctness": "Correct",
+                "significance": "Significant",
+                "evidence": "Sufficient",
+                "is_fully_good": True,
+            }
+            for paper_id in (1, 2)
+        ],
+    }
+
+    def fake_run_component(name, command, output_dir, runner=subprocess.run, input_text=None):
+        del command, runner, input_text
+        (output_dir / f"{name}.json").write_text(json.dumps(recall if name == "recall" else precision))
+        return 0
+
+    monkeypatch.setattr(benchmark_evaluate, "load_lock", lambda: lock)
+    monkeypatch.setattr(benchmark_evaluate, "load_run_manifest", lambda path: run_manifest)
+    monkeypatch.setattr(
+        benchmark_evaluate,
+        "collect_exports",
+        lambda path, manifest, finding_mode, cache_root: (exports, selection),
+    )
+    monkeypatch.setattr(
+        benchmark_evaluate,
+        "DatasetClient",
+        lambda dataset_id, revision: type("Client", (), {"assert_current_revision": lambda self: None})(),
+    )
+    monkeypatch.setattr(benchmark_evaluate, "prepare_upstream", lambda upstream, cache_root: tmp_path / "upstream")
+    monkeypatch.setattr(benchmark_evaluate, "prepare_evaluation_view", fake_prepare_view)
+    monkeypatch.setattr(benchmark_evaluate, "_validate_evaluation_view", lambda *args: None)
+    monkeypatch.setattr(benchmark_evaluate, "_verify_prepared_inputs", lambda *args, **kwargs: None)
+    monkeypatch.setattr(benchmark_evaluate, "package_versions", lambda: {})
+    monkeypatch.setattr(benchmark_evaluate, "resolve_precision_image", lambda image: PRECISION_IMAGE_ID)
+    monkeypatch.setattr(
+        benchmark_evaluate, "build_component_commands", lambda *args, **kwargs: (["recall"], ["precision"])
+    )
+    monkeypatch.setattr(benchmark_evaluate, "run_component", fake_run_component)
+
+    evaluation_dir, summary = benchmark_evaluate.evaluate_benchmark(
+        run_dir=run_dir,
+        finding_mode="all",
+        cache_root=tmp_path / "cache",
+        evaluations_root=evaluations_root,
+    )
+
+    precision_root = (
+        evaluation_dir
+        / "precision-work"
+        / "reviewer_scriptorium_all_meta_reviewer_precision-model_precision_trajectories"
+    )
+    cache_prefix = "precision-work/reviewer_scriptorium_all_meta_reviewer_precision-model_precision_trajectories"
+    assert summary["status"] == "incomplete"
+    assert summary["invalidated_component_caches"]["precision"] == [
+        f"{cache_prefix}/paper{paper_id}/prediction.json" for paper_id in (1, 2)
+    ]
+    assert all(not (precision_root / f"paper{paper_id}" / "prediction.json").exists() for paper_id in (1, 2))
