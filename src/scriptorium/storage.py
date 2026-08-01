@@ -749,6 +749,10 @@ class Database:
     def add_artifact(self, artifact: Artifact) -> Artifact:
         return self.record_artifact(artifact)
 
+    def list_artifacts(self) -> list[Artifact]:
+        rows = self.connection.execute("SELECT * FROM artifacts ORDER BY digest").fetchall()
+        return [self._artifact_from_row(row) for row in rows]
+
     def get_artifact(self, digest: str) -> Artifact:
         row = self.connection.execute("SELECT * FROM artifacts WHERE digest = ?", (digest,)).fetchone()
         if row is None:

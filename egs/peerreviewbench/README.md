@@ -101,6 +101,10 @@ digest, paper selection, per-paper core run IDs, attempt provenance, prompt/sche
 duration, finding payload digest, and status. A completed paper is one whose four review tasks reached
 `awaiting_decision`.
 
+Before a completed paper is accepted on resume, the benchmark rechecks the frozen bundle directory digest, its source
+map, PDF, rendered pages, and every content-addressed artifact in the paper's Scriptorium store, including build
+evidence and task artifacts.
+
 If a run is interrupted or a task fails, correct the external problem and resume the same directory:
 
 ```bash

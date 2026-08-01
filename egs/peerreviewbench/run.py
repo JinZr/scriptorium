@@ -754,6 +754,54 @@ def _validate_completed_paper(
         validate_completed_scriptorium_state(service, entry)
 
 
+def _validate_completed_bundle(service: ScriptoriumService, core_run: Any, paper_id: int) -> None:
+    bundle_dir = service.armarius._run_dir(core_run.id) / "bundle"
+    if bundle_dir.is_symlink():
+        raise BenchmarkError(f"paper{paper_id} bundle directory is unsafe: {bundle_dir}")
+    for path in bundle_dir.rglob("*"):
+        if path.is_symlink():
+            raise BenchmarkError(f"paper{paper_id} bundle contains an unsafe symlink: {path}")
+
+    try:
+        bundle = service.armarius._bundle_for_run(core_run)
+        run_manifest_path = service.armarius._run_dir(core_run.id) / "manifest.json"
+        if run_manifest_path.is_symlink():
+            raise BenchmarkError(f"paper{paper_id} core run manifest is unsafe: {run_manifest_path}")
+        run_manifest = json.loads(run_manifest_path.read_text(encoding="utf-8"))
+    except (InfrastructureError, KeyError, OSError, TypeError, ValueError) as exc:
+        raise BenchmarkError(f"paper{paper_id} frozen bundle failed validation: {exc}") from exc
+
+    bundle_digest = run_manifest.get("bundle_digest")
+    if (
+        run_manifest.get("run_id") != core_run.id
+        or not isinstance(bundle_digest, str)
+        or re.fullmatch(r"[0-9a-f]{64}", bundle_digest) is None
+        or service.armarius._directory_digest(bundle.workspace) != bundle_digest
+    ):
+        raise BenchmarkError(f"paper{paper_id} frozen bundle digest changed")
+
+    bundle_manifest_path = bundle.workspace / "manifest.json"
+    source_map_path = bundle.workspace / "source-map.json"
+    if not source_map_path.is_file() or source_map_path.is_symlink():
+        raise BenchmarkError(f"paper{paper_id} bundle source map is missing or unsafe")
+    bundle_manifest = json.loads(bundle_manifest_path.read_text(encoding="utf-8"))
+    expected_digests = {source.digest for source in bundle.sources} | {
+        bundle_manifest["pdf_digest"],
+        *(page["digest"] for page in bundle_manifest["pages"]),
+        file_digest(bundle_manifest_path),
+        file_digest(source_map_path),
+        json_digest(run_manifest),
+    }
+    artifacts = service.database.list_artifacts()
+    actual_digests = {artifact.digest for artifact in artifacts}
+    for artifact in artifacts:
+        if not service.artifacts.verify(artifact.digest):
+            raise BenchmarkError(f"paper{paper_id} artifact failed verification: {artifact.digest}")
+    missing = sorted(expected_digests - actual_digests)
+    if missing:
+        raise BenchmarkError(f"paper{paper_id} content-addressed artifact is missing: {missing[0]}")
+
+
 def validate_completed_scriptorium_state(
     service: ScriptoriumService,
     entry: dict[str, Any],
@@ -769,6 +817,7 @@ def validate_completed_scriptorium_state(
     current_summary = summarize_scriptorium_run(service, run_id)
     if current_summary != entry.get("scriptorium"):
         raise BenchmarkError(f"paper{entry['paper_id']} Scriptorium state changed after completion")
+    _validate_completed_bundle(service, core_run, int(entry["paper_id"]))
     for task in current_summary["tasks"]:
         for attempt in task["attempts"]:
             for field in (

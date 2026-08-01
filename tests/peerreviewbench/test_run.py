@@ -355,10 +355,17 @@ def test_full_profile_service_persists_findings_artifacts_and_cost(tmp_path: Pat
         assert len(findings) == 4
         assert {finding.role for finding in findings} == ROLES
         assert {finding.task_id for finding in findings} == {item["task"].id for item in review_tasks}
-        frozen_entry = {
+        valid_entry = {
             "paper_id": 8,
             "scriptorium_run_id": run.id,
             "scriptorium": benchmark_run.summarize_scriptorium_run(service, run.id),
+        }
+        assert benchmark_run.validate_completed_scriptorium_state(service, valid_entry) is None
+
+        frozen_entry = {
+            "paper_id": valid_entry["paper_id"],
+            "scriptorium_run_id": valid_entry["scriptorium_run_id"],
+            "scriptorium": dict(valid_entry["scriptorium"]),
         }
         frozen_entry["scriptorium"]["finding_payload_digest"] = "0" * 64
         with pytest.raises(BenchmarkError, match="state changed after completion"):
@@ -371,6 +378,23 @@ def test_full_profile_service_persists_findings_artifacts_and_cost(tmp_path: Pat
             assert service.database.get_artifact(source["digest"]).digest == source["digest"]
         for page in bundle_manifest["pages"]:
             assert service.database.get_artifact(page["digest"]).digest == page["digest"]
+
+        build_log = next(
+            artifact
+            for artifact in service.database.list_artifacts()
+            if artifact.media_type == "text/plain; charset=utf-8"
+        )
+        build_log_path = service.artifacts.path_for(build_log.digest)
+        build_log_bytes = build_log_path.read_bytes()
+        build_log_path.write_bytes(b"corrupt build evidence")
+        with pytest.raises(BenchmarkError, match="artifact failed verification"):
+            benchmark_run.validate_completed_scriptorium_state(service, valid_entry)
+        build_log_path.write_bytes(build_log_bytes)
+
+        bundle_source = project / ".scriptorium" / "runs" / run.id / "bundle" / "sources" / "preprint" / "preprint.md"
+        bundle_source.unlink()
+        with pytest.raises(BenchmarkError, match="bundle"):
+            benchmark_run.validate_completed_scriptorium_state(service, valid_entry)
 
 
 def test_completed_benchmark_paper_is_not_repeated_on_resume(
