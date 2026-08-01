@@ -36,6 +36,7 @@ def test_full_workflow_preserves_worktree_until_approved_patch_is_applied(tmp_pa
         assert "start_line, end_line, source_digest, and quoted_text must be supplied" in review_prompt
         assert 'use source_path "manuscript.pdf", set page to a valid 1-based PDF page number' in review_prompt
         assert "copy quoted_text verbatim from the cited page" in review_prompt
+        assert "never line-anchor .pdf files or other graphics/binary assets" in review_prompt
         assert "ReviewOutput JSON object with no prose before or after it" in review_prompt
         frozen_route = started["run"].frozen_config["local"]["routes"]["primary"]
         assert frozen_route["runtime"] == "codex"
@@ -76,6 +77,7 @@ def test_full_workflow_preserves_worktree_until_approved_patch_is_applied(tmp_pa
         assert "start_line, end_line, source_digest, and quoted_text must be supplied" in verification_prompt
         assert 'use source_path "manuscript.pdf", set page to a valid 1-based PDF page number' in verification_prompt
         assert "copy quoted_text verbatim from the cited page" in verification_prompt
+        assert "never line-anchor .pdf files or other graphics/binary assets" in verification_prompt
         assert "VerificationOutput JSON object with no prose before or after it" in verification_prompt
         assert repo.joinpath("main.tex").read_text(encoding="utf-8") == MANUSCRIPT
         assert service.evaluate_gate(run_id)["passed"] is False
