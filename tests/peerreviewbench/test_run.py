@@ -311,6 +311,10 @@ def test_generated_project_rejects_symlinked_state(tmp_path: Path) -> None:
         benchmark_run.validate_paper_project(project, routes)
 
 
+def test_package_versions_include_pydantic() -> None:
+    assert "pydantic" in benchmark_run.package_versions()
+
+
 def test_full_profile_service_persists_findings_artifacts_and_cost(tmp_path: Path) -> None:
     prepared = _prepared_paper(
         tmp_path / "prepared",

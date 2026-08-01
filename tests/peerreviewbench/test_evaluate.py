@@ -384,6 +384,29 @@ def test_precision_launcher_keeps_judge_credentials_out_of_the_environment(tmp_p
     assert "LITELLM_BASE_URL" not in os.environ
 
 
+@pytest.mark.parametrize("temperature", [float("nan"), float("inf"), float("-inf")])
+def test_evaluate_rejects_non_finite_temperature(tmp_path, monkeypatch, temperature) -> None:
+    monkeypatch.setattr(
+        benchmark_evaluate,
+        "load_lock",
+        lambda: {
+            "defaults": {
+                "similarity_model": "similarity-model",
+                "judge_model": "judge-model",
+                "recall_concurrency": 1,
+                "recall_temperature": 0.0,
+            }
+        },
+    )
+
+    with pytest.raises(benchmark_evaluate.BenchmarkError, match="temperature must be finite"):
+        benchmark_evaluate.evaluate_benchmark(
+            run_dir=tmp_path / "run",
+            finding_mode="all",
+            temperature=temperature,
+        )
+
+
 def test_invalid_component_cache_files_are_removed_for_retry(tmp_path) -> None:
     frozen = {
         "model_slug": "scriptorium_per_role_5",

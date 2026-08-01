@@ -431,6 +431,7 @@ def package_versions() -> dict[str, str | None]:
         "datasets",
         "huggingface_hub",
         "numpy",
+        "pydantic",
         "tqdm",
         "openhands-ai",
     )

@@ -1137,6 +1137,8 @@ def evaluate_benchmark(
     temperature = temperature if temperature is not None else float(defaults["recall_temperature"])
     if concurrency < 1:
         raise BenchmarkError("--concurrency must be positive")
+    if not math.isfinite(temperature):
+        raise BenchmarkError("--temperature must be finite")
     run_manifest = load_run_manifest(run_dir)
     expected_dataset = {
         "id": lock["dataset"]["id"],
