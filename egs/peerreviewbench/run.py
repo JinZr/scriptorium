@@ -784,11 +784,12 @@ def _validate_completed_bundle(service: ScriptoriumService, core_run: Any, paper
         file_digest(source_map_path),
         json_digest(run_manifest),
     }
-    artifacts = service.database.list_artifacts()
-    actual_digests = {artifact.digest for artifact in artifacts}
-    for artifact in artifacts:
-        if not service.artifacts.verify(artifact.digest):
-            raise BenchmarkError(f"paper{paper_id} artifact failed verification: {artifact.digest}")
+    artifact_rows = service.database.connection.execute("SELECT digest FROM artifacts ORDER BY digest").fetchall()
+    artifact_digests = [str(row["digest"]) for row in artifact_rows]
+    actual_digests = set(artifact_digests)
+    for digest in artifact_digests:
+        if not service.artifacts.verify(digest):
+            raise BenchmarkError(f"paper{paper_id} artifact failed verification: {digest}")
     missing = sorted(expected_digests - actual_digests)
     if missing:
         raise BenchmarkError(f"paper{paper_id} content-addressed artifact is missing: {missing[0]}")
