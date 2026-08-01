@@ -10,7 +10,7 @@ import pytest
 from egs.peerreviewbench.prepare import BenchmarkError, file_digest, load_lock
 import egs.peerreviewbench.run as benchmark_run
 from egs.peerreviewbench.run import PeerReviewBenchManuscriptManager, create_paper_project, run_benchmark
-from scriptorium.config import MODEL_PLACEHOLDER, load_project_config
+from scriptorium.config import MODEL_PLACEHOLDER, load_local_config, load_project_config
 from scriptorium.domain import AgentRole, AttemptStatus, RunStatus, TaskStatus
 from scriptorium.runtime import AgentResult, AgentUsage
 from scriptorium.service import ScriptoriumService
@@ -183,6 +183,25 @@ def _routes(path: Path) -> Path:
         encoding="utf-8",
     )
     return path
+
+
+def test_route_config_summary_uses_normalized_route_values(tmp_path: Path) -> None:
+    routes = _routes(tmp_path / "routes.toml")
+    routes.write_text(
+        routes.read_text(encoding="utf-8")
+        .replace('runtime = "codex"', 'runtime = " codex "')
+        .replace('model_provider = "test"', 'model_provider = " test "')
+        .replace('model = "fake-model"', 'model = " fake-model "'),
+        encoding="utf-8",
+    )
+    project = tmp_path / "project"
+    create_paper_project(project, routes)
+
+    summary = benchmark_run.route_config_summary(load_local_config(project))
+
+    assert summary["routes"]["primary"]["runtime"] == "codex"
+    assert summary["routes"]["primary"]["model_provider"] == "test"
+    assert summary["routes"]["primary"]["model"] == "fake-model"
 
 
 def _project(tmp_path: Path, prepared: Path) -> tuple[Path, PeerReviewBenchManuscriptManager]:

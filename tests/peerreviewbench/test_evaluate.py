@@ -637,6 +637,35 @@ def test_component_output_validation_rejects_partial_pairs_and_invalid_labels() 
     assert any("precision judge labels are invalid" in error for error in errors)
 
 
+@pytest.mark.parametrize("field", ["paper_id", "item_number"])
+@pytest.mark.parametrize("value", [True, 1.0, 1.9, "1"])
+def test_precision_validation_rejects_non_integer_identities(field: str, value: object) -> None:
+    exports = {1: benchmark_evaluate.export_findings([_finding(AgentRole.SUBSTANTIVE_REVIEW, 1)])}
+    _, precision = _valid_component_outputs()
+    precision["per_item"][0][field] = value
+
+    errors = benchmark_evaluate._validate_precision_output(precision, exports)
+
+    assert any("without a valid paper_id or item_number" in error for error in errors)
+
+
+@pytest.mark.parametrize("field", ["paper_id", "rubric_idx", "ai_item_number"])
+@pytest.mark.parametrize("value", [True, 1.0, 1.9, "1"])
+def test_recall_validation_rejects_non_integer_identities(field: str, value: object) -> None:
+    exports = {1: benchmark_evaluate.export_findings([_finding(AgentRole.SUBSTANTIVE_REVIEW, 1)])}
+    recall, _ = _valid_component_outputs()
+    if field == "paper_id":
+        recall["per_paper"][0][field] = value
+        expected_error = "without a valid paper_id"
+    else:
+        recall["per_paper"][0]["pair_details"][0][field] = value
+        expected_error = "pair without valid identity"
+
+    errors = benchmark_evaluate._validate_recall_output(recall, exports)
+
+    assert any(expected_error in error for error in errors)
+
+
 def test_precision_validation_identifies_only_the_bad_paper() -> None:
     exports = {
         1: benchmark_evaluate.export_findings([_finding(AgentRole.SUBSTANTIVE_REVIEW, 1)]),

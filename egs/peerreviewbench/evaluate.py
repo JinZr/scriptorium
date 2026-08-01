@@ -728,7 +728,9 @@ def _validate_recall_output(
             errors.append("recall contains a non-object paper row")
             continue
         try:
-            paper_id = int(row["paper_id"])
+            paper_id = row["paper_id"]
+            if type(paper_id) is not int:
+                raise TypeError
         except (KeyError, TypeError, ValueError):
             errors.append("recall contains a row without a valid paper_id")
             continue
@@ -787,7 +789,11 @@ def _validate_recall_output(
                     invalid_papers.add(paper_id)
                 continue
             try:
-                key = (int(pair["rubric_idx"]), int(pair["ai_item_number"]))
+                rubric_index = pair["rubric_idx"]
+                item_number = pair["ai_item_number"]
+                if type(rubric_index) is not int or type(item_number) is not int:
+                    raise TypeError
+                key = (rubric_index, item_number)
             except (KeyError, TypeError, ValueError):
                 errors.append(f"recall contains a pair without valid identity for paper{paper_id}")
                 if invalid_papers is not None:
@@ -875,7 +881,11 @@ def _validate_precision_output(
             errors.append("precision contains a non-object item")
             continue
         try:
-            key = (int(item["paper_id"]), int(item["item_number"]))
+            paper_id = item["paper_id"]
+            item_number = item["item_number"]
+            if type(paper_id) is not int or type(item_number) is not int:
+                raise TypeError
+            key = (paper_id, item_number)
         except (KeyError, TypeError, ValueError):
             errors.append("precision contains an item without a valid paper_id or item_number")
             continue

@@ -22,12 +22,7 @@ import uuid
 
 import fitz
 
-try:
-    import tomllib
-except ModuleNotFoundError:  # pragma: no cover - Python 3.10
-    import tomli as tomllib
-
-from scriptorium.config import ManuscriptConfig, load_local_config, load_project_config, validate_ready
+from scriptorium.config import LocalConfig, ManuscriptConfig, load_local_config, load_project_config, validate_ready
 from scriptorium.domain import RunStatus
 from scriptorium.errors import ConfigurationError, InfrastructureError, StateError
 from scriptorium.manuscript import BuildResult, FrozenRevision, ManuscriptManager, SourceFile
@@ -446,27 +441,22 @@ def package_versions() -> dict[str, str | None]:
     return versions
 
 
-def route_config_summary(path: Path) -> dict[str, Any]:
-    try:
-        with path.open("rb") as handle:
-            data = tomllib.load(handle)
-        routes = {}
-        for name, route in sorted(data.get("routes", {}).items()):
-            routes[str(name)] = {
-                "runtime": str(route.get("runtime", "codex")),
-                "model_provider": str(route.get("model_provider", "")),
-                "model": str(route.get("model", "")),
-                "reasoning_effort": str(route.get("reasoning_effort", "high")),
-                "input_usd_per_million": float(route.get("input_usd_per_million", 0)),
-                "output_usd_per_million": float(route.get("output_usd_per_million", 0)),
+def route_config_summary(config: LocalConfig) -> dict[str, Any]:
+    return {
+        "max_concurrency": config.max_concurrency,
+        "roles": dict(sorted(config.roles.items())),
+        "routes": {
+            name: {
+                "runtime": route.runtime,
+                "model_provider": route.model_provider,
+                "model": route.model,
+                "reasoning_effort": route.reasoning_effort,
+                "input_usd_per_million": route.input_usd_per_million,
+                "output_usd_per_million": route.output_usd_per_million,
             }
-        return {
-            "max_concurrency": int(data.get("max_concurrency", 2)),
-            "roles": {str(key): str(value) for key, value in sorted(data.get("roles", {}).items())},
-            "routes": routes,
-        }
-    except (AttributeError, OSError, TypeError, ValueError, tomllib.TOMLDecodeError) as exc:
-        raise BenchmarkError(f"Invalid route configuration: {path}") from exc
+            for name, route in sorted(config.routes.items())
+        },
+    }
 
 
 def utc_now() -> str:
@@ -858,19 +848,20 @@ async def run_benchmark(
             f"Missing route configuration: {routes_path}. Copy routes.example.toml there and configure a model."
         )
     routes_digest = file_digest(routes_path)
-    routes_summary = route_config_summary(routes_path)
     with tempfile.TemporaryDirectory(prefix="scriptorium-peerreviewbench-routes-") as temporary:
         validation_project = Path(temporary) / "project"
         create_paper_project(validation_project, routes_path)
         try:
+            local_config = load_local_config(validation_project)
             validate_ready(
                 load_project_config(validation_project),
-                load_local_config(validation_project),
+                local_config,
                 "full",
                 budget_usd,
             )
         except ConfigurationError as exc:
             raise BenchmarkError(f"Route configuration is not ready: {exc}") from exc
+    routes_summary = route_config_summary(local_config)
     prepared = available_prepared_papers(cache_root, dataset["revision"], dataset["id"])
 
     if resume is not None:
