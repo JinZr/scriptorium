@@ -733,3 +733,30 @@ def test_route_configuration_change_stops_before_next_paper(
         )
 
     assert len(route_digests) == 1
+
+
+@pytest.mark.parametrize("budget_usd", [float("nan"), float("inf"), float("-inf")])
+def test_run_benchmark_rejects_non_finite_budget_before_creating_run(
+    tmp_path: Path,
+    budget_usd: float,
+) -> None:
+    routes = _routes(tmp_path / "routes.toml")
+
+    with pytest.raises(BenchmarkError, match="budget-usd must be finite and non-negative"):
+        asyncio.run(
+            run_benchmark(
+                paper_ids=[16],
+                budget_usd=budget_usd,
+                cache_root=tmp_path / "cache",
+                runs_root=tmp_path / "runs",
+                routes_path=routes,
+            )
+        )
+
+    assert not (tmp_path / "runs").exists()
+
+
+@pytest.mark.parametrize("budget_text", ["nan", "inf", "-inf"])
+def test_run_cli_rejects_non_finite_budget(budget_text: str, capsys: pytest.CaptureFixture[str]) -> None:
+    assert benchmark_run.main(["--paper-id", "16", f"--budget-usd={budget_text}"]) == 2
+    assert "--budget-usd must be finite and non-negative" in capsys.readouterr().err

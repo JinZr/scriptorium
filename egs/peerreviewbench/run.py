@@ -8,6 +8,7 @@ from enum import Enum
 from hashlib import sha256
 from importlib import metadata
 import json
+import math
 from pathlib import Path
 import re
 import shutil
@@ -845,6 +846,8 @@ async def run_benchmark(
     routes_path: Path = DEFAULT_ROUTES_PATH,
     runtime_factory: RuntimeFactory | None = None,
 ) -> tuple[Path, dict[str, Any]]:
+    if budget_usd is not None and (not math.isfinite(budget_usd) or budget_usd < 0):
+        raise BenchmarkError("--budget-usd must be finite and non-negative")
     lock = load_lock()
     dataset = lock["dataset"]
     if cache_root.is_symlink():
@@ -990,8 +993,8 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    if args.budget_usd is not None and args.budget_usd < 0:
-        print("error: --budget-usd must be non-negative", file=sys.stderr)
+    if args.budget_usd is not None and (not math.isfinite(args.budget_usd) or args.budget_usd < 0):
+        print("error: --budget-usd must be finite and non-negative", file=sys.stderr)
         return 2
     try:
         import asyncio
