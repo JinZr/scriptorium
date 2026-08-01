@@ -915,6 +915,8 @@ async def run_benchmark(
     failures = 0
     did_work = False
     for index, paper_id in enumerate(selected_ids, 1):
+        if routes_path.is_symlink() or not routes_path.is_file() or file_digest(routes_path) != routes_digest:
+            raise BenchmarkError("Route configuration changed during the benchmark")
         entry = manifest["papers"][str(paper_id)]
         if entry["prepared_manifest_digest"] != json_digest(validate_prepared_paper(prepared[paper_id])):
             raise BenchmarkError(f"Prepared paper changed since the run was created: paper{paper_id}")

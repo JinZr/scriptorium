@@ -689,3 +689,47 @@ def test_failed_paper_does_not_stop_later_papers(tmp_path: Path) -> None:
     assert manifest["papers"]["11"]["status"] == "incomplete"
     assert manifest["papers"]["12"]["status"] == "complete"
     assert manifest["papers"]["12"]["scriptorium"]["status"] == RunStatus.AWAITING_DECISION.value
+
+
+def test_route_configuration_change_stops_before_next_paper(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    lock = load_lock()
+    dataset = lock["dataset"]
+    cache_root = tmp_path / "cache"
+    for paper_id in (14, 15):
+        _prepared_paper(
+            cache_root / "dataset" / dataset["revision"],
+            paper_id=paper_id,
+            dataset_id=dataset["id"],
+            dataset_revision=dataset["revision"],
+        )
+    routes = _routes(tmp_path / "routes.toml")
+    route_digests: list[str] = []
+
+    async def fake_run_paper(entry, run_dir, prepared_paper, routes_path, budget_usd, runtime_factory):
+        del run_dir, prepared_paper, budget_usd, runtime_factory
+        route_digests.append(file_digest(routes_path))
+        entry["status"] = "complete"
+        entry["scriptorium"] = {"estimated_cost_usd": 0}
+        if len(route_digests) == 1:
+            routes.write_text(
+                routes.read_text(encoding="utf-8").replace('model = "fake-model"', 'model = "changed-model"'),
+                encoding="utf-8",
+            )
+        return entry
+
+    monkeypatch.setattr(benchmark_run, "_run_paper", fake_run_paper)
+
+    with pytest.raises(BenchmarkError, match="Route configuration changed"):
+        asyncio.run(
+            run_benchmark(
+                paper_ids=[14, 15],
+                cache_root=cache_root,
+                runs_root=tmp_path / "runs",
+                routes_path=routes,
+            )
+        )
+
+    assert len(route_digests) == 1
