@@ -936,9 +936,18 @@ class Armarius:
         role_prompt = run.frozen_config["prompts"][role.value]["content"]
         return (
             f"{role_prompt}\n\n"
-            "Review the frozen manuscript in sources/, manuscript.pdf, and pages/. "
-            "Every finding must cite exact source lines and digest or a valid PDF page. "
-            "Do not modify files. Return only the ReviewOutput JSON object."
+            "Review the frozen manuscript in the workspace: source files are under sources/, "
+            "the rendered PDF is manuscript.pdf, and rendered page images are under pages/. "
+            "Every finding must cite resolvable evidence with the exact anchors required by "
+            "the output schema. For source-file evidence, source_path must be the bare "
+            'relative path from source-map.json (for example "main.tex", never '
+            '"sources/main.tex"), and start_line, end_line, source_digest, and quoted_text '
+            "must be supplied; quoted_text must be copied verbatim from those lines so that "
+            "it appears exactly inside the cited line range, without additions, omissions, "
+            'or ellipses. For rendered-PDF evidence, use source_path "manuscript.pdf", set '
+            "page to a valid 1-based PDF page number, and copy quoted_text verbatim from the "
+            "cited page. Do not modify files. Return only the ReviewOutput JSON object with "
+            "no prose before or after it."
         )
 
     def _revision_prompt(self, run: Run, findings: list[Finding], feedback: str | None) -> str:
@@ -960,7 +969,10 @@ class Armarius:
         return (
             f"{role_prompt}\n\nConfirmed findings:\n{json.dumps(finding_data, indent=2, ensure_ascii=False)}\n"
             f"{feedback_text}"
-            "Propose exact, non-overlapping source replacements. Do not modify files. "
+            "Propose exact, non-overlapping source replacements. For every edit, path must "
+            'be the bare relative path from source-map.json (for example "main.tex", never '
+            '"sources/main.tex"), source_digest must match source-map.json, and before must '
+            "reproduce the exact current text of the cited lines. Do not modify files. "
             "Return only the RevisionOutput JSON object."
         )
 
@@ -975,7 +987,15 @@ class Armarius:
             f"{role_prompt}\n\nConfirmed findings:\n{json.dumps(finding_data, indent=2, ensure_ascii=False)}\n\n"
             f"Approved diff:\n{diff}\n\n"
             "Verify the patched manuscript independently for resolution, factual or numeric changes, "
-            "citation/figure consistency, and regressions. Return only the VerificationOutput JSON object."
+            "citation/figure consistency, and regressions. Every issue must cite resolvable evidence "
+            "with the exact anchors required by the output schema. For source-file evidence, "
+            "source_path must be the bare relative path from source-map.json (never "
+            '"sources/..."), and start_line, end_line, source_digest, and quoted_text must be '
+            "supplied; quoted_text must be copied verbatim from those lines so that it appears "
+            "exactly inside the cited line range, without additions, omissions, or ellipses. For "
+            'rendered-PDF evidence, use source_path "manuscript.pdf", set page to a valid 1-based '
+            "PDF page number, and copy quoted_text verbatim from the cited page. Return only the "
+            "VerificationOutput JSON object with no prose before or after it."
         )
 
     def _route_for_run(

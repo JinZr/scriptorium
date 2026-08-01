@@ -3,7 +3,7 @@ import json
 
 import pytest
 
-from scriptorium.domain import PatchStatus, RunStatus
+from scriptorium.domain import AgentRole, PatchStatus, RunStatus
 from scriptorium.errors import InfrastructureError
 from scriptorium.service import ScriptoriumService
 
@@ -31,6 +31,12 @@ def test_full_workflow_preserves_worktree_until_approved_patch_is_applied(tmp_pa
         run_id = started["run"].id
 
         assert started["run"].status == RunStatus.AWAITING_DECISION
+        review_prompt = runtime.tasks[AgentRole.SUBSTANTIVE_REVIEW]
+        assert "source_path must be the bare relative path from source-map.json" in review_prompt
+        assert "start_line, end_line, source_digest, and quoted_text must be supplied" in review_prompt
+        assert 'use source_path "manuscript.pdf", set page to a valid 1-based PDF page number' in review_prompt
+        assert "copy quoted_text verbatim from the cited page" in review_prompt
+        assert "ReviewOutput JSON object with no prose before or after it" in review_prompt
         frozen_route = started["run"].frozen_config["local"]["routes"]["primary"]
         assert frozen_route["runtime"] == "codex"
         assert frozen_route["runtime_version"] == "0.144.4"
@@ -51,6 +57,10 @@ def test_full_workflow_preserves_worktree_until_approved_patch_is_applied(tmp_pa
 
         revised = asyncio.run(service.resume_run(run_id))
         assert revised["run"].status == RunStatus.AWAITING_PATCH_APPROVAL
+        revision_prompt = runtime.tasks[AgentRole.REVISION]
+        assert "path must be the bare relative path from source-map.json" in revision_prompt
+        assert "source_digest must match source-map.json" in revision_prompt
+        assert "before must reproduce the exact current text of the cited lines" in revision_prompt
         assert repo.joinpath("main.tex").read_text(encoding="utf-8") == MANUSCRIPT
 
         patch_id = revised["patch_ids"][0]
@@ -61,6 +71,12 @@ def test_full_workflow_preserves_worktree_until_approved_patch_is_applied(tmp_pa
 
         verified = asyncio.run(service.resume_run(run_id))
         assert verified["run"].status == RunStatus.READY_TO_APPLY
+        verification_prompt = runtime.tasks[AgentRole.VERIFICATION]
+        assert "source_path must be the bare relative path from source-map.json" in verification_prompt
+        assert "start_line, end_line, source_digest, and quoted_text must be supplied" in verification_prompt
+        assert 'use source_path "manuscript.pdf", set page to a valid 1-based PDF page number' in verification_prompt
+        assert "copy quoted_text verbatim from the cited page" in verification_prompt
+        assert "VerificationOutput JSON object with no prose before or after it" in verification_prompt
         assert repo.joinpath("main.tex").read_text(encoding="utf-8") == MANUSCRIPT
         assert service.evaluate_gate(run_id)["passed"] is False
 

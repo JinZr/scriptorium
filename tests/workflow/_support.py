@@ -47,12 +47,14 @@ class FakeAgentRuntime:
         self.provider = provider
         self.run_calls = Counter()
         self.resume_calls = []
+        self.tasks = {}
         self.workspaces = {}
         self.session_dirs = {}
         self.session_dir_calls = []
 
     async def run_agent(self, task, role, workspace, schema, session_dir):
         self.run_calls[role] += 1
+        self.tasks[role] = task
         self.workspaces[role] = workspace
         self.session_dirs[role] = session_dir
         self.session_dir_calls.append((role, session_dir))
@@ -73,6 +75,7 @@ class FakeAgentRuntime:
 
     async def resume_agent(self, thread_id, task, role, workspace, schema, session_dir):
         self.resume_calls.append(role)
+        self.tasks[role] = task
         assert session_dir == self.session_dirs[role]
         self.session_dir_calls.append((role, session_dir))
         if role == AgentRole.COPYEDIT:

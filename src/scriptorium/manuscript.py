@@ -89,6 +89,7 @@ class ManuscriptManager:
     def scan_sources(self, snapshot: Path, main: str) -> tuple[SourceFile, ...]:
         root = snapshot.resolve()
         pending = [Path(main)]
+        bibliography_fallback = Path(main).with_suffix(".bbl")
         included: set[Path] = set()
         while pending:
             relative = pending.pop()
@@ -113,9 +114,24 @@ class ManuscriptManager:
                     dependency = Path(raw.strip())
                     if not dependency.suffix:
                         dependency = dependency.with_suffix(".bib")
-                    pending.append(self._resolve_dependency(root, base, dependency))
+                    pending.append(
+                        self._resolve_dependency(
+                            root,
+                            base,
+                            dependency,
+                            fallback=bibliography_fallback,
+                        )
+                    )
             for raw in ADDBIB_PATTERN.findall(text):
-                pending.append(self._resolve_dependency(root, base, Path(raw.strip())))
+                dependency = Path(raw.strip())
+                pending.append(
+                    self._resolve_dependency(
+                        root,
+                        base,
+                        dependency,
+                        fallback=bibliography_fallback,
+                    )
+                )
             for raw in GRAPHICS_PATTERN.findall(text):
                 pending.append(
                     self._resolve_dependency(
@@ -307,6 +323,8 @@ class ManuscriptManager:
         base: Path,
         dependency: Path,
         suffixes: tuple[str, ...] = ("",),
+        *,
+        fallback: Path | None = None,
     ) -> Path:
         candidates: list[Path] = []
         for parent in (base, Path()):
@@ -316,6 +334,10 @@ class ManuscriptManager:
                     candidates.append(candidate)
         for candidate in candidates:
             normalized = cls._normalized_relative(root, candidate)
+            if (root / normalized).is_file():
+                return normalized
+        if fallback is not None:
+            normalized = cls._normalized_relative(root, fallback)
             if (root / normalized).is_file():
                 return normalized
         raise InfrastructureError(f"Referenced manuscript file is missing: {dependency}")
