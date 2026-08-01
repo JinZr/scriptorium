@@ -9,6 +9,7 @@ from pathlib import Path
 import shutil
 from typing import Any, Callable
 
+import fitz
 from pydantic import ValidationError
 
 from .artifacts import ArtifactStore
@@ -305,6 +306,7 @@ class Armarius:
                 self._sources_for_run(run),
                 bundle.pdf_pages,
                 self._run_dir(run.id) / "snapshot",
+                bundle.workspace / "manuscript.pdf",
             ),
         )
         if outcome is None:
@@ -585,6 +587,7 @@ class Armarius:
                 verification_bundle.sources,
                 verification_bundle.pdf_pages,
                 patched,
+                verification_bundle.workspace / "manuscript.pdf",
             ),
         )
         if outcome is None:
@@ -807,11 +810,12 @@ class Armarius:
         sources: tuple[SourceFile, ...],
         pdf_pages: int,
         source_root: Path,
+        pdf_path: Path,
     ) -> None:
         source_index = {source.path: source for source in sources}
         for finding in output.findings:
             for evidence in finding.evidence:
-                self._validate_evidence(evidence, source_index, pdf_pages, source_root)
+                self._validate_evidence(evidence, source_index, pdf_pages, source_root, pdf_path)
 
     def _validate_revision_output(
         self,
@@ -859,6 +863,7 @@ class Armarius:
         sources: tuple[SourceFile, ...],
         pdf_pages: int,
         source_root: Path,
+        pdf_path: Path,
     ) -> None:
         expected_ids = {finding.id for finding in findings}
         unknown = set(output.resolved_finding_ids) - expected_ids
@@ -869,7 +874,7 @@ class Armarius:
         source_index = {source.path: source for source in sources}
         for issue in output.issues:
             for evidence in issue.evidence:
-                self._validate_evidence(evidence, source_index, pdf_pages, source_root)
+                self._validate_evidence(evidence, source_index, pdf_pages, source_root, pdf_path)
 
     def _validate_evidence(
         self,
@@ -877,12 +882,18 @@ class Armarius:
         source_index: dict[str, SourceFile],
         pdf_pages: int,
         source_root: Path,
+        pdf_path: Path,
     ) -> None:
         if evidence.page is not None and evidence.page > pdf_pages:
             raise ValueError(f"PDF page {evidence.page} is outside the manuscript")
         if evidence.start_line is None:
             if evidence.source_path != "manuscript.pdf":
                 raise ValueError("page-only evidence must use source_path manuscript.pdf")
+            quoted_text = " ".join(evidence.quoted_text.split())
+            with fitz.open(pdf_path) as document:
+                page_text = " ".join(document[evidence.page - 1].get_text(sort=True).split())
+            if not quoted_text or quoted_text not in page_text:
+                raise ValueError(f"quoted PDF evidence does not match manuscript.pdf page {evidence.page}")
             return
         try:
             source = source_index[evidence.source_path]

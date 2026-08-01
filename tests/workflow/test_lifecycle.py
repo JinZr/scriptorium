@@ -17,6 +17,63 @@ class FailingPatchedBuildManager(PdfBuildingManuscriptManager):
         return super().build(workspace, manuscript)
 
 
+class PdfEvidenceRuntime(FakeAgentRuntime):
+    def __init__(self, quoted_text: str) -> None:
+        super().__init__()
+        self.quoted_text = quoted_text
+
+    def _review_output(self, role, workspace):
+        output = super()._review_output(role, workspace)
+        if role == AgentRole.SUBSTANTIVE_REVIEW:
+            output["findings"][0]["evidence"] = [
+                {
+                    "source_path": "manuscript.pdf",
+                    "page": 1,
+                    "quoted_text": self.quoted_text,
+                }
+            ]
+        return output
+
+
+def test_pdf_evidence_quote_matches_text_on_the_cited_page(tmp_path):
+    repo = make_repository(tmp_path)
+    runtime = PdfEvidenceRuntime("The result\nis clear.")
+
+    with ScriptoriumService(
+        repo,
+        runtime_factory=lambda route: runtime,
+        manuscript_manager=PdfBuildingManuscriptManager(repo),
+    ) as service:
+        started = asyncio.run(service.start_run("HEAD", "quick", None))
+
+        assert started["run"].status == RunStatus.AWAITING_DECISION
+        assert service.list_findings(started["run"].id)[0].evidence[0]["quoted_text"] == "The result\nis clear."
+
+
+def test_fabricated_pdf_evidence_quote_is_rejected(tmp_path):
+    repo = make_repository(tmp_path)
+    runtime = PdfEvidenceRuntime("This text does not appear on the page.")
+
+    with ScriptoriumService(
+        repo,
+        runtime_factory=lambda route: runtime,
+        manuscript_manager=PdfBuildingManuscriptManager(repo),
+    ) as service:
+        started = asyncio.run(service.start_run("HEAD", "quick", None))
+
+        assert started["run"].status == RunStatus.REVIEWING
+        assert service.list_findings(started["run"].id) == []
+        task = next(
+            task for task in service.database.list_tasks(started["run"].id) if task.role == AgentRole.SUBSTANTIVE_REVIEW
+        )
+        attempts = service.database.list_attempts(task.id)
+        assert len(attempts) == 2
+        assert all(
+            attempt.error == "invalid structured output: quoted PDF evidence does not match manuscript.pdf page 1"
+            for attempt in attempts
+        )
+
+
 def test_full_workflow_preserves_worktree_until_approved_patch_is_applied(tmp_path):
     repo = make_repository(tmp_path)
     runtime = FakeAgentRuntime()
