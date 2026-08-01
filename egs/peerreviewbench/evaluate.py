@@ -8,6 +8,7 @@ import json
 import math
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import sys
@@ -94,6 +95,48 @@ PINNED_DATASET_LAUNCHER = (
     "sys.argv = [script, *script_args]\n"
     "runpy.run_path(script, run_name='__main__')\n"
 )
+PRECISION_CONTAINER_LAUNCHER = (
+    "import json, os, sys\n"
+    "from pathlib import Path\n"
+    "credentials = json.loads(sys.stdin.readline())\n"
+    "api_key = credentials.get('api_key')\n"
+    "base_url = credentials.get('base_url')\n"
+    "if not isinstance(api_key, str) or not api_key:\n"
+    "    raise RuntimeError('precision judge API key is missing')\n"
+    "if base_url is not None and (not isinstance(base_url, str) or not base_url):\n"
+    "    raise RuntimeError('precision judge base URL is invalid')\n"
+    "dataset_id, revision, script = sys.argv[1:4]\n"
+    "script_args = sys.argv[4:]\n"
+    "import datasets\n"
+    "load_dataset = datasets.load_dataset\n"
+    "def pinned_load_dataset(path, *args, **kwargs):\n"
+    "    if path == dataset_id:\n"
+    "        requested = kwargs.get('revision')\n"
+    "        if requested not in (None, revision):\n"
+    "            raise RuntimeError('dataset revision conflicts with benchmark lock')\n"
+    "        kwargs['revision'] = revision\n"
+    "    return load_dataset(path, *args, **kwargs)\n"
+    "datasets.load_dataset = pinned_load_dataset\n"
+    "source = Path(script).read_text(encoding='utf-8')\n"
+    "replacements = {\n"
+    "    \"    api_key = os.environ.get('LITELLM_API_KEY')\\n\": "
+    '"    api_key = __scriptorium_api_key\\n",\n'
+    "    \"    base_url = os.environ.get('LITELLM_BASE_URL')\\n\": "
+    '"    base_url = __scriptorium_base_url\\n",\n'
+    "}\n"
+    "for needle, replacement in replacements.items():\n"
+    "    if source.count(needle) != 1:\n"
+    "        raise RuntimeError('pinned precision credential contract changed')\n"
+    "    source = source.replace(needle, replacement)\n"
+    "sys.argv = [script, *script_args]\n"
+    "namespace = {\n"
+    "    '__name__': '__main__',\n"
+    "    '__file__': script,\n"
+    "    '__scriptorium_api_key': api_key,\n"
+    "    '__scriptorium_base_url': base_url,\n"
+    "}\n"
+    "exec(compile(source, script, 'exec'), namespace)\n"
+)
 
 
 def utc_now() -> str:
@@ -108,6 +151,25 @@ def judge_endpoint_identity() -> dict[str, str | None]:
         "host": parsed.hostname,
         "base_url_sha256": json_digest(base_url),
     }
+
+
+def resolve_precision_image(image: str) -> str:
+    try:
+        result = subprocess.run(
+            ["docker", "image", "inspect", "--format={{.Id}}", image],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+    except OSError as exc:
+        raise BenchmarkError("Docker is required for the sandboxed precision evaluator") from exc
+    image_id = result.stdout.strip()
+    if result.returncode != 0 or re.fullmatch(r"sha256:[0-9a-f]{64}", image_id) is None:
+        raise BenchmarkError(
+            f"Precision evaluator image is unavailable: {image}. "
+            "Build it with the command documented in egs/peerreviewbench/README.md."
+        )
+    return image_id
 
 
 def load_run_manifest(run_dir: Path) -> dict[str, Any]:
@@ -253,6 +315,8 @@ def _evaluation_frozen_inputs(
     judge_model: str,
     concurrency: int,
     temperature: float,
+    precision_image: str,
+    precision_image_id: str,
     lock: dict[str, Any],
 ) -> dict[str, Any]:
     return {
@@ -269,6 +333,10 @@ def _evaluation_frozen_inputs(
         "judge_endpoint": judge_endpoint_identity(),
         "recall_concurrency": concurrency,
         "recall_temperature": temperature,
+        "precision_container": {
+            "image": precision_image,
+            "image_id": precision_image_id,
+        },
         "dataset": {
             "id": lock["dataset"]["id"],
             "revision": lock["dataset"]["revision"],
@@ -412,6 +480,7 @@ def build_component_commands(
     judge_model: str,
     concurrency: int,
     temperature: float,
+    precision_image_id: str,
 ) -> tuple[list[str], list[str]]:
     evaluation = upstream_root / "peerreview_bench" / "evaluation"
     recall = [
@@ -434,24 +503,63 @@ def build_component_commands(
         "--output",
         str(output_dir / "recall.json"),
     ]
+    output_dir = output_dir.resolve()
+    papers_root = papers_root.resolve()
+    upstream_root = upstream_root.resolve()
+    precision_output = output_dir / "precision.json"
+    precision_work = output_dir / "precision-work"
+    precision_cache = output_dir / "precision-cache"
+    precision_work.mkdir(parents=True, exist_ok=True)
+    precision_cache.mkdir(parents=True, exist_ok=True)
+    precision_output.touch(exist_ok=True)
     precision = [
-        sys.executable,
-        "-c",
-        PINNED_DATASET_LAUNCHER,
-        dataset_id,
-        dataset_revision,
-        str(evaluation / "evaluate_precision.py"),
-        "--paper-root",
-        str(papers_root),
-        "--model-name",
-        model_slug,
-        "--judge-model",
-        judge_model,
-        "--output",
-        str(output_dir / "precision.json"),
-        "--output-dir",
-        str(output_dir / "precision-work"),
+        "docker",
+        "run",
+        "--rm",
+        "--interactive",
+        "--read-only",
+        "--cap-drop=ALL",
+        "--security-opt=no-new-privileges",
+        "--pids-limit=512",
+        "--network=bridge",
+        "--tmpfs=/tmp:rw,nosuid,nodev,size=1g",
+        "--mount",
+        f"type=bind,source={upstream_root},target=/upstream,readonly",
+        "--mount",
+        f"type=bind,source={papers_root},target=/papers,readonly",
+        "--mount",
+        f"type=bind,source={precision_output},target=/output/precision.json",
+        "--mount",
+        f"type=bind,source={precision_work},target=/output/precision-work",
+        "--mount",
+        f"type=bind,source={precision_cache},target=/cache",
+        "--env=HF_HOME=/cache/huggingface",
+        "--env=HOME=/tmp/home",
+        "--env=PYTHONDONTWRITEBYTECODE=1",
     ]
+    if hasattr(os, "getuid") and hasattr(os, "getgid"):
+        precision.extend(["--user", f"{os.getuid()}:{os.getgid()}"])
+    precision.extend(
+        [
+            precision_image_id,
+            "python",
+            "-c",
+            PRECISION_CONTAINER_LAUNCHER,
+            dataset_id,
+            dataset_revision,
+            "/upstream/peerreview_bench/evaluation/evaluate_precision.py",
+            "--paper-root",
+            "/papers",
+            "--model-name",
+            model_slug,
+            "--judge-model",
+            judge_model,
+            "--output",
+            "/output/precision.json",
+            "--output-dir",
+            "/output/precision-work",
+        ]
+    )
     return recall, precision
 
 
@@ -460,13 +568,14 @@ def run_component(
     command: list[str],
     output_dir: Path,
     runner: ComponentRunner = subprocess.run,
+    input_text: str | None = None,
 ) -> int:
     print(f"Running PeerReviewBench {name} component", flush=True)
     log_path = output_dir / f"{name}.log"
     if output_dir.is_symlink() or not output_dir.is_dir() or log_path.is_symlink():
         raise BenchmarkError(f"Unsafe {name} component output path: {log_path}")
     try:
-        result = runner(command, check=False, capture_output=True, text=True)
+        result = runner(command, check=False, capture_output=True, text=True, input=input_text)
     except OSError as exc:
         _write_text_atomic(log_path, "$ " + " ".join(command) + f"\n\n{type(exc).__name__}: {exc}\n")
         return 127
@@ -578,6 +687,10 @@ def _validate_component_paths(evaluation_dir: Path, frozen_inputs: dict[str, Any
         _assert_evaluation_path(evaluation_dir, path)
         if path.exists() and not path.is_file():
             raise BenchmarkError(f"Evaluation output path is not a file: {path}")
+    for path in (evaluation_dir / "precision-work", evaluation_dir / "precision-cache"):
+        _assert_evaluation_path(evaluation_dir, path)
+        if path.exists() and not path.is_dir():
+            raise BenchmarkError(f"Evaluation output path is not a directory: {path}")
 
 
 def _validate_evaluation_manifest(
@@ -1039,6 +1152,8 @@ def evaluate_benchmark(
         or run_manifest["frozen_inputs"].get("upstream") != expected_upstream
     ):
         raise BenchmarkError("Benchmark run pins do not match benchmark.lock.toml")
+    precision_image = str(lock["precision"]["container_image"])
+    precision_image_id = resolve_precision_image(precision_image)
     safe_cache_directory(cache_root, "dataset", str(lock["dataset"]["revision"]))
     exports, selection_stats = collect_exports(run_dir, run_manifest, finding_mode, cache_root)
     if any(not items for items in exports.values()):
@@ -1057,6 +1172,8 @@ def evaluate_benchmark(
         judge_model,
         concurrency,
         temperature,
+        precision_image,
+        precision_image_id,
         lock,
     )
     evaluation_dir = safe_cache_directory(
@@ -1090,6 +1207,18 @@ def evaluate_benchmark(
 
     recall_path = evaluation_dir / "recall.json"
     precision_path = evaluation_dir / "precision.json"
+    judge_api_key = os.environ.get("LITELLM_API_KEY")
+    if not judge_api_key:
+        raise BenchmarkError("LITELLM_API_KEY is required for benchmark evaluation")
+    precision_input = (
+        json.dumps(
+            {
+                "api_key": judge_api_key,
+                "base_url": os.environ.get("LITELLM_BASE_URL") or None,
+            }
+        )
+        + "\n"
+    )
     recall_path.unlink(missing_ok=True)
     precision_path.unlink(missing_ok=True)
     recall_command, precision_command = build_component_commands(
@@ -1103,10 +1232,17 @@ def evaluate_benchmark(
         judge_model=judge_model,
         concurrency=concurrency,
         temperature=temperature,
+        precision_image_id=precision_image_id,
     )
     component_codes = {
         "recall": run_component("recall", recall_command, evaluation_dir, runner),
-        "precision": run_component("precision", precision_command, evaluation_dir, runner),
+        "precision": run_component(
+            "precision",
+            precision_command,
+            evaluation_dir,
+            runner,
+            input_text=precision_input,
+        ),
     }
     errors = [f"{name} component exited with {code}" for name, code in component_codes.items() if code]
     recall: dict[str, Any] = {}

@@ -19,6 +19,9 @@ meta_reviewer_rows = 908
 similarity_check_rows = 164
 submitted_paper_blobs = 22351
 
+[precision]
+container_image = "scriptorium-peerreviewbench-precision:openhands-1.7.0"
+
 [defaults]
 smoke_papers = 5
 finding_mode = "per-role-5"

@@ -400,6 +400,8 @@ def test_completed_benchmark_paper_is_not_repeated_on_resume(
     assert initial["frozen_inputs"]["route_config"]["routes"]["primary"]["model"] == "fake-model"
     source_paths = {item["path"] for item in initial["frozen_inputs"]["source_manifest"]}
     assert "egs/peerreviewbench/run.py" in source_paths
+    assert "egs/peerreviewbench/precision.Dockerfile" in source_paths
+    assert "egs/peerreviewbench/.dockerignore" in source_paths
     assert "src/scriptorium/service.py" in source_paths
     paper_summary = initial["papers"]["9"]["scriptorium"]
     assert paper_summary["status"] == RunStatus.AWAITING_DECISION.value

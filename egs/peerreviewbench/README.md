@@ -17,6 +17,11 @@ precision evaluator's OpenHands version is pinned by the upstream benchmark and 
 python -m pip install -e '.[all]'
 python -m pip install -r egs/peerreviewbench/requirements.txt
 
+docker build --pull \
+  --file egs/peerreviewbench/precision.Dockerfile \
+  --tag scriptorium-peerreviewbench-precision:openhands-1.7.0 \
+  egs/peerreviewbench
+
 mkdir -p egs/peerreviewbench/.scriptorium
 cp egs/peerreviewbench/routes.example.toml \
   egs/peerreviewbench/.scriptorium/config.toml
@@ -26,6 +31,10 @@ Edit the copied route file before running. All four review roles are used. Revis
 present because the core configuration freeze validates them, but this benchmark never invokes those stages. Replace
 the example's zero token prices if reviewer cost should be meaningful; those values are placeholders, not a claim that
 the configured model is free.
+
+Docker is required only for precision evaluation. The image name is locked in `benchmark.lock.toml`, and the exact
+local image ID is frozen in each evaluation manifest. Evaluation fails before invoking either judge if the image has
+not been built.
 
 The code and data revisions are frozen in `benchmark.lock.toml`: upstream
 [`a48fe631`](https://github.com/prometheus-eval/cmu-paper-reviewer/commit/a48fe6316d21735d15ba11c92c480e9a239e83c1)
@@ -150,6 +159,15 @@ invalid, that component's selected-paper cache files are removed so a later retr
 interruption caches remain available. The summary reports overall recall, precision, F1, axis and role breakdowns,
 selection counts, reviewer cost, timing, and errors. Upstream judge cost is recorded as unavailable because the
 pinned components do not expose it.
+
+The terminal-capable OpenHands precision evaluator never runs directly on the host. It runs in a read-only container
+with all Linux capabilities dropped: the pinned upstream source and prepared papers are mounted read-only, while only
+`precision.json`, the precision trajectory directory, and a dedicated evaluator cache are writable. No host directory
+outside those explicit mounts, and no host environment, is passed through. The two LiteLLM settings are delivered to
+the evaluator over one-shot standard input and injected directly into the locked evaluator's in-memory configuration;
+they never enter the container or agent-terminal environment and are not written to component logs. Use a dedicated,
+limited judge credential even with this isolation; the container still requires outbound network access to the judge
+endpoint.
 
 Missing papers, missing judge decisions, errored recall pairs, component failures, dataset drift, or any prepared-input
 mutation make the evaluation `incomplete` rather than silently contributing a zero score.

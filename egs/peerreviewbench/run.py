@@ -68,8 +68,10 @@ HTML_IMAGE_PATTERN = re.compile(r"<img\b[^>]*\bsrc=[\"']([^\"']+)[\"']", re.IGNO
 CONVERSION_IMAGE_PLACEHOLDER = re.compile(r"page_(?:\d+_){3}\d+\.png")
 SENTINEL_TEXT = "% Configuration sentinel only; PeerReviewBenchManuscriptManager builds preprint.md.\n"
 BENCHMARK_SOURCE_FILES = (
+    "egs/peerreviewbench/.dockerignore",
     "egs/peerreviewbench/benchmark.lock.toml",
     "egs/peerreviewbench/prepare.py",
+    "egs/peerreviewbench/precision.Dockerfile",
     "egs/peerreviewbench/run.py",
     "egs/peerreviewbench/evaluate.py",
     "egs/peerreviewbench/requirements.txt",

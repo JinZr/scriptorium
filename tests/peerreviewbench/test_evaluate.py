@@ -2,10 +2,13 @@ from __future__ import annotations
 
 from hashlib import sha256
 import importlib.util
+import io
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
+from types import ModuleType
 
 import pytest
 
@@ -27,6 +30,7 @@ def _load_evaluate_module():
 
 
 benchmark_evaluate = _load_evaluate_module()
+PRECISION_IMAGE_ID = "sha256:" + "a" * 64
 
 
 def _finding(
@@ -273,7 +277,8 @@ def test_evaluation_view_rejects_symlinked_manifest_before_reading(tmp_path) -> 
         )
 
 
-def test_component_commands_use_separate_supported_entrypoints(tmp_path) -> None:
+def test_component_commands_use_separate_supported_entrypoints(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("LITELLM_API_KEY", "must-not-appear-in-command")
     recall, precision = benchmark_evaluate.build_component_commands(
         tmp_path / "upstream",
         tmp_path / "papers",
@@ -285,6 +290,7 @@ def test_component_commands_use_separate_supported_entrypoints(tmp_path) -> None
         judge_model="precision-model",
         concurrency=7,
         temperature=0.25,
+        precision_image_id=PRECISION_IMAGE_ID,
     )
 
     assert recall[1] == "-c"
@@ -296,6 +302,28 @@ def test_component_commands_use_separate_supported_entrypoints(tmp_path) -> None
     assert recall[recall.index("--model-name") + 1] == "scriptorium_per_role_5"
     assert recall[recall.index("--concurrency") + 1] == "7"
     assert recall[recall.index("--temperature") + 1] == "0.25"
+    assert precision[:3] == ["docker", "run", "--rm"]
+    assert "--read-only" in precision
+    assert "--cap-drop=ALL" in precision
+    assert "--security-opt=no-new-privileges" in precision
+    assert "--network=bridge" in precision
+    assert PRECISION_IMAGE_ID in precision
+    mounts = [precision[index + 1] for index, part in enumerate(precision) if part == "--mount"]
+    precision_output = (tmp_path / "output" / "precision.json").resolve()
+    assert set(mounts) == {
+        f"type=bind,source={(tmp_path / 'upstream').resolve()},target=/upstream,readonly",
+        f"type=bind,source={(tmp_path / 'papers').resolve()},target=/papers,readonly",
+        f"type=bind,source={precision_output},target=/output/precision.json",
+        f"type=bind,source={(tmp_path / 'output' / 'precision-work').resolve()},target=/output/precision-work",
+        f"type=bind,source={(tmp_path / 'output' / 'precision-cache').resolve()},target=/cache",
+    }
+    launcher = precision[precision.index("-c") + 1]
+    compile(launcher, "<precision-container-launcher>", "exec")
+    assert "sys.stdin.readline" in launcher
+    assert "__scriptorium_api_key" in launcher
+    assert "--env=LITELLM_API_KEY" not in precision
+    assert "--env=LITELLM_BASE_URL" not in precision
+    assert "must-not-appear-in-command" not in " ".join(precision)
     assert any(Path(part).name == "evaluate_precision.py" for part in precision)
     assert precision[precision.index("--model-name") + 1] == "scriptorium_per_role_5"
     assert precision[precision.index("--judge-model") + 1] == "precision-model"
@@ -303,6 +331,57 @@ def test_component_commands_use_separate_supported_entrypoints(tmp_path) -> None
     assert "--concurrency" not in precision
     assert "--temperature" not in precision
     assert all(not any(Path(part).name == "evaluate.py" for part in command) for command in (recall, precision))
+
+
+def test_precision_image_resolution_requires_an_immutable_image_id(monkeypatch) -> None:
+    monkeypatch.setattr(
+        benchmark_evaluate.subprocess,
+        "run",
+        lambda *args, **kwargs: subprocess.CompletedProcess(args[0], 0, stdout=PRECISION_IMAGE_ID + "\n", stderr=""),
+    )
+
+    assert benchmark_evaluate.resolve_precision_image("precision:test") == PRECISION_IMAGE_ID
+
+    monkeypatch.setattr(
+        benchmark_evaluate.subprocess,
+        "run",
+        lambda *args, **kwargs: subprocess.CompletedProcess(args[0], 1, stdout="", stderr="missing"),
+    )
+    with pytest.raises(benchmark_evaluate.BenchmarkError, match="image is unavailable"):
+        benchmark_evaluate.resolve_precision_image("precision:test")
+
+
+def test_precision_launcher_keeps_judge_credentials_out_of_the_environment(tmp_path, monkeypatch) -> None:
+    script = tmp_path / "evaluate_precision.py"
+    output = tmp_path / "credentials.json"
+    script.write_text(
+        "from pathlib import Path\n"
+        "import json, os, sys\n"
+        "def main():\n"
+        "    api_key = os.environ.get('LITELLM_API_KEY')\n"
+        "    base_url = os.environ.get('LITELLM_BASE_URL')\n"
+        "    Path(sys.argv[1]).write_text(json.dumps([api_key, base_url]))\n"
+        "if __name__ == '__main__':\n"
+        "    main()\n",
+        encoding="utf-8",
+    )
+    datasets = ModuleType("datasets")
+    datasets.load_dataset = lambda *args, **kwargs: None
+    monkeypatch.setitem(sys.modules, "datasets", datasets)
+    monkeypatch.setattr(
+        sys,
+        "stdin",
+        io.StringIO(json.dumps({"api_key": "judge-secret", "base_url": "https://judge.test"}) + "\n"),
+    )
+    monkeypatch.setattr(sys, "argv", ["launcher", "owner/dataset", "revision-1", str(script), str(output)])
+    monkeypatch.delenv("LITELLM_API_KEY", raising=False)
+    monkeypatch.delenv("LITELLM_BASE_URL", raising=False)
+
+    exec(benchmark_evaluate.PRECISION_CONTAINER_LAUNCHER, {})
+
+    assert json.loads(output.read_text(encoding="utf-8")) == ["judge-secret", "https://judge.test"]
+    assert "LITELLM_API_KEY" not in os.environ
+    assert "LITELLM_BASE_URL" not in os.environ
 
 
 def test_invalid_component_cache_files_are_removed_for_retry(tmp_path) -> None:
@@ -690,6 +769,8 @@ def test_complete_summary_reuse_requires_unchanged_component_outputs(tmp_path) -
 
 
 def test_complete_evaluation_is_reused_without_reinvoking_judges(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("LITELLM_API_KEY", "test-key")
+    monkeypatch.setenv("LITELLM_BASE_URL", "")
     run_dir = tmp_path / "benchmark-run"
     run_dir.mkdir()
     evaluations_root = tmp_path / "evaluations"
@@ -702,6 +783,7 @@ def test_complete_evaluation_is_reused_without_reinvoking_judges(tmp_path, monke
             "commit": "commit-1",
             "archive_sha256": "archive-digest",
         },
+        "precision": {"container_image": "precision:test"},
         "defaults": {
             "similarity_model": "similarity-model",
             "judge_model": "precision-model",
@@ -743,12 +825,21 @@ def test_complete_evaluation_is_reused_without_reinvoking_judges(tmp_path, monke
         )
         return manifest
 
-    def fake_runner(command, *, check, capture_output, text):
+    def fake_runner(command, *, check, capture_output, text, input):
         assert check is False and capture_output is True and text is True
+        if command[0] == "docker":
+            assert json.loads(input) == {"api_key": "test-key", "base_url": None}
+        else:
+            assert input is None
         component_calls.append(command)
         recall, precision = _valid_component_outputs()
         payload = recall if any(Path(part).name == "evaluate_recall.py" for part in command) else precision
-        Path(command[command.index("--output") + 1]).write_text(json.dumps(payload), encoding="utf-8")
+        output = (
+            evaluations_root / "benchmark-run" / "all" / "precision.json"
+            if command[0] == "docker"
+            else Path(command[command.index("--output") + 1])
+        )
+        output.write_text(json.dumps(payload), encoding="utf-8")
         return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
 
     monkeypatch.setattr(benchmark_evaluate, "load_lock", lambda: lock)
@@ -764,6 +855,7 @@ def test_complete_evaluation_is_reused_without_reinvoking_judges(tmp_path, monke
     monkeypatch.setattr(benchmark_evaluate, "_verify_prepared_inputs", lambda *args, **kwargs: None)
     monkeypatch.setattr(benchmark_evaluate, "_validate_evaluation_view", lambda *args, **kwargs: None)
     monkeypatch.setattr(benchmark_evaluate, "package_versions", lambda: {})
+    monkeypatch.setattr(benchmark_evaluate, "resolve_precision_image", lambda image: PRECISION_IMAGE_ID)
 
     first_dir, first = benchmark_evaluate.evaluate_benchmark(
         run_dir=run_dir,
@@ -781,6 +873,13 @@ def test_complete_evaluation_is_reused_without_reinvoking_judges(tmp_path, monke
     )
 
     assert first["status"] == "complete"
+    frozen = json.loads(
+        (evaluations_root / "benchmark-run" / "all" / "evaluation_manifest.json").read_text(encoding="utf-8")
+    )["frozen_inputs"]
+    assert frozen["precision_container"] == {
+        "image": "precision:test",
+        "image_id": PRECISION_IMAGE_ID,
+    }
     assert second == first
     assert second_dir == first_dir
     assert len(component_calls) == 2
@@ -794,6 +893,7 @@ def test_evaluate_rejects_run_from_different_locked_dataset(tmp_path, monkeypatc
             "commit": "commit-1",
             "archive_sha256": "archive-digest",
         },
+        "precision": {"container_image": "precision:test"},
         "defaults": {
             "similarity_model": "similarity-model",
             "judge_model": "precision-model",
@@ -892,6 +992,7 @@ def test_role_metrics_attribute_items_and_compute_f1() -> None:
 
 
 def test_evaluate_summary_marks_judge_errors_incomplete_and_keeps_f1(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("LITELLM_API_KEY", "test-key")
     run_dir = tmp_path / "run"
     run_dir.mkdir()
     evaluations_root = tmp_path / "evaluations"
@@ -920,6 +1021,7 @@ def test_evaluate_summary_marks_judge_errors_incomplete_and_keeps_f1(tmp_path, m
             "commit": "commit-1",
             "archive_sha256": "archive-digest",
         },
+        "precision": {"container_image": "precision:test"},
         "defaults": {
             "similarity_model": "similarity-model",
             "judge_model": "precision-model",
@@ -951,11 +1053,19 @@ def test_evaluate_summary_marks_judge_errors_incomplete_and_keeps_f1(tmp_path, m
         )
         return manifest
 
-    def fake_runner(command, *, check, capture_output, text):
+    def fake_runner(command, *, check, capture_output, text, input):
         assert check is False
         assert capture_output is True
         assert text is True
-        output = Path(command[command.index("--output") + 1])
+        if command[0] == "docker":
+            assert json.loads(input) == {"api_key": "test-key", "base_url": None}
+        else:
+            assert input is None
+        output = (
+            evaluations_root / "benchmark-run" / "all" / "precision.json"
+            if command[0] == "docker"
+            else Path(command[command.index("--output") + 1])
+        )
         if empty_outputs["enabled"]:
             payload = {}
         elif any(Path(part).name == "evaluate_recall.py" for part in command):
@@ -1007,6 +1117,7 @@ def test_evaluate_summary_marks_judge_errors_incomplete_and_keeps_f1(tmp_path, m
     monkeypatch.setattr(benchmark_evaluate, "prepare_evaluation_view", fake_prepare_view)
     monkeypatch.setattr(benchmark_evaluate, "_verify_prepared_inputs", lambda *args, **kwargs: None)
     monkeypatch.setattr(benchmark_evaluate, "package_versions", lambda: {})
+    monkeypatch.setattr(benchmark_evaluate, "resolve_precision_image", lambda image: PRECISION_IMAGE_ID)
 
     _, summary = benchmark_evaluate.evaluate_benchmark(
         run_dir=run_dir,
