@@ -737,6 +737,19 @@ def test_recall_validation_identifies_only_the_bad_paper() -> None:
     assert invalid_papers == {2}
 
 
+@pytest.mark.parametrize("paper_recall", [float("nan"), float("inf"), float("-inf")])
+def test_recall_validation_rejects_non_finite_per_paper_score(paper_recall: float) -> None:
+    exports = {1: benchmark_evaluate.export_findings([_finding(AgentRole.SUBSTANTIVE_REVIEW, 1)])}
+    recall, _ = _valid_component_outputs()
+    recall["per_paper"][0]["recall"] = paper_recall
+    invalid_papers: set[int] = set()
+
+    errors = benchmark_evaluate._validate_recall_output(recall, exports, invalid_papers)
+
+    assert any("recall score is inconsistent for paper1" in error for error in errors)
+    assert invalid_papers == {1}
+
+
 def test_complete_summary_reuse_requires_unchanged_component_outputs(tmp_path) -> None:
     exports = {1: benchmark_evaluate.export_findings([_finding(AgentRole.SUBSTANTIVE_REVIEW, 1)])}
     recall, precision = _valid_component_outputs()

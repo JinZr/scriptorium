@@ -832,7 +832,7 @@ def _validate_recall_output(
                 invalid_papers.add(paper_id)
         else:
             expected_recall = n_covered / n_rubric if n_rubric else 0.0
-            if abs(paper_recall - expected_recall) > 1e-12:
+            if not math.isfinite(paper_recall) or abs(paper_recall - expected_recall) > 1e-12:
                 errors.append(f"recall score is inconsistent for paper{paper_id}")
                 if invalid_papers is not None:
                     invalid_papers.add(paper_id)
