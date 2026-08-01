@@ -112,7 +112,9 @@ class PeerReviewBenchManuscriptManager(ManuscriptManager):
         destination.mkdir(parents=True, exist_ok=True)
         shutil.copy2(self.repo / "scriptorium.toml", destination / "scriptorium.toml")
         shutil.copy2(self.repo / "benchmark.tex", destination / "benchmark.tex")
+        write_json_atomic(destination / "manifest.json", self.prepared_manifest)
         shutil.copytree(self.prepared_paper / "preprint", destination / "preprint")
+        validate_prepared_paper(destination, self.prepared_manifest)
 
     def scan_sources(self, snapshot: Path, main: str) -> tuple[SourceFile, ...]:
         del main

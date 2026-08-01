@@ -317,6 +317,31 @@ def test_markdown_manager_rejects_symlinked_prepared_paper(tmp_path: Path) -> No
         PeerReviewBenchManuscriptManager(tmp_path, linked)
 
 
+def test_markdown_manager_revalidates_completed_snapshot(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    prepared = _prepared_paper(
+        tmp_path / "prepared",
+        paper_id=7,
+        dataset_id="test/peerreview-bench",
+        dataset_revision="locked-revision",
+    )
+    _, manager = _project(tmp_path, prepared)
+    revision = manager.resolve_revision("ignored")
+    original_copytree = shutil.copytree
+
+    def mutate_then_copy(source: Path, destination: Path, *args, **kwargs):
+        if Path(source) == prepared / "preprint":
+            (Path(source) / "preprint.md").write_text("changed during snapshot creation\n", encoding="utf-8")
+        return original_copytree(source, destination, *args, **kwargs)
+
+    monkeypatch.setattr(benchmark_run.shutil, "copytree", mutate_then_copy)
+
+    with pytest.raises(BenchmarkError, match="Prepared file failed verification"):
+        manager.create_snapshot(revision, tmp_path / "snapshot")
+
+
 def test_generated_project_rejects_symlinked_state(tmp_path: Path) -> None:
     routes = _routes(tmp_path / "routes.toml")
     project = tmp_path / "project"
