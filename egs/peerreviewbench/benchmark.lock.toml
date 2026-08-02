@@ -1,0 +1,31 @@
+[upstream]
+repository = "https://github.com/prometheus-eval/cmu-paper-reviewer"
+commit = "a48fe6316d21735d15ba11c92c480e9a239e83c1"
+archive_url = "https://codeload.github.com/prometheus-eval/cmu-paper-reviewer/tar.gz/a48fe6316d21735d15ba11c92c480e9a239e83c1"
+archive_sha256 = "0b6d52d4f2e4d3594936e24bfc91dfef87235804ca3c5d57219b7343d568ba9d"
+license = "Apache-2.0"
+
+[dataset]
+id = "prometheus-eval/peerreview-bench"
+revision = "b782d6676fcece1ed33f1eb2c0e27241d19f9f63"
+license = "CC-BY-4.0"
+split = "eval"
+reviewer_config = "reviewer"
+blob_config = "submitted_papers"
+papers = 78
+rubric_items = 779
+expert_annotation_rows = 3881
+meta_reviewer_rows = 908
+similarity_check_rows = 164
+submitted_paper_blobs = 22351
+
+[precision]
+container_image = "scriptorium-peerreviewbench-precision:openhands-1.7.0"
+
+[defaults]
+smoke_papers = 5
+finding_mode = "per-role-5"
+similarity_model = "litellm_proxy/azure_ai/gpt-5.4"
+judge_model = "litellm_proxy/azure_ai/gpt-5.4"
+recall_concurrency = 16
+recall_temperature = 1.0

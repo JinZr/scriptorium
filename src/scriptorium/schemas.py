@@ -54,6 +54,17 @@ class ReviewOutput(StrictModel):
     findings: list[FindingCandidate]
 
 
+class VisualTranscriptionPage(StrictModel):
+    page: int = Field(ge=1)
+    page_digest: str = Field(pattern="^[0-9a-f]{64}$")
+    text: str
+
+
+class VisualTranscriptionOutput(StrictModel):
+    pdf_digest: str = Field(pattern="^[0-9a-f]{64}$")
+    pages: list[VisualTranscriptionPage] = Field(min_length=1)
+
+
 class ExactEdit(StrictModel):
     finding_ids: list[str] = Field(min_length=1)
     path: str = Field(min_length=1)
@@ -99,6 +110,7 @@ class VerificationOutput(StrictModel):
 
 SCHEMA_MODELS: dict[str, type[StrictModel]] = {
     "review": ReviewOutput,
+    "visual_transcription": VisualTranscriptionOutput,
     "revision": RevisionOutput,
     "verification": VerificationOutput,
 }

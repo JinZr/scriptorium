@@ -1,0 +1,26 @@
+max_concurrency = 4
+
+[roles]
+substantive_review = "primary"
+copyedit = "primary"
+consistency = "primary"
+figure_review = "primary"
+visual_transcription = "visual"
+revision = "primary"
+verification = "primary"
+
+[routes.primary]
+runtime = "codex"
+model_provider = "openai"
+model = "USER_CONFIGURED_MODEL"
+input_usd_per_million = 0
+output_usd_per_million = 0
+reasoning_effort = "high"
+
+[routes.visual]
+runtime = "codex"
+model_provider = "openai"
+model = "USER_CONFIGURED_MODEL"
+input_usd_per_million = 0
+output_usd_per_million = 0
+reasoning_effort = "high"

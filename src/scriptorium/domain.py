@@ -86,6 +86,7 @@ class VerificationResult(str, Enum):
 
 class AgentRole(str, Enum):
     WORKFLOW = "workflow"
+    VISUAL_TRANSCRIPTION = "visual_transcription"
     SUBSTANTIVE_REVIEW = "substantive_review"
     COPYEDIT = "copyedit"
     CONSISTENCY = "consistency"
@@ -108,6 +109,11 @@ ROLE_CATALOG: Mapping[AgentRole, RoleSpec] = {
         display_name="Armarius",
         description="Deterministic workflow coordinator",
         model_backed=False,
+    ),
+    AgentRole.VISUAL_TRANSCRIPTION: RoleSpec(
+        key=AgentRole.VISUAL_TRANSCRIPTION,
+        display_name="Visual Transcriber",
+        description="Verbatim transcription of text visible in raster manuscript content",
     ),
     AgentRole.SUBSTANTIVE_REVIEW: RoleSpec(
         key=AgentRole.SUBSTANTIVE_REVIEW,

@@ -14,7 +14,7 @@ Initialization creates the project-local `.scriptorium/` state directory and ign
 scriptorium --json doctor --profile full --budget-usd 10
 ```
 
-Doctor checks the repository, manuscript, LaTeX tools, SQLite, selected profile, routes, and budget pricing prerequisites. It includes the revision and verification routes, then requires each referenced native SDK at the exact pinned version that a new run will freeze. Antigravity also requires `GEMINI_API_KEY`. Claude Code login or API authentication is intentionally left to an explicit live smoke test.
+Doctor checks the repository, manuscript, LaTeX tools, SQLite, selected profile, routes, and budget pricing prerequisites. It includes the visual-transcription, revision, and verification routes, then requires each referenced native SDK at the exact pinned version that a new run will freeze. Antigravity also requires `GEMINI_API_KEY`. Claude Code login or API authentication is intentionally left to an explicit live smoke test.
 
 ## Start and inspect a run
 
@@ -25,7 +25,7 @@ scriptorium --json finding list RUN_ID
 scriptorium --json run report RUN_ID --format json
 ```
 
-The revision is resolved and frozen before review. Uncommitted changes do not enter the snapshot or agent bundle. Independent review tasks run concurrently up to `max_concurrency`; every stage result is persisted before scheduling the next stage.
+The revision is resolved and frozen before review. Uncommitted changes do not enter the snapshot or agent bundle. If the PDF contains raster images, one separately routed `visual_transcription` task transcribes every affected rendered page before any reviewer starts. A patched PDF is checked independently before the Verifier starts. These tasks use the configured model budget and provenance machinery; text-only PDFs skip them entirely. No local OCR or Tesseract installation is used. Independent review tasks then run concurrently up to `max_concurrency`; every stage result is persisted before scheduling the next stage.
 
 ## Record finding decisions
 
@@ -83,6 +83,8 @@ The database field named `thread_id` stores an opaque native session or conversa
 If an attempt has a recorded session ID but the corresponding native state is missing, resume fails explicitly. It never hides the loss by creating a new conversation. Runtime or model version changes are recorded on a new attempt and never rewritten into earlier history.
 
 If the budget is exhausted, the run pauses in `waiting_budget`. Inspect the report, then either retry the task with an explicitly selected frozen zero-cost route or start a new run with a new budget. Scriptorium never changes the frozen budget or selects a fallback model.
+
+A historical frozen run without a `visual_transcription` contract keeps its original page-anchor evidence behavior: `manuscript.pdf` paths and page bounds are checked, but newer quotation matching is not applied. Resume does not inject a new model or route into frozen inputs; start a new run to enable raster-page transcription.
 
 ## Apply and evaluate the gate
 

@@ -15,6 +15,7 @@ def test_role_catalog_uses_stable_keys_and_display_names() -> None:
     assert set(ROLE_CATALOG) == set(AgentRole)
     assert ROLE_CATALOG[AgentRole.WORKFLOW].display_name == "Armarius"
     assert ROLE_CATALOG[AgentRole.WORKFLOW].model_backed is False
+    assert ROLE_CATALOG[AgentRole.VISUAL_TRANSCRIPTION].display_name == "Visual Transcriber"
     assert ROLE_CATALOG[AgentRole.SUBSTANTIVE_REVIEW].display_name == "Scholiast"
     assert ROLE_CATALOG[AgentRole.COPYEDIT].display_name == "Corrector"
     assert ROLE_CATALOG[AgentRole.CONSISTENCY].display_name == "Collator"
