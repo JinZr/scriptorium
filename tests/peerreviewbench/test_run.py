@@ -223,7 +223,8 @@ def test_route_config_summary_uses_normalized_route_values(tmp_path: Path) -> No
         encoding="utf-8",
     )
     project = tmp_path / "project"
-    create_paper_project(project, routes)
+    route_config = routes.read_bytes()
+    create_paper_project(project, route_config, sha256(route_config).hexdigest())
 
     summary = benchmark_run.route_config_summary(load_local_config(project))
 
@@ -235,7 +236,9 @@ def test_route_config_summary_uses_normalized_route_values(tmp_path: Path) -> No
 
 def test_example_routes_use_a_dedicated_visual_transcription_route(tmp_path: Path) -> None:
     project = tmp_path / "project"
-    create_paper_project(project, benchmark_run.HERE / "routes.example.toml")
+    routes = benchmark_run.HERE / "routes.example.toml"
+    route_config = routes.read_bytes()
+    create_paper_project(project, route_config, sha256(route_config).hexdigest())
 
     config = load_local_config(project)
 
@@ -245,7 +248,9 @@ def test_example_routes_use_a_dedicated_visual_transcription_route(tmp_path: Pat
 
 def _project(tmp_path: Path, prepared: Path) -> tuple[Path, PeerReviewBenchManuscriptManager]:
     project = tmp_path / "project"
-    create_paper_project(project, _routes(tmp_path / "routes.toml"))
+    routes = _routes(tmp_path / "routes.toml")
+    route_config = routes.read_bytes()
+    create_paper_project(project, route_config, sha256(route_config).hexdigest())
     (project / "AGENTS.md").write_text("This project file must not enter the benchmark bundle.\n", encoding="utf-8")
     return project, PeerReviewBenchManuscriptManager(project, prepared)
 
@@ -384,14 +389,29 @@ def test_markdown_manager_revalidates_completed_snapshot(
 def test_generated_project_rejects_symlinked_state(tmp_path: Path) -> None:
     routes = _routes(tmp_path / "routes.toml")
     project = tmp_path / "project"
-    create_paper_project(project, routes)
+    route_config = routes.read_bytes()
+    route_digest = sha256(route_config).hexdigest()
+    create_paper_project(project, route_config, route_digest)
     state = project / ".scriptorium"
     moved = tmp_path / "external-state"
     state.rename(moved)
     state.symlink_to(moved, target_is_directory=True)
 
     with pytest.raises(BenchmarkError, match="missing or unsafe"):
-        benchmark_run.validate_paper_project(project, routes)
+        benchmark_run.validate_paper_project(project, route_digest)
+
+
+def test_generated_project_route_must_match_frozen_digest(tmp_path: Path) -> None:
+    routes = _routes(tmp_path / "routes.toml")
+    route_config = routes.read_bytes()
+    route_digest = sha256(route_config).hexdigest()
+    project = tmp_path / "project"
+    create_paper_project(project, route_config, route_digest)
+    local_routes = project / ".scriptorium" / "config.toml"
+    local_routes.write_text(local_routes.read_text(encoding="utf-8") + "\n", encoding="utf-8")
+
+    with pytest.raises(BenchmarkError, match="route configuration changed"):
+        benchmark_run.validate_paper_project(project, route_digest)
 
 
 def test_package_versions_include_pydantic() -> None:
@@ -824,9 +844,18 @@ def test_route_configuration_change_stops_before_next_paper(
     routes = _routes(tmp_path / "routes.toml")
     route_digests: list[str] = []
 
-    async def fake_run_paper(entry, run_dir, prepared_paper, routes_path, budget_usd, runtime_factory):
+    async def fake_run_paper(
+        entry,
+        run_dir,
+        prepared_paper,
+        route_config,
+        route_digest,
+        budget_usd,
+        runtime_factory,
+    ):
         del run_dir, prepared_paper, budget_usd, runtime_factory
-        route_digests.append(file_digest(routes_path))
+        assert sha256(route_config).hexdigest() == route_digest
+        route_digests.append(route_digest)
         entry["status"] = "complete"
         entry["scriptorium"] = {"estimated_cost_usd": 0}
         if len(route_digests) == 1:
@@ -849,6 +878,211 @@ def test_route_configuration_change_stops_before_next_paper(
         )
 
     assert len(route_digests) == 1
+
+
+def test_source_change_before_next_paper_stops_before_runtime(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    lock = load_lock()
+    dataset = lock["dataset"]
+    cache_root = tmp_path / "cache"
+    for paper_id in (18, 24):
+        _prepared_paper(
+            cache_root / "dataset" / dataset["revision"],
+            paper_id=paper_id,
+            dataset_id=dataset["id"],
+            dataset_revision=dataset["revision"],
+        )
+    routes = _routes(tmp_path / "routes.toml")
+    frozen_sources = benchmark_run.source_manifest()
+    source_calls = 0
+    paper_calls = 0
+
+    def changing_source_manifest():
+        nonlocal source_calls
+        source_calls += 1
+        return frozen_sources if source_calls <= 3 else [{"path": "changed"}]
+
+    async def fake_run_paper(entry, *args, **kwargs):
+        nonlocal paper_calls
+        paper_calls += 1
+        entry["status"] = "complete"
+        entry["scriptorium"] = {"estimated_cost_usd": 0}
+        return entry
+
+    monkeypatch.setattr(benchmark_run, "source_manifest", changing_source_manifest)
+    monkeypatch.setattr(benchmark_run, "_run_paper", fake_run_paper)
+
+    with pytest.raises(BenchmarkError, match="Benchmark source files changed"):
+        asyncio.run(
+            run_benchmark(
+                paper_ids=[18, 24],
+                cache_root=cache_root,
+                runs_root=tmp_path / "runs",
+                routes_path=routes,
+            )
+        )
+
+    assert paper_calls == 1
+    run_dir = next((tmp_path / "runs").iterdir())
+    manifest = json.loads((run_dir / "run_manifest.json").read_text(encoding="utf-8"))
+    assert manifest["status"] != "complete"
+    assert manifest["papers"]["18"]["status"] == "complete"
+    assert manifest["papers"]["24"]["status"] == "pending"
+
+
+def test_source_change_during_paper_marks_it_incomplete_and_stops_later_papers(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    lock = load_lock()
+    dataset = lock["dataset"]
+    cache_root = tmp_path / "cache"
+    for paper_id in (19, 20):
+        _prepared_paper(
+            cache_root / "dataset" / dataset["revision"],
+            paper_id=paper_id,
+            dataset_id=dataset["id"],
+            dataset_revision=dataset["revision"],
+        )
+    frozen_sources = benchmark_run.source_manifest()
+    source_changed = False
+    paper_calls: list[int] = []
+
+    def changing_source_manifest():
+        return [{"path": "changed"}] if source_changed else frozen_sources
+
+    async def fake_run_paper(entry, *args, **kwargs):
+        nonlocal source_changed
+        paper_calls.append(entry["paper_id"])
+        entry["status"] = "complete"
+        entry["scriptorium"] = {"estimated_cost_usd": 0}
+        source_changed = True
+        return entry
+
+    monkeypatch.setattr(benchmark_run, "source_manifest", changing_source_manifest)
+    monkeypatch.setattr(benchmark_run, "_run_paper", fake_run_paper)
+
+    run_dir, manifest = asyncio.run(
+        run_benchmark(
+            paper_ids=[19, 20],
+            cache_root=cache_root,
+            runs_root=tmp_path / "runs",
+            routes_path=_routes(tmp_path / "routes.toml"),
+        )
+    )
+
+    assert paper_calls == [19]
+    assert manifest["status"] == "incomplete"
+    assert manifest["papers"]["19"]["status"] == "incomplete"
+    assert "Benchmark source files changed" in manifest["papers"]["19"]["error"]
+    assert manifest["papers"]["20"]["status"] == "pending"
+    persisted = json.loads((run_dir / "run_manifest.json").read_text(encoding="utf-8"))
+    assert persisted == manifest
+
+
+def test_commit_change_during_paper_marks_it_incomplete_and_stops_later_papers(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    lock = load_lock()
+    dataset = lock["dataset"]
+    cache_root = tmp_path / "cache"
+    for paper_id in (21, 22):
+        _prepared_paper(
+            cache_root / "dataset" / dataset["revision"],
+            paper_id=paper_id,
+            dataset_id=dataset["id"],
+            dataset_revision=dataset["revision"],
+        )
+    frozen_commit = benchmark_run.repository_commit()
+    commit_changed = False
+    paper_calls: list[int] = []
+
+    def changing_repository_commit():
+        return "0" * 40 if commit_changed else frozen_commit
+
+    async def fake_run_paper(entry, *args, **kwargs):
+        nonlocal commit_changed
+        paper_calls.append(entry["paper_id"])
+        entry["status"] = "complete"
+        entry["scriptorium"] = {"estimated_cost_usd": 0}
+        commit_changed = True
+        return entry
+
+    monkeypatch.setattr(benchmark_run, "repository_commit", changing_repository_commit)
+    monkeypatch.setattr(benchmark_run, "_run_paper", fake_run_paper)
+
+    _, manifest = asyncio.run(
+        run_benchmark(
+            paper_ids=[21, 22],
+            cache_root=cache_root,
+            runs_root=tmp_path / "runs",
+            routes_path=_routes(tmp_path / "routes.toml"),
+        )
+    )
+
+    assert paper_calls == [21]
+    assert manifest["status"] == "incomplete"
+    assert manifest["papers"]["21"]["status"] == "incomplete"
+    assert "Scriptorium commit changed" in manifest["papers"]["21"]["error"]
+    assert manifest["papers"]["22"]["status"] == "pending"
+
+
+def test_paper_project_uses_route_content_captured_at_startup(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    lock = load_lock()
+    dataset = lock["dataset"]
+    cache_root = tmp_path / "cache"
+    _prepared_paper(
+        cache_root / "dataset" / dataset["revision"],
+        paper_id=23,
+        dataset_id=dataset["id"],
+        dataset_revision=dataset["revision"],
+    )
+    routes = _routes(tmp_path / "routes.toml")
+    frozen_route_config = routes.read_bytes()
+
+    async def fake_run_paper(
+        entry,
+        run_dir,
+        prepared_paper,
+        route_config,
+        route_digest,
+        budget_usd,
+        runtime_factory,
+    ):
+        del prepared_paper, budget_usd, runtime_factory
+        routes.write_text(
+            routes.read_text(encoding="utf-8").replace('model = "fake-model"', 'model = "changed-model"'),
+            encoding="utf-8",
+        )
+        project = benchmark_run.paper_project_path(run_dir, entry)
+        create_paper_project(project, route_config, route_digest)
+        benchmark_run.validate_paper_project(project, route_digest)
+        assert (project / ".scriptorium" / "config.toml").read_bytes() == frozen_route_config
+        entry["status"] = "complete"
+        entry["scriptorium"] = {"estimated_cost_usd": 0}
+        return entry
+
+    monkeypatch.setattr(benchmark_run, "_run_paper", fake_run_paper)
+
+    run_dir, manifest = asyncio.run(
+        run_benchmark(
+            paper_ids=[23],
+            cache_root=cache_root,
+            runs_root=tmp_path / "runs",
+            routes_path=routes,
+        )
+    )
+
+    assert manifest["status"] == "complete"
+    assert manifest["frozen_inputs"]["route_config_digest"] == sha256(frozen_route_config).hexdigest()
+    assert (run_dir / "papers" / "paper23" / ".scriptorium" / "config.toml").read_bytes() == (frozen_route_config)
+    assert routes.read_bytes() != frozen_route_config
 
 
 @pytest.mark.parametrize(

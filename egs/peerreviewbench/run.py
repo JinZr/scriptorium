@@ -290,7 +290,7 @@ def project_config_text() -> str:
     )
 
 
-def create_paper_project(project: Path, routes_path: Path) -> None:
+def create_paper_project(project: Path, route_config: bytes, route_digest: str) -> None:
     if project.exists():
         raise BenchmarkError(f"Paper project already exists: {project}")
     project.parent.mkdir(parents=True, exist_ok=True)
@@ -299,15 +299,15 @@ def create_paper_project(project: Path, routes_path: Path) -> None:
         (temporary / ".scriptorium").mkdir(parents=True)
         (temporary / "scriptorium.toml").write_text(project_config_text(), encoding="utf-8")
         (temporary / "benchmark.tex").write_text(SENTINEL_TEXT, encoding="utf-8")
-        shutil.copy2(routes_path, temporary / ".scriptorium" / "config.toml")
-        validate_paper_project(temporary, routes_path)
+        (temporary / ".scriptorium" / "config.toml").write_bytes(route_config)
+        validate_paper_project(temporary, route_digest)
         temporary.replace(project)
     except BaseException:
         shutil.rmtree(temporary, ignore_errors=True)
         raise
 
 
-def validate_paper_project(project: Path, routes_path: Path) -> None:
+def validate_paper_project(project: Path, route_digest: str) -> None:
     state_dir = project / ".scriptorium"
     if (
         project.is_symlink()
@@ -326,12 +326,7 @@ def validate_paper_project(project: Path, routes_path: Path) -> None:
         if path.is_symlink() or not path.is_file() or path.read_text(encoding="utf-8") != content:
             raise BenchmarkError(f"Generated paper project changed: {path}")
     local_routes = state_dir / "config.toml"
-    if (
-        routes_path.is_symlink()
-        or local_routes.is_symlink()
-        or not local_routes.is_file()
-        or file_digest(local_routes) != file_digest(routes_path)
-    ):
+    if local_routes.is_symlink() or not local_routes.is_file() or file_digest(local_routes) != route_digest:
         raise BenchmarkError(f"Generated paper route configuration changed: {local_routes}")
     for path in (state_dir / "state.sqlite3", state_dir / "artifacts", state_dir / "runs"):
         if path.is_symlink():
@@ -567,6 +562,13 @@ def _frozen_inputs(
     }
 
 
+def _validate_frozen_benchmark_sources(frozen_inputs: dict[str, Any]) -> None:
+    if repository_commit() != frozen_inputs["scriptorium_commit"]:
+        raise BenchmarkError("Scriptorium commit changed during the benchmark")
+    if source_manifest() != frozen_inputs["source_manifest"]:
+        raise BenchmarkError("Benchmark source files changed during the benchmark")
+
+
 def _new_run_directory(runs_root: Path) -> Path:
     if runs_root.is_symlink():
         raise BenchmarkError(f"Benchmark runs root must not be a symlink: {runs_root}")
@@ -681,14 +683,15 @@ async def _run_paper(
     entry: dict[str, Any],
     run_dir: Path,
     prepared_paper: Path,
-    routes_path: Path,
+    route_config: bytes,
+    route_digest: str,
     budget_usd: float | None,
     runtime_factory: RuntimeFactory | None,
 ) -> dict[str, Any]:
     project = paper_project_path(run_dir, entry)
     if not project.exists():
-        create_paper_project(project, routes_path)
-    validate_paper_project(project, routes_path)
+        create_paper_project(project, route_config, route_digest)
+    validate_paper_project(project, route_digest)
     manager = PeerReviewBenchManuscriptManager(project, prepared_paper)
     with ScriptoriumService(
         project,
@@ -748,10 +751,10 @@ def _validate_completed_paper(
     entry: dict[str, Any],
     run_dir: Path,
     prepared_paper: Path,
-    routes_path: Path,
+    route_digest: str,
 ) -> None:
     project = paper_project_path(run_dir, entry)
-    validate_paper_project(project, routes_path)
+    validate_paper_project(project, route_digest)
     manager = PeerReviewBenchManuscriptManager(project, prepared_paper)
     with ScriptoriumService(project, manuscript_manager=manager) as service:
         validate_completed_scriptorium_state(service, entry)
@@ -860,10 +863,11 @@ async def run_benchmark(
         raise BenchmarkError(
             f"Missing route configuration: {routes_path}. Copy routes.example.toml there and configure a model."
         )
-    routes_digest = file_digest(routes_path)
+    route_config = routes_path.read_bytes()
+    routes_digest = sha256(route_config).hexdigest()
     with tempfile.TemporaryDirectory(prefix="scriptorium-peerreviewbench-routes-") as temporary:
         validation_project = Path(temporary) / "project"
-        create_paper_project(validation_project, routes_path)
+        create_paper_project(validation_project, route_config, routes_digest)
         try:
             local_config = load_local_config(validation_project)
             validate_ready(
@@ -934,7 +938,10 @@ async def run_benchmark(
         raise BenchmarkError(f"Prepared papers needed for this run are missing: {', '.join(map(str, missing))}")
     failures = 0
     did_work = False
+    frozen_inputs = manifest["frozen_inputs"]
+    frozen_route_digest = frozen_inputs["route_config_digest"]
     for index, paper_id in enumerate(selected_ids, 1):
+        _validate_frozen_benchmark_sources(frozen_inputs)
         if routes_path.is_symlink() or not routes_path.is_file() or file_digest(routes_path) != routes_digest:
             raise BenchmarkError("Route configuration changed during the benchmark")
         entry = manifest["papers"][str(paper_id)]
@@ -942,7 +949,7 @@ async def run_benchmark(
             raise BenchmarkError(f"Prepared paper changed since the run was created: paper{paper_id}")
         if entry["status"] == "complete":
             try:
-                _validate_completed_paper(entry, run_dir, prepared[paper_id], routes_path)
+                _validate_completed_paper(entry, run_dir, prepared[paper_id], frozen_route_digest)
             except Exception as exc:
                 did_work = True
                 entry["status"] = "incomplete"
@@ -952,6 +959,16 @@ async def run_benchmark(
                 manifest["updated_at"] = utc_now()
                 write_json_atomic(run_dir / "run_manifest.json", manifest)
                 continue
+            try:
+                _validate_frozen_benchmark_sources(frozen_inputs)
+            except BenchmarkError as exc:
+                entry["status"] = "incomplete"
+                entry["error"] = f"{type(exc).__name__}: {exc}"
+                failures += 1
+                manifest["status"] = "incomplete"
+                manifest["updated_at"] = utc_now()
+                write_json_atomic(run_dir / "run_manifest.json", manifest)
+                break
             print(f"[{index}/{len(selected_ids)}] paper{paper_id}: already complete and verified", flush=True)
             continue
         print(f"[{index}/{len(selected_ids)}] paper{paper_id}: running full review profile", flush=True)
@@ -966,7 +983,8 @@ async def run_benchmark(
                 entry,
                 run_dir,
                 prepared[paper_id],
-                routes_path,
+                route_config,
+                frozen_route_digest,
                 budget_usd,
                 runtime_factory,
             )
@@ -980,6 +998,16 @@ async def run_benchmark(
         except Exception as exc:
             entry["status"] = "incomplete"
             entry["error"] = f"{type(exc).__name__}: {exc}"
+        try:
+            _validate_frozen_benchmark_sources(frozen_inputs)
+        except BenchmarkError as exc:
+            entry["status"] = "incomplete"
+            entry["error"] = f"{type(exc).__name__}: {exc}"
+            failures += 1
+            manifest["status"] = "incomplete"
+            manifest["updated_at"] = utc_now()
+            write_json_atomic(run_dir / "run_manifest.json", manifest)
+            break
         if entry["status"] != "complete":
             failures += 1
         manifest["updated_at"] = utc_now()

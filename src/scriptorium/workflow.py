@@ -1266,12 +1266,15 @@ class Armarius:
             '"sources/main.tex"), and start_line, end_line, source_digest, and quoted_text '
             "must be supplied; quoted_text must be copied verbatim from those lines so that "
             "it appears exactly inside the cited line range, without additions, omissions, "
-            'or ellipses. For rendered-PDF evidence, use source_path "manuscript.pdf", set '
-            "page to a valid 1-based PDF page number, and copy quoted_text verbatim from the "
-            "cited page. Use start_line/end_line only for UTF-8 text sources; never line-anchor "
-            ".pdf files or other graphics/binary assets from source-map.json. Only "
-            "manuscript.pdf supports page evidence. Do not modify files. Return only the "
-            "ReviewOutput JSON object with no prose before or after it."
+            "or ellipses. Prefer source-file line evidence: it is exact and verifiable. "
+            'For rendered-PDF evidence, use source_path "manuscript.pdf", set page to a '
+            "valid 1-based PDF page number, and copy quoted_text verbatim from that page's "
+            "native text layer; use PDF page evidence only when the claim concerns visual "
+            "content that has no corresponding source text. Use start_line/end_line only "
+            "for UTF-8 text sources; never line-anchor .pdf files or other graphics/binary "
+            "assets from source-map.json. Only manuscript.pdf supports page evidence. Do not "
+            "modify files. Return only the ReviewOutput JSON object with no prose before or "
+            "after it."
         )
 
     def _revision_prompt(self, run: Run, findings: list[Finding], feedback: str | None) -> str:

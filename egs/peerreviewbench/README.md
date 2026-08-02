@@ -110,6 +110,10 @@ duration, finding payload digest, and status. A paper is complete only after its
 and per-role selection remain limited to the four configured reviewer roles; the transcription task contributes only
 provenance, artifacts, token usage, duration, and estimated cost.
 
+The wrapper rechecks the frozen Scriptorium commit and source-file hashes before and after every paper. It captures
+the route configuration once at startup and creates every paper project from those same frozen bytes, while still
+stopping at paper boundaries if the user-facing route file changes.
+
 Before a completed paper is accepted on resume, the benchmark rechecks the frozen bundle directory digest, its source
 map, PDF, rendered pages, and every content-addressed artifact in the paper's Scriptorium store, including build
 evidence and task artifacts.
@@ -176,6 +180,8 @@ pinned components do not expose it.
 Before judging, the wrapper independently derives and freezes each selected paper's rubric-item count from the locked
 upstream code and dataset revision. Only counts enter the evaluation manifest; this preflight does not copy rubric
 text or reviewer or item identities into the BYOJ paper view, prepared manuscript workspace, or agent bundle.
+The extracted upstream source tree is revalidated after the rubric preflight, between recall and precision, and again
+before their outputs can contribute to a complete summary.
 
 The terminal-capable OpenHands precision evaluator never runs directly on the host. It runs in a read-only container
 with all Linux capabilities dropped: the pinned upstream source and prepared papers are mounted read-only, while only

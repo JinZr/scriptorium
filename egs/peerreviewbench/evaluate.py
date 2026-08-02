@@ -76,6 +76,7 @@ FINDING_MODES = ("all", "per-role-5")
 ComponentRunner = Callable[..., subprocess.CompletedProcess[str]]
 PINNED_DATASET_LAUNCHER = (
     "import os, runpy, sys\n"
+    "sys.dont_write_bytecode = True\n"
     "os.environ.setdefault('HF_HUB_DISABLE_XET', '1')\n"
     "os.environ.setdefault('HF_HUB_ENABLE_HF_TRANSFER', '0')\n"
     "os.environ.setdefault('HF_HUB_DOWNLOAD_TIMEOUT', '120')\n"
@@ -97,6 +98,7 @@ PINNED_DATASET_LAUNCHER = (
 )
 RUBRIC_COUNTS_LAUNCHER = (
     "import contextlib, json, os, sys\n"
+    "sys.dont_write_bytecode = True\n"
     "os.environ.setdefault('HF_HUB_DISABLE_XET', '1')\n"
     "os.environ.setdefault('HF_HUB_ENABLE_HF_TRANSFER', '0')\n"
     "os.environ.setdefault('HF_HUB_DOWNLOAD_TIMEOUT', '120')\n"
@@ -307,10 +309,7 @@ def collect_exports(
     for paper_id in run_manifest["frozen_inputs"]["paper_ids"]:
         entry = run_manifest["papers"][str(paper_id)]
         project = paper_project_path(run_dir, entry)
-        local_routes = project / ".scriptorium" / "config.toml"
-        validate_paper_project(project, local_routes)
-        if file_digest(local_routes) != run_manifest["frozen_inputs"].get("route_config_digest"):
-            raise BenchmarkError(f"paper{paper_id} route configuration changed after review")
+        validate_paper_project(project, run_manifest["frozen_inputs"]["route_config_digest"])
         prepared = cache_root / "dataset" / revision / f"paper{paper_id}"
         prepared_manifest = validate_prepared_paper(prepared)
         if json_digest(prepared_manifest) != entry["prepared_manifest_digest"]:
@@ -1281,6 +1280,7 @@ def evaluate_benchmark(
         expected_total=int(lock["dataset"]["rubric_items"]),
         runner=runner,
     )
+    prepare_upstream(lock["upstream"], cache_root)
     frozen_inputs = _evaluation_frozen_inputs(
         run_dir,
         run_manifest,
@@ -1353,16 +1353,16 @@ def evaluate_benchmark(
         temperature=temperature,
         precision_image_id=precision_image_id,
     )
-    component_codes = {
-        "recall": run_component("recall", recall_command, evaluation_dir, runner),
-        "precision": run_component(
-            "precision",
-            precision_command,
-            evaluation_dir,
-            runner,
-            input_text=precision_input,
-        ),
-    }
+    recall_code = run_component("recall", recall_command, evaluation_dir, runner)
+    prepare_upstream(lock["upstream"], cache_root)
+    precision_code = run_component(
+        "precision",
+        precision_command,
+        evaluation_dir,
+        runner,
+        input_text=precision_input,
+    )
+    component_codes = {"recall": recall_code, "precision": precision_code}
     errors = [f"{name} component exited with {code}" for name, code in component_codes.items() if code]
     recall: dict[str, Any] = {}
     precision: dict[str, Any] = {}
@@ -1420,6 +1420,7 @@ def evaluate_benchmark(
         for paper_id in frozen_inputs["paper_ids"]
     }
     try:
+        prepare_upstream(lock["upstream"], cache_root)
         _verify_prepared_inputs(
             frozen_inputs["paper_ids"],
             lock["dataset"]["revision"],

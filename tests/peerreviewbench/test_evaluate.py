@@ -433,11 +433,13 @@ def test_pinned_dataset_launcher_honors_upstream_script_path_bootstrap(tmp_path,
     datasets = ModuleType("datasets")
     datasets.load_dataset = lambda *args, **kwargs: None
     monkeypatch.setitem(sys.modules, "datasets", datasets)
+    monkeypatch.setattr(sys, "dont_write_bytecode", False)
     monkeypatch.setattr(sys, "argv", ["launcher", "owner/dataset", "revision-1", str(script), str(output)])
 
     exec(benchmark_evaluate.PINNED_DATASET_LAUNCHER, {})
 
     assert output.read_text(encoding="utf-8") == "evaluation:root"
+    assert not list(upstream_root.rglob("__pycache__"))
 
 
 def test_rubric_counts_launcher_emits_only_counts_and_pins_dataset_revision(tmp_path, monkeypatch, capsys) -> None:
@@ -458,6 +460,7 @@ def test_rubric_counts_launcher_emits_only_counts_and_pins_dataset_revision(tmp_
     build_rubric.build_rubric_with_texts = build_rubric_with_texts
     monkeypatch.setitem(sys.modules, "datasets", datasets)
     monkeypatch.setitem(sys.modules, "build_rubric", build_rubric)
+    monkeypatch.setattr(sys, "dont_write_bytecode", False)
     monkeypatch.setattr(
         sys,
         "argv",
@@ -471,6 +474,45 @@ def test_rubric_counts_launcher_emits_only_counts_and_pins_dataset_revision(tmp_
     assert "gold rubric text" not in captured.out
     assert "gold rubric text" in captured.err
     assert calls == [("owner/dataset", "revision-1")]
+
+
+def test_rubric_counts_launcher_does_not_write_upstream_bytecode(tmp_path) -> None:
+    evaluation = tmp_path / "peerreview_bench" / "evaluation"
+    evaluation.mkdir(parents=True)
+    (tmp_path / "datasets.py").write_text("def load_dataset(*args, **kwargs):\n    return None\n", encoding="utf-8")
+    (evaluation / "rubric_helper.py").write_text("ITEMS = [{'text': 'secret'}]\n", encoding="utf-8")
+    (evaluation / "build_rubric.py").write_text(
+        "\n".join(
+            [
+                "from rubric_helper import ITEMS",
+                "def build_rubric_with_texts():",
+                "    return {1: ITEMS}, []",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    environment = dict(os.environ)
+    environment["PYTHONPATH"] = str(tmp_path)
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            benchmark_evaluate.RUBRIC_COUNTS_LAUNCHER,
+            "owner/dataset",
+            "revision-1",
+            str(evaluation),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=environment,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout) == {"1": 1}
+    assert not list(tmp_path.rglob("__pycache__"))
 
 
 def test_load_rubric_counts_validates_total_and_returns_selected_subset(tmp_path) -> None:
@@ -1128,7 +1170,7 @@ def test_complete_evaluation_is_reused_without_reinvoking_judges(tmp_path, monke
         "papers": {"1": {"prepared_manifest_digest": "prepared-digest"}},
         "reviewer_cost_usd": 1.25,
     }
-    component_calls: list[str] = []
+    lifecycle_calls: list[str] = []
 
     class FakeDatasetClient:
         def __init__(self, dataset_id: str, revision: str) -> None:
@@ -1155,14 +1197,14 @@ def test_complete_evaluation_is_reused_without_reinvoking_judges(tmp_path, monke
         assert check is False and capture_output is True and text is True
         if command[0] == sys.executable and command[2] == benchmark_evaluate.RUBRIC_COUNTS_LAUNCHER:
             assert input is None
-            component_calls.append("rubric")
+            lifecycle_calls.append("rubric")
             return subprocess.CompletedProcess(command, 0, stdout='{"1": 2}', stderr="")
         if command[0] == "docker":
             assert json.loads(input) == {"api_key": "test-key", "base_url": None}
-            component_calls.append("precision")
+            lifecycle_calls.append("precision")
         else:
             assert input is None
-            component_calls.append("recall")
+            lifecycle_calls.append("recall")
         recall, precision = _valid_component_outputs()
         payload = recall if any(Path(part).name == "evaluate_recall.py" for part in command) else precision
         output = (
@@ -1173,6 +1215,11 @@ def test_complete_evaluation_is_reused_without_reinvoking_judges(tmp_path, monke
         output.write_text(json.dumps(payload), encoding="utf-8")
         return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
 
+    def fake_prepare_upstream(upstream, cache_root):
+        del upstream, cache_root
+        lifecycle_calls.append("upstream")
+        return tmp_path / "upstream"
+
     monkeypatch.setattr(benchmark_evaluate, "load_lock", lambda: lock)
     monkeypatch.setattr(benchmark_evaluate, "load_run_manifest", lambda path: run_manifest)
     monkeypatch.setattr(
@@ -1181,7 +1228,7 @@ def test_complete_evaluation_is_reused_without_reinvoking_judges(tmp_path, monke
         lambda path, manifest, finding_mode, cache_root: (exports, selection),
     )
     monkeypatch.setattr(benchmark_evaluate, "DatasetClient", FakeDatasetClient)
-    monkeypatch.setattr(benchmark_evaluate, "prepare_upstream", lambda upstream, cache_root: tmp_path / "upstream")
+    monkeypatch.setattr(benchmark_evaluate, "prepare_upstream", fake_prepare_upstream)
     monkeypatch.setattr(benchmark_evaluate, "prepare_evaluation_view", fake_prepare_view)
     monkeypatch.setattr(benchmark_evaluate, "_verify_prepared_inputs", lambda *args, **kwargs: None)
     monkeypatch.setattr(benchmark_evaluate, "_validate_evaluation_view", lambda *args, **kwargs: None)
@@ -1214,7 +1261,152 @@ def test_complete_evaluation_is_reused_without_reinvoking_judges(tmp_path, monke
     assert frozen["rubric_counts"] == {"1": 2}
     assert second == first
     assert second_dir == first_dir
-    assert component_calls == ["rubric", "recall", "precision", "rubric"]
+    assert lifecycle_calls == [
+        "upstream",
+        "rubric",
+        "upstream",
+        "recall",
+        "upstream",
+        "precision",
+        "upstream",
+        "upstream",
+        "rubric",
+        "upstream",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("fail_on_upstream_call", "expected_calls", "summary_status"),
+    [
+        (2, ["upstream", "rubric", "upstream"], None),
+        (3, ["upstream", "rubric", "upstream", "recall", "upstream"], None),
+        (
+            4,
+            ["upstream", "rubric", "upstream", "recall", "upstream", "precision", "upstream"],
+            "incomplete",
+        ),
+    ],
+)
+def test_upstream_is_revalidated_between_judge_stages(
+    tmp_path,
+    monkeypatch,
+    fail_on_upstream_call: int,
+    expected_calls: list[str],
+    summary_status: str | None,
+) -> None:
+    monkeypatch.setenv("LITELLM_API_KEY", "test-key")
+    run_dir = tmp_path / "benchmark-run"
+    run_dir.mkdir()
+    evaluations_root = tmp_path / "evaluations"
+    exports = {1: benchmark_evaluate.export_findings([_finding(AgentRole.SUBSTANTIVE_REVIEW, 1)])}
+    selection = _selection_stats()
+    lock = {
+        "dataset": {"id": "owner/dataset", "revision": "revision-1", "rubric_items": 2},
+        "upstream": {
+            "repository": "https://example.invalid/upstream",
+            "commit": "commit-1",
+            "archive_sha256": "archive-digest",
+        },
+        "precision": {"container_image": "precision:test"},
+        "defaults": {
+            "similarity_model": "similarity-model",
+            "judge_model": "precision-model",
+            "recall_concurrency": 2,
+            "recall_temperature": 0.0,
+        },
+    }
+    run_manifest = {
+        "run_id": "benchmark-run",
+        "status": "complete",
+        "frozen_inputs": {
+            "dataset": {"id": "owner/dataset", "revision": "revision-1"},
+            "upstream": lock["upstream"],
+            "paper_ids": [1],
+        },
+        "papers": {"1": {"prepared_manifest_digest": "prepared-digest"}},
+    }
+    calls: list[str] = []
+    upstream_calls = 0
+
+    def fake_prepare_upstream(upstream, cache_root):
+        nonlocal upstream_calls
+        del upstream, cache_root
+        upstream_calls += 1
+        calls.append("upstream")
+        if upstream_calls == fail_on_upstream_call:
+            raise benchmark_evaluate.BenchmarkError("upstream changed during evaluation")
+        return tmp_path / "upstream"
+
+    def fake_prepare_view(evaluation_dir, frozen_inputs, selection_stats, actual_exports, cache_root):
+        del actual_exports, cache_root
+        evaluation_dir.mkdir(parents=True, exist_ok=True)
+        return {
+            "frozen_inputs": frozen_inputs,
+            "selection": selection_stats,
+            "package_versions": {},
+        }
+
+    def fake_load_rubric_counts(*args, **kwargs):
+        calls.append("rubric")
+        return {"1": 2}
+
+    recall, precision = _valid_component_outputs()
+
+    def fake_run_component(name, command, output_dir, runner=subprocess.run, input_text=None):
+        del command, runner, input_text
+        calls.append(name)
+        (output_dir / f"{name}.json").write_text(json.dumps(recall if name == "recall" else precision))
+        return 0
+
+    monkeypatch.setattr(benchmark_evaluate, "load_lock", lambda: lock)
+    monkeypatch.setattr(benchmark_evaluate, "load_run_manifest", lambda path: run_manifest)
+    monkeypatch.setattr(
+        benchmark_evaluate,
+        "collect_exports",
+        lambda *args, **kwargs: (exports, selection),
+    )
+    monkeypatch.setattr(
+        benchmark_evaluate,
+        "DatasetClient",
+        lambda *args: type("Client", (), {"assert_current_revision": lambda self: None})(),
+    )
+    monkeypatch.setattr(benchmark_evaluate, "prepare_upstream", fake_prepare_upstream)
+    monkeypatch.setattr(benchmark_evaluate, "load_rubric_counts", fake_load_rubric_counts)
+    monkeypatch.setattr(benchmark_evaluate, "prepare_evaluation_view", fake_prepare_view)
+    monkeypatch.setattr(benchmark_evaluate, "repository_commit", lambda: "commit")
+    monkeypatch.setattr(benchmark_evaluate, "source_manifest", lambda: {})
+    monkeypatch.setattr(benchmark_evaluate, "package_versions", lambda: {})
+    monkeypatch.setattr(benchmark_evaluate, "resolve_precision_image", lambda image: PRECISION_IMAGE_ID)
+    monkeypatch.setattr(
+        benchmark_evaluate,
+        "build_component_commands",
+        lambda *args, **kwargs: (["recall"], ["precision"]),
+    )
+    monkeypatch.setattr(benchmark_evaluate, "run_component", fake_run_component)
+    monkeypatch.setattr(benchmark_evaluate, "_validate_component_paths", lambda *args: None)
+    monkeypatch.setattr(benchmark_evaluate, "_validate_evaluation_manifest", lambda *args: None)
+    monkeypatch.setattr(benchmark_evaluate, "_verify_prepared_inputs", lambda *args, **kwargs: None)
+    monkeypatch.setattr(benchmark_evaluate, "_validate_evaluation_view", lambda *args: None)
+
+    if summary_status is None:
+        with pytest.raises(benchmark_evaluate.BenchmarkError, match="upstream changed"):
+            benchmark_evaluate.evaluate_benchmark(
+                run_dir=run_dir,
+                finding_mode="all",
+                cache_root=tmp_path / "cache",
+                evaluations_root=evaluations_root,
+            )
+    else:
+        _, summary = benchmark_evaluate.evaluate_benchmark(
+            run_dir=run_dir,
+            finding_mode="all",
+            cache_root=tmp_path / "cache",
+            evaluations_root=evaluations_root,
+        )
+        assert summary["status"] == summary_status
+        assert "upstream changed during evaluation" in summary["errors"]
+
+    assert calls == expected_calls
 
 
 def test_evaluate_rejects_run_from_different_locked_dataset(tmp_path, monkeypatch) -> None:
