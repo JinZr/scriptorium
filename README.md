@@ -105,7 +105,7 @@ Exit codes are `0` for command success or a passing gate, `1` for a valid domain
 
 ## Development checks
 
-Use the sleep2vec-style helper to format and lint the repository with the active Python environment:
+Use the style check helper to format and lint the repository with the active Python environment:
 
 ```bash
 bash utils/style_check.sh
