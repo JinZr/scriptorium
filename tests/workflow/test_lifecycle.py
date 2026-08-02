@@ -3,7 +3,7 @@ import json
 
 import pytest
 
-from scriptorium.domain import AgentRole, PatchStatus, RunStatus
+from scriptorium.domain import AgentRole, PatchStatus, RunStatus, TaskStatus
 from scriptorium.errors import InfrastructureError
 from scriptorium.service import ScriptoriumService
 
@@ -18,9 +18,16 @@ class FailingPatchedBuildManager(PdfBuildingManuscriptManager):
 
 
 class PdfEvidenceRuntime(FakeAgentRuntime):
-    def __init__(self, quoted_text: str) -> None:
-        super().__init__()
+    def __init__(
+        self,
+        quoted_text: str,
+        *,
+        interrupt_copyedit_once: bool = False,
+        verification_quoted_text: str | None = None,
+    ) -> None:
+        super().__init__(interrupt_copyedit_once=interrupt_copyedit_once)
         self.quoted_text = quoted_text
+        self.verification_quoted_text = verification_quoted_text
 
     def _review_output(self, role, workspace):
         output = super()._review_output(role, workspace)
@@ -33,6 +40,28 @@ class PdfEvidenceRuntime(FakeAgentRuntime):
                 }
             ]
         return output
+
+    def _verification_output(self, task):
+        if self.verification_quoted_text is None:
+            return super()._verification_output(task)
+        return {
+            "verdict": "fail",
+            "summary": "The patch needs another human-directed revision.",
+            "resolved_finding_ids": [],
+            "issues": [
+                {
+                    "title": "Finding remains unresolved",
+                    "explanation": "The proposed wording does not fully resolve the finding.",
+                    "evidence": [
+                        {
+                            "source_path": "manuscript.pdf",
+                            "page": 1,
+                            "quoted_text": self.verification_quoted_text,
+                        }
+                    ],
+                }
+            ],
+        }
 
 
 def test_pdf_evidence_quote_matches_text_on_the_cited_page(tmp_path):
@@ -72,6 +101,70 @@ def test_fabricated_pdf_evidence_quote_is_rejected(tmp_path):
             attempt.error == "invalid structured output: quoted PDF evidence does not match manuscript.pdf page 1"
             for attempt in attempts
         )
+
+
+def test_legacy_run_preserves_page_only_evidence_through_resume_and_verification(tmp_path, monkeypatch):
+    repo = make_repository(tmp_path)
+    runtime = PdfEvidenceRuntime(
+        "This text does not appear on the page.",
+        interrupt_copyedit_once=True,
+        verification_quoted_text="This text does not appear on the patched page.",
+    )
+    manager = PdfBuildingManuscriptManager(repo)
+
+    with ScriptoriumService(
+        repo,
+        runtime_factory=lambda route: runtime,
+        manuscript_manager=manager,
+    ) as service:
+        freeze_config = service.armarius._freeze_config
+
+        def freeze_legacy_config(project, profile, sources, project_config_text):
+            frozen = freeze_config(project, profile, sources, project_config_text)
+            frozen["local"]["roles"].pop(AgentRole.VISUAL_TRANSCRIPTION.value)
+            frozen["role_routes"].pop(AgentRole.VISUAL_TRANSCRIPTION.value)
+            frozen["prompts"].pop(AgentRole.VISUAL_TRANSCRIPTION.value)
+            frozen["schemas"].pop("visual_transcription")
+            return frozen
+
+        monkeypatch.setattr(service.armarius, "_freeze_config", freeze_legacy_config)
+        started = asyncio.run(service.start_run("HEAD", "quick", None))
+        run_id = started["run"].id
+        tasks = {item["task"].role: item["task"] for item in started["tasks"]}
+
+        assert started["run"].status == RunStatus.REVIEWING
+        assert tasks[AgentRole.SUBSTANTIVE_REVIEW].status == TaskStatus.COMPLETED
+        assert tasks[AgentRole.COPYEDIT].status == TaskStatus.INTERRUPTED
+        assert AgentRole.VISUAL_TRANSCRIPTION not in tasks
+
+    with ScriptoriumService(
+        repo,
+        runtime_factory=lambda route: runtime,
+        manuscript_manager=manager,
+    ) as service:
+        resumed = asyncio.run(service.resume_run(run_id))
+
+        assert resumed["run"].status == RunStatus.AWAITING_DECISION
+        assert runtime.run_calls[AgentRole.SUBSTANTIVE_REVIEW] == 1
+        assert runtime.resume_calls == [AgentRole.COPYEDIT]
+        evidence = service.list_findings(run_id)[0].evidence[0]
+        assert evidence["quoted_text"] == "This text does not appear on the page."
+
+        service.decide_finding(
+            service.list_findings(run_id)[0].id,
+            "confirm",
+            "The typo should be corrected.",
+        )
+        revised = asyncio.run(service.resume_run(run_id))
+        patch_id = revised["patch_ids"][0]
+        service.decide_patch(patch_id, "approve", "Verify this exact edit.")
+
+        verified = asyncio.run(service.resume_run(run_id))
+
+        assert verified["run"].status == RunStatus.AWAITING_PATCH_APPROVAL
+        verification = service.get_patch(patch_id)["verifications"][0]
+        assert verification.result.value == "fail"
+        assert runtime.run_calls[AgentRole.VERIFICATION] == 1
 
 
 def test_full_workflow_preserves_worktree_until_approved_patch_is_applied(tmp_path):

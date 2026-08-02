@@ -84,7 +84,7 @@ If an attempt has a recorded session ID but the corresponding native state is mi
 
 If the budget is exhausted, the run pauses in `waiting_budget`. Inspect the report, then either retry the task with an explicitly selected frozen zero-cost route or start a new run with a new budget. Scriptorium never changes the frozen budget or selects a fallback model.
 
-A historical frozen run without a `visual_transcription` route keeps its original native-text-only evidence behavior. Resume does not inject a new model or route into frozen inputs; start a new run to enable raster-page transcription.
+A historical frozen run without a `visual_transcription` contract keeps its original page-anchor evidence behavior: `manuscript.pdf` paths and page bounds are checked, but newer quotation matching is not applied. Resume does not inject a new model or route into frozen inputs; start a new run to enable raster-page transcription.
 
 ## Apply and evaluate the gate
 

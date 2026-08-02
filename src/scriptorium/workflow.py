@@ -338,7 +338,8 @@ class Armarius:
         visual_transcription: VisualTranscriptionOutput | None = None,
     ) -> TaskOutcome | None:
         bundle = self._bundle_for_run(run)
-        if visual_transcription is None and self._has_visual_transcription_contract(run):
+        strict_pdf_evidence = self._has_visual_transcription_contract(run)
+        if visual_transcription is None and strict_pdf_evidence:
             visual_pages = self._visual_page_records(bundle)
             if visual_pages:
                 _, _, input_digest = self._visual_transcription_input(
@@ -373,6 +374,7 @@ class Armarius:
                 bundle.pdf_pages,
                 self._run_dir(run.id) / "snapshot",
                 bundle.workspace / "manuscript.pdf",
+                strict_pdf_evidence,
                 visual_transcription,
             ),
         )
@@ -638,10 +640,9 @@ class Armarius:
                 self.manuscript.scan_sources(patched, self._manuscript_config(run).main),
                 build.pdf_path,
             )
+        strict_pdf_evidence = self._has_visual_transcription_contract(run)
         transcription = None
-        visual_pages = (
-            self._visual_page_records(verification_bundle) if self._has_visual_transcription_contract(run) else []
-        )
+        visual_pages = self._visual_page_records(verification_bundle) if strict_pdf_evidence else []
         if visual_pages:
             transcription = await self._run_visual_transcription(
                 run,
@@ -677,6 +678,7 @@ class Armarius:
                 verification_bundle.pdf_pages,
                 patched,
                 verification_bundle.workspace / "manuscript.pdf",
+                strict_pdf_evidence,
                 transcription,
             ),
         )
@@ -1082,6 +1084,7 @@ class Armarius:
         pdf_pages: int,
         source_root: Path,
         pdf_path: Path,
+        strict_pdf_evidence: bool,
         visual_transcription: VisualTranscriptionOutput | None = None,
     ) -> None:
         source_index = {source.path: source for source in sources}
@@ -1093,6 +1096,7 @@ class Armarius:
                     pdf_pages,
                     source_root,
                     pdf_path,
+                    strict_pdf_evidence,
                     visual_transcription,
                 )
 
@@ -1143,6 +1147,7 @@ class Armarius:
         pdf_pages: int,
         source_root: Path,
         pdf_path: Path,
+        strict_pdf_evidence: bool,
         visual_transcription: VisualTranscriptionOutput | None = None,
     ) -> None:
         expected_ids = {finding.id for finding in findings}
@@ -1160,6 +1165,7 @@ class Armarius:
                     pdf_pages,
                     source_root,
                     pdf_path,
+                    strict_pdf_evidence,
                     visual_transcription,
                 )
 
@@ -1170,6 +1176,7 @@ class Armarius:
         pdf_pages: int,
         source_root: Path,
         pdf_path: Path,
+        strict_pdf_evidence: bool,
         visual_transcription: VisualTranscriptionOutput | None = None,
     ) -> None:
         if evidence.page is not None and evidence.page > pdf_pages:
@@ -1177,6 +1184,8 @@ class Armarius:
         if evidence.start_line is None:
             if evidence.source_path != "manuscript.pdf":
                 raise ValueError("page-only evidence must use source_path manuscript.pdf")
+            if not strict_pdf_evidence:
+                return
             quoted_text = " ".join(evidence.quoted_text.split())
             with fitz.open(pdf_path) as document:
                 page_text = " ".join(document[evidence.page - 1].get_text(sort=True).split())
