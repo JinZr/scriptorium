@@ -195,6 +195,7 @@ def make_repository(tmp_path):
             "[roles]\n"
             'substantive_review = "primary"\n'
             'copyedit = "primary"\n'
+            'visual_transcription = "primary"\n'
             'revision = "primary"\n'
             'verification = "primary"\n\n'
             "[routes.primary]\n"

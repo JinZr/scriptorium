@@ -34,6 +34,7 @@ def make_repository(
         (
             "[roles]\n"
             'copyedit = "primary"\n'
+            'visual_transcription = "primary"\n'
             'revision = "primary"\n'
             'verification = "primary"\n\n'
             "[routes.primary]\n"
@@ -75,6 +76,43 @@ def test_doctor_checks_only_selected_native_runtime(
     assert result["ok"] is True
     assert requested_packages == ["claude-agent-sdk"]
     assert next(item for item in result["checks"] if item["name"] == "runtime_claude_code_sdk")["ok"]
+
+
+def test_doctor_checks_visual_transcription_runtime(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo = make_repository(tmp_path, "codex", "openai")
+    local_path = repo / ".scriptorium" / "config.toml"
+    local_path.write_text(
+        local_path.read_text(encoding="utf-8").replace(
+            'visual_transcription = "primary"',
+            'visual_transcription = "visual"',
+        )
+        + (
+            "\n[routes.visual]\n"
+            'runtime = "claude_code"\n'
+            'model_provider = "anthropic"\n'
+            'model = "visual-model"\n'
+            "input_usd_per_million = 0\n"
+            "output_usd_per_million = 0\n"
+        ),
+        encoding="utf-8",
+    )
+    prepare_doctor(monkeypatch)
+    requested_packages: list[str] = []
+
+    def version(package: str) -> str:
+        requested_packages.append(package)
+        return {"claude-agent-sdk": "0.2.128", "openai-codex": "0.144.4"}[package]
+
+    monkeypatch.setattr("scriptorium.service.metadata.version", version)
+
+    with ScriptoriumService(repo) as service:
+        result = service.doctor(profile="quick")
+
+    assert result["ok"] is True
+    assert requested_packages == ["claude-agent-sdk", "openai-codex"]
 
 
 def test_doctor_requires_gemini_api_key_for_antigravity(

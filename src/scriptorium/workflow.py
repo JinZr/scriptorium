@@ -37,7 +37,15 @@ from .domain import (
 from .errors import InfrastructureError, StateError
 from .manuscript import BuildResult, FrozenRevision, ManuscriptBundle, ManuscriptManager, SourceFile
 from .runtime import RUNTIME_SDK_VERSIONS, AgentRuntime, RuntimeUnavailable
-from .schemas import ExactEdit, ReviewOutput, RevisionOutput, VerificationOutput, output_schema, parse_output
+from .schemas import (
+    ExactEdit,
+    ReviewOutput,
+    RevisionOutput,
+    VerificationOutput,
+    VisualTranscriptionOutput,
+    output_schema,
+    parse_output,
+)
 from .storage import Database
 
 RuntimeFactory = Callable[[RouteConfig], AgentRuntime]
@@ -47,7 +55,7 @@ RuntimeFactory = Callable[[RouteConfig], AgentRuntime]
 class TaskOutcome:
     task: Task
     attempt: Attempt
-    output: ReviewOutput | RevisionOutput | VerificationOutput
+    output: ReviewOutput | VisualTranscriptionOutput | RevisionOutput | VerificationOutput
 
 
 class Armarius:
@@ -154,8 +162,10 @@ class Armarius:
             raise StateError(f"task {task_id} is already completed")
         if run.status == RunStatus.FAILED:
             target = {
+                "review_transcription": RunStatus.REVIEWING,
                 "review": RunStatus.REVIEWING,
                 "revision": RunStatus.REVISING,
+                "verification_transcription": RunStatus.VERIFYING,
                 "verification": RunStatus.VERIFYING,
             }.get(task.stage)
             if target is None:
@@ -163,14 +173,20 @@ class Armarius:
             run = self.database.update_run(run.id, target)
         if run.status == RunStatus.WAITING_BUDGET:
             target = {
+                "review_transcription": RunStatus.REVIEWING,
                 "review": RunStatus.REVIEWING,
                 "revision": RunStatus.REVISING,
+                "verification_transcription": RunStatus.VERIFYING,
                 "verification": RunStatus.VERIFYING,
             }.get(task.stage)
             if target is None:
                 raise StateError(f"unknown task stage: {task.stage}")
             run = self.database.update_run(run.id, target)
-        if task.stage == "review":
+        if task.stage == "review_transcription":
+            if run.status != RunStatus.REVIEWING:
+                raise StateError(f"review transcription cannot be retried while run is {run.status.value}")
+            await self._run_reviews(run, transcription_route_override=route_override)
+        elif task.stage == "review":
             if run.status != RunStatus.REVIEWING:
                 raise StateError(f"review tasks cannot be retried while run is {run.status.value}")
             await self._run_review_role(run, task.role, route_override)
@@ -179,6 +195,10 @@ class Armarius:
             if run.status != RunStatus.REVISING:
                 raise StateError(f"revision tasks cannot be retried while run is {run.status.value}")
             await self._run_revision(run, route_override=route_override)
+        elif task.stage == "verification_transcription":
+            if run.status != RunStatus.VERIFYING:
+                raise StateError(f"verification transcription cannot be retried while run is {run.status.value}")
+            await self._run_verification(run, transcription_route_override=route_override)
         elif task.stage == "verification":
             if run.status != RunStatus.VERIFYING:
                 raise StateError(f"verification tasks cannot be retried while run is {run.status.value}")
@@ -197,15 +217,17 @@ class Armarius:
             raise StateError("the run is waiting for budget but has no resumable task")
         stage = incomplete[-1].stage
         target = {
+            "review_transcription": RunStatus.REVIEWING,
             "review": RunStatus.REVIEWING,
             "revision": RunStatus.REVISING,
+            "verification_transcription": RunStatus.VERIFYING,
             "verification": RunStatus.VERIFYING,
         }.get(stage)
         if target is None:
             raise StateError(f"unknown task stage: {stage}")
         self.database.update_run(run.id, target)
         current = self.database.get_run(run.id)
-        if stage == "review":
+        if stage in {"review_transcription", "review"}:
             await self._run_reviews(current)
         elif stage == "revision":
             await self._run_revision(current)
@@ -273,13 +295,37 @@ class Armarius:
         self.database.update_run(run.id, RunStatus.REVIEWING)
         await self._run_reviews(self.database.get_run(run.id))
 
-    async def _run_reviews(self, run: Run) -> None:
+    async def _run_reviews(
+        self,
+        run: Run,
+        transcription_route_override: str | None = None,
+    ) -> None:
+        bundle = self._bundle_for_run(run)
+        transcription = None
+        visual_pages = self._visual_page_records(bundle) if self._has_visual_transcription_contract(run) else []
+        if visual_pages:
+            transcription = await self._run_visual_transcription(
+                run,
+                "review_transcription",
+                bundle,
+                visual_pages,
+                bundle_id="base",
+                route_override=transcription_route_override,
+            )
+            if transcription is None:
+                if self.database.get_run(run.id).status != RunStatus.WAITING_BUDGET:
+                    self.database.update_run(
+                        run.id,
+                        RunStatus.REVIEWING,
+                        "visual transcription failed or was interrupted",
+                    )
+                return
         roles = [AgentRole(role) for role in self._profile_roles(run)]
         semaphore = asyncio.Semaphore(self._max_concurrency(run))
 
         async def execute(role: AgentRole) -> TaskOutcome | None:
             async with semaphore:
-                return await self._run_review_role(run, role)
+                return await self._run_review_role(run, role, visual_transcription=transcription)
 
         await asyncio.gather(*(execute(role) for role in roles))
         await self._advance_review_if_complete(run)
@@ -289,8 +335,28 @@ class Armarius:
         run: Run,
         role: AgentRole,
         route_override: str | None = None,
+        visual_transcription: VisualTranscriptionOutput | None = None,
     ) -> TaskOutcome | None:
         bundle = self._bundle_for_run(run)
+        if visual_transcription is None and self._has_visual_transcription_contract(run):
+            visual_pages = self._visual_page_records(bundle)
+            if visual_pages:
+                _, _, input_digest = self._visual_transcription_input(
+                    run,
+                    "review_transcription",
+                    bundle,
+                    visual_pages,
+                    "base",
+                )
+                visual_transcription = self._completed_visual_transcription(
+                    run,
+                    "review_transcription",
+                    bundle,
+                    visual_pages,
+                    input_digest,
+                )
+                if visual_transcription is None:
+                    raise InfrastructureError("review task is missing its required visual transcription")
         route = self._route_for_run(run, role, route_override)
         prompt = self._review_prompt(run, role)
         outcome = await self._execute_task(
@@ -307,6 +373,7 @@ class Armarius:
                 bundle.pdf_pages,
                 self._run_dir(run.id) / "snapshot",
                 bundle.workspace / "manuscript.pdf",
+                visual_transcription,
             ),
         )
         if outcome is None:
@@ -541,6 +608,7 @@ class Armarius:
         self,
         run: Run,
         route_override: str | None = None,
+        transcription_route_override: str | None = None,
     ) -> None:
         if not self.database.list_findings(run.id, [FindingStatus.CONFIRMED]):
             self.database.update_run(run.id, RunStatus.COMPLETED)
@@ -570,6 +638,27 @@ class Armarius:
                 self.manuscript.scan_sources(patched, self._manuscript_config(run).main),
                 build.pdf_path,
             )
+        transcription = None
+        visual_pages = (
+            self._visual_page_records(verification_bundle) if self._has_visual_transcription_contract(run) else []
+        )
+        if visual_pages:
+            transcription = await self._run_visual_transcription(
+                run,
+                "verification_transcription",
+                verification_bundle,
+                visual_pages,
+                bundle_id=patch.id,
+                route_override=transcription_route_override,
+            )
+            if transcription is None:
+                if self.database.get_run(run.id).status != RunStatus.WAITING_BUDGET:
+                    self.database.update_run(
+                        run.id,
+                        RunStatus.VERIFYING,
+                        "visual transcription failed or was interrupted",
+                    )
+                return
         confirmed = self.database.list_findings(run.id, [FindingStatus.CONFIRMED])
         route = self._route_for_run(run, AgentRole.VERIFICATION, route_override)
         prompt = self._verification_prompt(run, patch, confirmed)
@@ -588,6 +677,7 @@ class Armarius:
                 verification_bundle.pdf_pages,
                 patched,
                 verification_bundle.workspace / "manuscript.pdf",
+                transcription,
             ),
         )
         if outcome is None:
@@ -609,6 +699,187 @@ class Armarius:
             self.database.update_run(run.id, RunStatus.READY_TO_APPLY)
         else:
             self.database.update_run(run.id, RunStatus.AWAITING_PATCH_APPROVAL)
+
+    async def _run_visual_transcription(
+        self,
+        run: Run,
+        stage: str,
+        bundle: ManuscriptBundle,
+        pages: list[dict[str, Any]],
+        *,
+        bundle_id: str,
+        route_override: str | None = None,
+    ) -> VisualTranscriptionOutput | None:
+        prompt, input_bundle, input_digest = self._visual_transcription_input(
+            run,
+            stage,
+            bundle,
+            pages,
+            bundle_id,
+        )
+        completed = self._completed_visual_transcription(
+            run,
+            stage,
+            bundle,
+            pages,
+            input_digest,
+        )
+        if completed is not None:
+            return completed
+        route = self._route_for_run(run, AgentRole.VISUAL_TRANSCRIPTION, route_override)
+        outcome = await self._execute_task(
+            run=run,
+            stage=stage,
+            role=AgentRole.VISUAL_TRANSCRIPTION,
+            route=route,
+            prompt=prompt,
+            schema_kind="visual_transcription",
+            base_bundle=input_bundle,
+            validator=lambda output: self._validate_visual_transcription(output, bundle, pages),
+        )
+        if outcome is None:
+            return None
+        output = outcome.output
+        assert isinstance(output, VisualTranscriptionOutput)
+        return output
+
+    def _completed_visual_transcription(
+        self,
+        run: Run,
+        stage: str,
+        bundle: ManuscriptBundle,
+        pages: list[dict[str, Any]],
+        input_digest: str,
+    ) -> VisualTranscriptionOutput | None:
+        expected_pdf_digest = self._bundle_manifest(bundle)["pdf_digest"]
+        for task in reversed(self.database.list_tasks(run.id)):
+            if (
+                task.stage != stage
+                or task.role != AgentRole.VISUAL_TRANSCRIPTION
+                or task.status != TaskStatus.COMPLETED
+                or task.input_digest != input_digest
+            ):
+                continue
+            attempt = next(
+                item
+                for item in reversed(self.database.list_attempts(task.id))
+                if item.status == AttemptStatus.COMPLETED
+            )
+            if attempt.output_artifact_digest is None:
+                raise InfrastructureError(f"completed attempt {attempt.id} has no output artifact")
+            output = parse_output(
+                "visual_transcription",
+                self.artifacts.get_bytes(attempt.output_artifact_digest).decode("utf-8"),
+            )
+            if not isinstance(output, VisualTranscriptionOutput) or output.pdf_digest != expected_pdf_digest:
+                continue
+            try:
+                self._validate_visual_transcription(output, bundle, pages)
+            except ValueError:
+                continue
+            return output
+        return None
+
+    @staticmethod
+    def _has_visual_transcription_contract(run: Run) -> bool:
+        markers = (
+            AgentRole.VISUAL_TRANSCRIPTION.value in run.frozen_config.get("role_routes", {}),
+            AgentRole.VISUAL_TRANSCRIPTION.value in run.frozen_config.get("prompts", {}),
+            "visual_transcription" in run.frozen_config.get("schemas", {}),
+        )
+        if any(markers) and not all(markers):
+            raise InfrastructureError("the frozen visual transcription contract is incomplete")
+        return all(markers)
+
+    @staticmethod
+    def _bundle_manifest(bundle: ManuscriptBundle) -> dict[str, Any]:
+        return json.loads((bundle.workspace / "manifest.json").read_text(encoding="utf-8"))
+
+    def _visual_page_records(self, bundle: ManuscriptBundle) -> list[dict[str, Any]]:
+        manifest = self._bundle_manifest(bundle)
+        with fitz.open(bundle.workspace / "manuscript.pdf") as document:
+            page_numbers = [index + 1 for index, page in enumerate(document) if page.get_image_info()]
+        return [
+            {
+                "page": page_number,
+                "path": manifest["pages"][page_number - 1]["path"],
+                "page_digest": manifest["pages"][page_number - 1]["digest"],
+            }
+            for page_number in page_numbers
+        ]
+
+    def _visual_transcription_prompt(
+        self,
+        run: Run,
+        request: dict[str, Any],
+    ) -> str:
+        role_prompt = run.frozen_config["prompts"][AgentRole.VISUAL_TRANSCRIPTION.value]["content"]
+        return (
+            f"{role_prompt}\n\n"
+            f"Requested pages:\n{json.dumps(request, indent=2, ensure_ascii=False)}\n\n"
+            "Read only the listed page images at their workspace paths. Return pdf_digest exactly as "
+            "provided and one entry per requested page with its exact page and page_digest. The text "
+            "field must contain only verbatim visible raster text and may be empty when none is visible. "
+            "Return only the VisualTranscriptionOutput JSON object with no prose before or after it."
+        )
+
+    def _visual_transcription_input(
+        self,
+        run: Run,
+        stage: str,
+        bundle: ManuscriptBundle,
+        pages: list[dict[str, Any]],
+        bundle_id: str,
+    ) -> tuple[str, ManuscriptBundle, str]:
+        bundle_digest = self._directory_digest(bundle.workspace)
+        request = {
+            "stage": stage,
+            "bundle_id": bundle_id,
+            "bundle_digest": bundle_digest,
+            "pdf_digest": self._bundle_manifest(bundle)["pdf_digest"],
+            "pages": pages,
+        }
+        input_identity = digest_json({"bundle_id": bundle_id, "bundle_digest": bundle_digest})
+        workspace = self._run_dir(run.id) / "visual-inputs" / stage / input_identity
+        if workspace.exists():
+            shutil.rmtree(workspace)
+        for page in pages:
+            source = bundle.workspace / page["path"]
+            target = workspace / page["path"]
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source, target)
+        self._write_json(workspace / "manifest.json", request)
+        prompt = self._visual_transcription_prompt(run, request)
+        input_bundle = ManuscriptBundle(workspace, (), len(pages))
+        schema = dict(run.frozen_config["schemas"]["visual_transcription"]["content"])
+        input_digest = digest_json(
+            {
+                "prompt_digest": ArtifactStore.digest_bytes(prompt.encode("utf-8")),
+                "schema_digest": ArtifactStore.digest_bytes(canonical_json(schema).encode("utf-8")),
+                "bundle_digest": self._directory_digest(workspace),
+            }
+        )
+        return prompt, input_bundle, input_digest
+
+    def _validate_visual_transcription(
+        self,
+        output: VisualTranscriptionOutput,
+        bundle: ManuscriptBundle,
+        pages: list[dict[str, Any]],
+    ) -> None:
+        manifest = self._bundle_manifest(bundle)
+        if output.pdf_digest != manifest["pdf_digest"]:
+            raise ValueError("visual transcription PDF digest does not match the current bundle")
+        page_numbers = [item.page for item in output.pages]
+        if len(page_numbers) != len(set(page_numbers)):
+            raise ValueError("visual transcription contains duplicate pages")
+        expected = {item["page"]: item["page_digest"] for item in pages}
+        actual = {item.page: item.page_digest for item in output.pages}
+        if set(actual) != set(expected):
+            raise ValueError("visual transcription pages do not match the raster pages in the current bundle")
+        for page, digest in expected.items():
+            if actual[page] != digest:
+                raise ValueError(f"visual transcription page digest does not match page {page}")
 
     async def _execute_task(
         self,
@@ -733,7 +1004,7 @@ class Armarius:
                 "application/x-ndjson; charset=utf-8",
             )
             error = result.error
-            parsed: ReviewOutput | RevisionOutput | VerificationOutput | None = None
+            parsed: ReviewOutput | VisualTranscriptionOutput | RevisionOutput | VerificationOutput | None = None
             provenance_error = self._result_provenance_error(result, route)
             if provenance_error is not None:
                 error = provenance_error
@@ -811,11 +1082,19 @@ class Armarius:
         pdf_pages: int,
         source_root: Path,
         pdf_path: Path,
+        visual_transcription: VisualTranscriptionOutput | None = None,
     ) -> None:
         source_index = {source.path: source for source in sources}
         for finding in output.findings:
             for evidence in finding.evidence:
-                self._validate_evidence(evidence, source_index, pdf_pages, source_root, pdf_path)
+                self._validate_evidence(
+                    evidence,
+                    source_index,
+                    pdf_pages,
+                    source_root,
+                    pdf_path,
+                    visual_transcription,
+                )
 
     def _validate_revision_output(
         self,
@@ -864,6 +1143,7 @@ class Armarius:
         pdf_pages: int,
         source_root: Path,
         pdf_path: Path,
+        visual_transcription: VisualTranscriptionOutput | None = None,
     ) -> None:
         expected_ids = {finding.id for finding in findings}
         unknown = set(output.resolved_finding_ids) - expected_ids
@@ -874,7 +1154,14 @@ class Armarius:
         source_index = {source.path: source for source in sources}
         for issue in output.issues:
             for evidence in issue.evidence:
-                self._validate_evidence(evidence, source_index, pdf_pages, source_root, pdf_path)
+                self._validate_evidence(
+                    evidence,
+                    source_index,
+                    pdf_pages,
+                    source_root,
+                    pdf_path,
+                    visual_transcription,
+                )
 
     def _validate_evidence(
         self,
@@ -883,6 +1170,7 @@ class Armarius:
         pdf_pages: int,
         source_root: Path,
         pdf_path: Path,
+        visual_transcription: VisualTranscriptionOutput | None = None,
     ) -> None:
         if evidence.page is not None and evidence.page > pdf_pages:
             raise ValueError(f"PDF page {evidence.page} is outside the manuscript")
@@ -892,9 +1180,18 @@ class Armarius:
             quoted_text = " ".join(evidence.quoted_text.split())
             with fitz.open(pdf_path) as document:
                 page_text = " ".join(document[evidence.page - 1].get_text(sort=True).split())
-            if not quoted_text or quoted_text not in page_text:
-                raise ValueError(f"quoted PDF evidence does not match manuscript.pdf page {evidence.page}")
-            return
+            if quoted_text and quoted_text in page_text:
+                return
+            if visual_transcription is not None:
+                visual_page = next(
+                    (item for item in visual_transcription.pages if item.page == evidence.page),
+                    None,
+                )
+                if visual_page is not None:
+                    visual_text = " ".join(visual_page.text.split())
+                    if quoted_text and quoted_text in visual_text:
+                        return
+            raise ValueError(f"quoted PDF evidence does not match manuscript.pdf page {evidence.page}")
         try:
             source = source_index[evidence.source_path]
         except KeyError as exc:
@@ -918,11 +1215,16 @@ class Armarius:
         sources: tuple[SourceFile, ...],
         project_config_text: str,
     ) -> dict[str, Any]:
-        roles = (*project.profiles[profile], AgentRole.REVISION.value, AgentRole.VERIFICATION.value)
+        roles = (
+            *project.profiles[profile],
+            AgentRole.VISUAL_TRANSCRIPTION.value,
+            AgentRole.REVISION.value,
+            AgentRole.VERIFICATION.value,
+        )
         prompts = {role: self._prompt_record(AgentRole(role)) for role in roles}
         schemas = {
             kind: {"digest": digest_json(output_schema(kind)), "content": output_schema(kind)}
-            for kind in ("review", "revision", "verification")
+            for kind in ("review", "visual_transcription", "revision", "verification")
         }
         frozen_local = self.local_config.frozen_dict()
         for route in frozen_local["routes"].values():

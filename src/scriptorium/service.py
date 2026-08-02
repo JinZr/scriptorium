@@ -107,7 +107,12 @@ class ScriptoriumService:
             engine or f"{self.project_config.manuscript.engine} was not found",
         )
         try:
-            role_keys = (*self.project_config.profiles[selected_profile], "revision", "verification")
+            role_keys = (
+                *self.project_config.profiles[selected_profile],
+                "visual_transcription",
+                "revision",
+                "verification",
+            )
         except KeyError:
             role_keys = ()
         selected_runtimes: set[str] = set()

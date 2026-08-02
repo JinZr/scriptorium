@@ -99,6 +99,8 @@ task.md
 
 The bundle becomes the selected runtime's workspace. Repository-level `.codex/`, `AGENTS.md`, source code, scripts, unrelated files, and uncommitted changes are excluded.
 
+If the PDF contains raster images, Armarius identifies those pages and runs one separately routed `visual_transcription` task before starting reviewers. That task's workspace contains only the target page PNGs and a digest request manifest, not manuscript sources, the PDF, or unrelated pages. Its output is an immutable, digest-bound transcription artifact used only for evidence validation; it is not copied into reviewer workspaces. PDF quotations are matched first against the page's native text and then against the frozen transcription, with whitespace normalization only. Patched PDFs receive an independent transcription before verification. Scriptorium does not perform local OCR or depend on Tesseract.
+
 ## Durable workflow
 
 ```text
@@ -114,7 +116,7 @@ preparing
 
 `waiting_budget`, `failed`, and `cancelled` are pause or terminal states. A task is the stable logical unit keyed by run, stage, role, route, and input digest. Every new or resumed model turn creates an immutable attempt. Completed tasks with the same input digest are reused; failed or interrupted work appends a new attempt.
 
-Review aggregation performs schema and anchor validation, exact-fingerprint deduplication, provenance preservation, and severity ordering only. It does not ask a consensus model or perform semantic clustering. Confirmed findings are passed to the read-only Scribe, whose exact, non-overlapping edits are applied to a separate snapshot and compiled. An independent Verifier checks resolution and regression. A failed verification returns to patch approval and never starts an automatic infinite loop.
+Review aggregation performs schema and anchor validation, exact-fingerprint deduplication, provenance preservation, and severity ordering only. It does not ask a consensus model or perform semantic clustering. The visual transcriber supplies page text but cannot submit findings or validate its own output. Confirmed findings are passed to the read-only Scribe, whose exact, non-overlapping edits are applied to a separate snapshot and compiled. An independent Verifier checks resolution and regression. A failed verification returns to patch approval and never starts an automatic infinite loop.
 
 The release gate requires successful required reviews, no unresolved blocker or major finding, verified coverage of confirmed findings or a later waiver, a successful patched build, a passing Verifier, and successful patch application when changes are required.
 

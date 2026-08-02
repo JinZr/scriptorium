@@ -25,6 +25,8 @@ def test_initialize_and_load_project(tmp_path: Path) -> None:
     assert local.routes["primary"].model == MODEL_PLACEHOLDER
     assert local.routes["primary"].runtime == "codex"
     assert local.routes["primary"].runtime_version is None
+    assert local.roles["visual_transcription"] == "visual"
+    assert local.routes["visual"].model == MODEL_PLACEHOLDER
     assert ".scriptorium/" in (tmp_path / ".gitignore").read_text(encoding="utf-8")
 
 

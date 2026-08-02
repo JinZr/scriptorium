@@ -32,8 +32,35 @@ class FullProfileRuntime:
 
     async def run_agent(self, task, role, workspace, schema, session_dir):
         del task, schema, session_dir
-        assert role in ROLES
         self.calls.append(role)
+        if role == AgentRole.VISUAL_TRANSCRIPTION:
+            manifest = json.loads((workspace / "manifest.json").read_text(encoding="utf-8"))
+            output = {
+                "pdf_digest": manifest["pdf_digest"],
+                "pages": [
+                    {
+                        "page": page["page"],
+                        "page_digest": page["page_digest"],
+                        "text": "result",
+                    }
+                    for page in manifest["pages"]
+                ],
+            }
+            return AgentResult(
+                thread_id="thread-visual-transcription",
+                status="completed",
+                final_response=json.dumps(output),
+                usage=AgentUsage(input_tokens=10, cached_input_tokens=2, output_tokens=4, reasoning_tokens=1),
+                trace_jsonl=json.dumps({"role": role.value, "status": "completed"}) + "\n",
+                runtime_name="codex",
+                runtime_version="0.144.4",
+                model="fake-model",
+                model_provider="test",
+                duration_ms=5,
+                error=None,
+            )
+
+        assert role in ROLES
         source = workspace / "sources" / "preprint" / "preprint.md"
         output = {
             "summary": f"One {role.value} finding.",
@@ -170,6 +197,7 @@ def _routes(path: Path) -> Path:
             'copyedit = "primary"\n'
             'consistency = "primary"\n'
             'figure_review = "primary"\n'
+            'visual_transcription = "primary"\n'
             'revision = "primary"\n'
             'verification = "primary"\n\n'
             "[routes.primary]\n"
@@ -202,6 +230,17 @@ def test_route_config_summary_uses_normalized_route_values(tmp_path: Path) -> No
     assert summary["routes"]["primary"]["runtime"] == "codex"
     assert summary["routes"]["primary"]["model_provider"] == "test"
     assert summary["routes"]["primary"]["model"] == "fake-model"
+    assert summary["roles"]["visual_transcription"] == "primary"
+
+
+def test_example_routes_use_a_dedicated_visual_transcription_route(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    create_paper_project(project, benchmark_run.HERE / "routes.example.toml")
+
+    config = load_local_config(project)
+
+    assert config.roles["visual_transcription"] == "visual"
+    assert config.routes["visual"].model == MODEL_PLACEHOLDER
 
 
 def _project(tmp_path: Path, prepared: Path) -> tuple[Path, PeerReviewBenchManuscriptManager]:
@@ -378,9 +417,21 @@ def test_full_profile_service_persists_findings_artifacts_and_cost(tmp_path: Pat
         run = view["run"]
 
         assert run.status == RunStatus.AWAITING_DECISION
-        assert run.estimated_cost_usd == pytest.approx(0.000128)
-        assert set(runtime.calls) == ROLES
-        assert len(runtime.calls) == 4
+        assert run.estimated_cost_usd == pytest.approx(0.000160)
+        assert runtime.calls[0] == AgentRole.VISUAL_TRANSCRIPTION
+        assert set(runtime.calls[1:]) == ROLES
+        assert len(runtime.calls) == 5
+
+        transcription_tasks = [item for item in view["tasks"] if item["task"].stage == "review_transcription"]
+        assert len(transcription_tasks) == 1
+        assert transcription_tasks[0]["task"].role == AgentRole.VISUAL_TRANSCRIPTION
+        assert transcription_tasks[0]["task"].status == TaskStatus.COMPLETED
+        transcription_attempts = transcription_tasks[0]["attempts"]
+        assert len(transcription_attempts) == 1
+        assert transcription_attempts[0].estimated_cost_usd == pytest.approx(0.000032)
+        assert service.database.get_artifact(transcription_attempts[0].output_artifact_digest).media_type == (
+            "application/json"
+        )
 
         review_tasks = [item for item in view["tasks"] if item["task"].stage == "review"]
         assert {item["task"].role for item in review_tasks} == ROLES
@@ -477,13 +528,16 @@ def test_completed_benchmark_paper_is_not_repeated_on_resume(
     assert "src/scriptorium/service.py" in source_paths
     paper_summary = initial["papers"]["9"]["scriptorium"]
     assert paper_summary["status"] == RunStatus.AWAITING_DECISION.value
-    assert paper_summary["estimated_cost_usd"] == pytest.approx(0.000128)
-    assert len(paper_summary["tasks"]) == 4
+    assert paper_summary["estimated_cost_usd"] == pytest.approx(0.000160)
+    assert len(paper_summary["tasks"]) == 5
+    assert [(task["stage"], task["role"]) for task in paper_summary["tasks"]].count(
+        ("review_transcription", AgentRole.VISUAL_TRANSCRIPTION.value)
+    ) == 1
     assert len(paper_summary["finding_payload_digest"]) == 64
     assert {
         (attempt["model"], attempt["model_provider"]) for task in paper_summary["tasks"] for attempt in task["attempts"]
     } == {("fake-model", "test")}
-    assert len(runtime.calls) == 4
+    assert len(runtime.calls) == 5
     manifest_bytes = (run_dir / "run_manifest.json").read_bytes()
 
     resumed_dir, resumed = asyncio.run(
@@ -499,7 +553,7 @@ def test_completed_benchmark_paper_is_not_repeated_on_resume(
     assert resumed_dir == run_dir
     assert resumed["status"] == "complete"
     assert resumed["papers"]["9"]["scriptorium_run_id"] == initial["papers"]["9"]["scriptorium_run_id"]
-    assert len(runtime.calls) == 4
+    assert len(runtime.calls) == 5
     assert (run_dir / "run_manifest.json").read_bytes() == manifest_bytes
 
     monkeypatch.setattr(benchmark_run, "source_manifest", lambda: [{"path": "changed"}])
@@ -551,7 +605,7 @@ def test_corrupt_completed_artifact_stays_incomplete_across_resumes(tmp_path: Pa
         )
         assert resumed["status"] == "incomplete"
         assert resumed["papers"]["13"]["status"] == "incomplete"
-    assert len(runtime.calls) == 4
+    assert len(runtime.calls) == 5
 
 
 def test_benchmark_manifest_rejects_project_path_escape() -> None:
@@ -643,8 +697,9 @@ def test_incomplete_benchmark_resumes_only_interrupted_review_lane(tmp_path: Pat
 
     assert initial["status"] == "incomplete"
     assert initial["papers"]["10"]["status"] == "incomplete"
-    assert set(runtime.calls) == ROLES
-    assert len(runtime.calls) == 4
+    assert runtime.calls[0] == AgentRole.VISUAL_TRANSCRIPTION
+    assert set(runtime.calls[1:]) == ROLES
+    assert len(runtime.calls) == 5
 
     project = run_dir / "papers" / "paper10"
     run_id = initial["papers"]["10"]["scriptorium_run_id"]
@@ -683,6 +738,7 @@ def test_incomplete_benchmark_resumes_only_interrupted_review_lane(tmp_path: Pat
     assert resumed["papers"]["10"]["status"] == "complete"
     assert resumed["papers"]["10"]["scriptorium"]["status"] == RunStatus.AWAITING_DECISION.value
     assert runtime.resume_calls == [AgentRole.COPYEDIT]
+    assert runtime.calls.count(AgentRole.VISUAL_TRANSCRIPTION) == 1
     assert runtime.calls.count(AgentRole.COPYEDIT) == 2
     assert all(runtime.calls.count(role) == 1 for role in ROLES - {AgentRole.COPYEDIT})
 
@@ -785,6 +841,7 @@ def test_route_configuration_change_stops_before_next_paper(
         ('model = "fake-model"', f'model = "{MODEL_PLACEHOLDER}"', None, MODEL_PLACEHOLDER),
         ("output_usd_per_million = 3\n", "", 1.0, "needs input_usd_per_million"),
         ('figure_review = "primary"\n', "", None, "No model route configured"),
+        ('visual_transcription = "primary"\n', "", None, "No model route configured"),
     ],
 )
 def test_unready_route_configuration_is_rejected_before_run_creation(
