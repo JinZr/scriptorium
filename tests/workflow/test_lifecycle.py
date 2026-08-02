@@ -185,7 +185,7 @@ def test_full_workflow_preserves_worktree_until_approved_patch_is_applied(tmp_pa
         assert "source_path must be the bare relative path from source-map.json" in review_prompt
         assert "start_line, end_line, source_digest, and quoted_text must be supplied" in review_prompt
         assert 'use source_path "manuscript.pdf", set page to a valid 1-based PDF page number' in review_prompt
-        assert "copy quoted_text verbatim from the cited page" in review_prompt
+        assert "copy quoted_text verbatim from that page's native text layer" in review_prompt
         assert "never line-anchor .pdf files or other graphics/binary assets" in review_prompt
         assert "ReviewOutput JSON object with no prose before or after it" in review_prompt
         frozen_route = started["run"].frozen_config["local"]["routes"]["primary"]
