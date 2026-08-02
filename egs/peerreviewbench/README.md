@@ -130,8 +130,9 @@ advance an `awaiting_decision` run into revision.
 
 ## 3. Export and evaluate
 
-The default finding policy retains at most five findings from each role, following Scriptorium's canonical severity
-and creation ordering:
+The default finding policy retains at most five findings from each role. When multiple roles produce the same exact
+finding, evaluation assigns it to the first contributor in the fixed `substantive_review`, `copyedit`, `consistency`,
+`figure_review` order, then applies the cap using that role's severity and occurrence ordering:
 
 ```bash
 python egs/peerreviewbench/evaluate.py \

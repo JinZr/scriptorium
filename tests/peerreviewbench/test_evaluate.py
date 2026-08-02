@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from hashlib import sha256
 import importlib.util
 import io
@@ -12,7 +13,7 @@ from types import ModuleType
 
 import pytest
 
-from scriptorium.domain import AgentRole, Finding, FindingSeverity
+from scriptorium.domain import AgentRole, Event, Finding, FindingSeverity
 
 EGS_ROOT = Path(__file__).resolve().parents[2] / "egs" / "peerreviewbench"
 
@@ -63,6 +64,33 @@ def _finding(
         suggested_action=f"private suggested action {ordinal}",
         confidence=0.8,
         id=f"finding_{role.value}_{ordinal}",
+    )
+
+
+def _attributions(
+    findings: list[Finding],
+    duplicate_events: tuple[Event, ...] = (),
+) -> dict[str, tuple[str, str]]:
+    return benchmark_evaluate._finding_attributions(findings, duplicate_events)
+
+
+def _export_findings(findings: list[Finding]) -> list[dict[str, object]]:
+    return benchmark_evaluate.export_findings(findings, _attributions(findings))
+
+
+def _duplicate_event(finding: Finding, role: AgentRole, created_at: str) -> Event:
+    return Event(
+        run_id=finding.run_id,
+        event_type="finding.duplicate",
+        entity_type="finding",
+        entity_id=finding.id,
+        payload={
+            "task_id": f"task_{role.value}",
+            "attempt_id": f"attempt_{role.value}",
+            "role": role.value,
+        },
+        id=f"event_{finding.id}_{role.value}",
+        created_at=created_at,
     )
 
 
@@ -146,8 +174,9 @@ def test_select_findings_supports_all_and_deterministic_per_role_limit() -> None
     }
     findings = [role_members[role][ordinal] for ordinal in range(6) for role in reversed(benchmark_evaluate.ROLE_ORDER)]
 
-    selected_all, all_stats = benchmark_evaluate.select_findings(findings, "all")
-    selected_limited, limited_stats = benchmark_evaluate.select_findings(findings, "per-role-5")
+    attributions = _attributions(findings)
+    selected_all, all_stats = benchmark_evaluate.select_findings(findings, attributions, "all")
+    selected_limited, limited_stats = benchmark_evaluate.select_findings(findings, attributions, "per-role-5")
 
     assert selected_all == findings
     assert all_stats["raw"] == all_stats["selected"] == 24
@@ -157,6 +186,197 @@ def test_select_findings_supports_all_and_deterministic_per_role_limit() -> None
     assert limited_stats["selected"] == 20
     assert limited_stats["dropped"] == 4
     assert all(values == {"raw": 6, "selected": 5, "dropped": 1} for values in limited_stats["by_role"].values())
+
+
+def test_per_role_limit_is_independent_of_cross_role_duplicate_winner() -> None:
+    substantive = [
+        replace(
+            _finding(AgentRole.SUBSTANTIVE_REVIEW, ordinal),
+            created_at=f"2026-08-03T00:00:0{ordinal}+00:00",
+        )
+        for ordinal in range(1, 6)
+    ]
+    copyedit = [
+        replace(
+            _finding(AgentRole.COPYEDIT, ordinal),
+            created_at=f"2026-08-03T00:00:1{ordinal}+00:00",
+        )
+        for ordinal in range(1, 6)
+    ]
+    duplicate_base = replace(
+        _finding(AgentRole.SUBSTANTIVE_REVIEW, 0),
+        id="finding_duplicate",
+        fingerprint="shared-fingerprint",
+    )
+
+    def evaluate_winner(winner: AgentRole):
+        loser = AgentRole.COPYEDIT if winner == AgentRole.SUBSTANTIVE_REVIEW else AgentRole.SUBSTANTIVE_REVIEW
+        owner_time = "2026-08-03T00:00:00+00:00"
+        copyedit_time = "2026-08-03T00:00:10+00:00"
+        duplicate = replace(
+            duplicate_base,
+            role=winner,
+            task_id=f"task_{winner.value}",
+            attempt_id=f"attempt_{winner.value}",
+            created_at=owner_time if winner == AgentRole.SUBSTANTIVE_REVIEW else copyedit_time,
+        )
+        event = _duplicate_event(
+            duplicate,
+            loser,
+            owner_time if loser == AgentRole.SUBSTANTIVE_REVIEW else copyedit_time,
+        )
+        findings = [duplicate, *substantive, *copyedit]
+        attributions = _attributions(findings, (event,))
+        selected, stats = benchmark_evaluate.select_findings(findings, attributions, "per-role-5")
+        return selected, stats, benchmark_evaluate.export_findings(selected, attributions), attributions
+
+    substantive_winner = evaluate_winner(AgentRole.SUBSTANTIVE_REVIEW)
+    copyedit_winner = evaluate_winner(AgentRole.COPYEDIT)
+
+    assert [finding.fingerprint for finding in substantive_winner[0]] == [
+        finding.fingerprint for finding in copyedit_winner[0]
+    ]
+    assert substantive_winner[1] == copyedit_winner[1]
+    assert substantive_winner[2] == copyedit_winner[2]
+    assert substantive_winner[3]["finding_duplicate"] == (
+        AgentRole.SUBSTANTIVE_REVIEW.value,
+        "2026-08-03T00:00:00+00:00",
+    )
+    assert copyedit_winner[3]["finding_duplicate"] == substantive_winner[3]["finding_duplicate"]
+    assert "substantive_review-5" not in {finding.fingerprint for finding in substantive_winner[0]}
+    assert "copyedit-5" in {finding.fingerprint for finding in substantive_winner[0]}
+
+
+def test_per_role_limit_uses_severity_owner_occurrence_and_fingerprint_order() -> None:
+    major = replace(
+        _finding(AgentRole.SUBSTANTIVE_REVIEW, 1, severity=FindingSeverity.MAJOR),
+        id="finding_major",
+        fingerprint="z-major",
+        created_at="2026-08-03T00:00:09+00:00",
+    )
+    early = replace(
+        _finding(AgentRole.SUBSTANTIVE_REVIEW, 2),
+        id="finding_early",
+        fingerprint="z-early",
+        created_at="2026-08-03T00:00:01+00:00",
+    )
+    duplicate = replace(
+        _finding(AgentRole.SUBSTANTIVE_REVIEW, 3),
+        id="finding_duplicate_order",
+        fingerprint="z-duplicate",
+        role=AgentRole.COPYEDIT,
+        task_id="task_copyedit",
+        attempt_id="attempt_copyedit",
+        created_at="2026-08-03T00:00:10+00:00",
+    )
+    tied_late_fingerprint = replace(
+        _finding(AgentRole.SUBSTANTIVE_REVIEW, 4),
+        id="finding_tie_z",
+        fingerprint="z-tie",
+        created_at="2026-08-03T00:00:03+00:00",
+    )
+    tied_early_fingerprint = replace(
+        _finding(AgentRole.SUBSTANTIVE_REVIEW, 5),
+        id="finding_tie_a",
+        fingerprint="a-tie",
+        created_at="2026-08-03T00:00:03+00:00",
+    )
+    dropped = replace(
+        _finding(AgentRole.SUBSTANTIVE_REVIEW, 6),
+        id="finding_dropped",
+        fingerprint="dropped",
+        created_at="2026-08-03T00:00:04+00:00",
+    )
+    findings = [dropped, tied_late_fingerprint, duplicate, major, tied_early_fingerprint, early]
+    events = (
+        _duplicate_event(
+            duplicate,
+            AgentRole.SUBSTANTIVE_REVIEW,
+            "2026-08-03T00:00:02+00:00",
+        ),
+    )
+    attributions = _attributions(findings, events)
+
+    selected, stats = benchmark_evaluate.select_findings(findings, attributions, "per-role-5")
+
+    assert [finding.id for finding in selected] == [
+        "finding_major",
+        "finding_early",
+        "finding_duplicate_order",
+        "finding_tie_a",
+        "finding_tie_z",
+    ]
+    assert attributions[duplicate.id] == (
+        AgentRole.SUBSTANTIVE_REVIEW.value,
+        "2026-08-03T00:00:02+00:00",
+    )
+    assert stats["by_role"][AgentRole.SUBSTANTIVE_REVIEW.value] == {
+        "raw": 6,
+        "selected": 5,
+        "dropped": 1,
+    }
+
+
+def test_finding_attributions_without_duplicates_preserve_owner_and_time() -> None:
+    findings = [
+        replace(
+            _finding(AgentRole.SUBSTANTIVE_REVIEW, 1),
+            created_at="2026-08-03T00:00:01+00:00",
+        ),
+        replace(
+            _finding(AgentRole.COPYEDIT, 2),
+            created_at="2026-08-03T00:00:02+00:00",
+        ),
+    ]
+
+    assert _attributions(findings) == {
+        findings[0].id: (AgentRole.SUBSTANTIVE_REVIEW.value, findings[0].created_at),
+        findings[1].id: (AgentRole.COPYEDIT.value, findings[1].created_at),
+    }
+
+
+def test_all_mode_preserves_input_order_and_exports_canonical_duplicate_role() -> None:
+    copyedit = replace(
+        _finding(AgentRole.COPYEDIT, 1),
+        created_at="2026-08-03T00:00:01+00:00",
+    )
+    duplicate = replace(
+        _finding(AgentRole.SUBSTANTIVE_REVIEW, 2),
+        id="finding_all_duplicate",
+        fingerprint="all-shared",
+        role=AgentRole.COPYEDIT,
+        task_id="task_copyedit",
+        attempt_id="attempt_copyedit",
+        created_at="2026-08-03T00:00:02+00:00",
+    )
+    substantive = replace(
+        _finding(AgentRole.SUBSTANTIVE_REVIEW, 3),
+        created_at="2026-08-03T00:00:03+00:00",
+    )
+    findings = [copyedit, duplicate, substantive]
+    attributions = _attributions(
+        findings,
+        (
+            _duplicate_event(
+                duplicate,
+                AgentRole.SUBSTANTIVE_REVIEW,
+                "2026-08-03T00:00:04+00:00",
+            ),
+        ),
+    )
+
+    selected, stats = benchmark_evaluate.select_findings(findings, attributions, "all")
+    exported = benchmark_evaluate.export_findings(selected, attributions)
+
+    assert selected == findings
+    assert [item["scriptorium"]["finding_id"] for item in exported] == [finding.id for finding in findings]
+    assert [item["scriptorium"]["role"] for item in exported] == [
+        AgentRole.COPYEDIT.value,
+        AgentRole.SUBSTANTIVE_REVIEW.value,
+        AgentRole.SUBSTANTIVE_REVIEW.value,
+    ]
+    assert stats["raw"] == stats["selected"] == 3
+    assert stats["dropped"] == 0
 
 
 def test_export_findings_maps_byoj_fields_without_suggested_action() -> None:
@@ -175,7 +395,7 @@ def test_export_findings_maps_byoj_fields_without_suggested_action() -> None:
         ),
     ]
 
-    items = benchmark_evaluate.export_findings(findings)
+    items = _export_findings(findings)
 
     assert [item["item_number"] for item in items] == [1, 2]
     assert items[0]["title"] == findings[0].title
@@ -187,6 +407,82 @@ def test_export_findings_maps_byoj_fields_without_suggested_action() -> None:
     assert items[1]["scriptorium"]["finding_id"] == findings[1].id
     assert items[1]["scriptorium"]["role"] == AgentRole.FIGURE_REVIEW.value
     assert "private suggested action" not in json.dumps(items)
+
+
+def test_collect_exports_reads_duplicate_events_for_canonical_attribution(tmp_path, monkeypatch) -> None:
+    prepared_manifest = {"paper_id": 7, "files": []}
+    duplicate = replace(
+        _finding(AgentRole.SUBSTANTIVE_REVIEW, 1),
+        id="finding_collected_duplicate",
+        fingerprint="collected-shared",
+        role=AgentRole.COPYEDIT,
+        task_id="task_copyedit",
+        attempt_id="attempt_copyedit",
+        created_at="2026-08-03T00:00:02+00:00",
+    )
+    duplicate_event = _duplicate_event(
+        duplicate,
+        AgentRole.SUBSTANTIVE_REVIEW,
+        "2026-08-03T00:00:03+00:00",
+    )
+    event_calls = []
+
+    class FakeDatabase:
+        def list_events(self, run_id):
+            event_calls.append(run_id)
+            return [duplicate_event]
+
+    class FakeService:
+        def __init__(self, project, manuscript_manager):
+            assert project == tmp_path / "project"
+            assert manuscript_manager == "manager"
+            self.database = FakeDatabase()
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, traceback):
+            return None
+
+        def list_findings(self, run_id):
+            assert run_id == "run_7"
+            return [duplicate]
+
+    monkeypatch.setattr(benchmark_evaluate, "paper_project_path", lambda run_dir, entry: tmp_path / "project")
+    monkeypatch.setattr(benchmark_evaluate, "validate_paper_project", lambda project, digest: None)
+    monkeypatch.setattr(benchmark_evaluate, "validate_prepared_paper", lambda prepared: prepared_manifest)
+    monkeypatch.setattr(
+        benchmark_evaluate,
+        "PeerReviewBenchManuscriptManager",
+        lambda project, prepared: "manager",
+    )
+    monkeypatch.setattr(benchmark_evaluate, "ScriptoriumService", FakeService)
+    monkeypatch.setattr(benchmark_evaluate, "validate_completed_scriptorium_state", lambda service, entry: None)
+    run_manifest = {
+        "frozen_inputs": {
+            "dataset": {"revision": "revision-1"},
+            "paper_ids": [7],
+            "route_config_digest": "route-digest",
+        },
+        "papers": {
+            "7": {
+                "scriptorium_run_id": "run_7",
+                "prepared_manifest_digest": benchmark_evaluate.json_digest(prepared_manifest),
+            }
+        },
+    }
+
+    exports, stats = benchmark_evaluate.collect_exports(
+        tmp_path / "run",
+        run_manifest,
+        "all",
+        tmp_path / "cache",
+    )
+
+    assert event_calls == ["run_7"]
+    assert exports[7][0]["scriptorium"]["role"] == AgentRole.SUBSTANTIVE_REVIEW.value
+    assert stats["per_paper"]["7"]["by_role"][AgentRole.SUBSTANTIVE_REVIEW.value]["raw"] == 1
+    assert stats["per_paper"]["7"]["by_role"][AgentRole.COPYEDIT.value]["raw"] == 0
 
 
 def test_evaluation_view_uses_plural_reviews_path_and_detects_changes(tmp_path) -> None:
@@ -214,7 +510,7 @@ def test_evaluation_view_uses_plural_reviews_path_and_detects_changes(tmp_path) 
         ),
         encoding="utf-8",
     )
-    exports = {7: benchmark_evaluate.export_findings([_finding(AgentRole.SUBSTANTIVE_REVIEW, 1)])}
+    exports = {7: _export_findings([_finding(AgentRole.SUBSTANTIVE_REVIEW, 1)])}
     frozen_inputs = {
         "dataset": {"revision": "revision-1"},
         "model_slug": "scriptorium_all",
@@ -598,7 +894,7 @@ def test_rubric_count_failure_precedes_evaluation_view_and_judges(tmp_path, monk
             "upstream": upstream,
         },
     }
-    exports = {1: benchmark_evaluate.export_findings([_finding(AgentRole.SUBSTANTIVE_REVIEW, 1)])}
+    exports = {1: _export_findings([_finding(AgentRole.SUBSTANTIVE_REVIEW, 1)])}
     calls = []
 
     def fake_runner(command, **kwargs):
@@ -785,8 +1081,8 @@ def test_missing_component_executable_returns_nonzero_and_writes_log(tmp_path) -
 
 def test_component_output_validation_reports_missing_and_errored_judgments() -> None:
     exports = {
-        1: benchmark_evaluate.export_findings([_finding(AgentRole.SUBSTANTIVE_REVIEW, 1)]),
-        2: benchmark_evaluate.export_findings([_finding(AgentRole.COPYEDIT, 2)]),
+        1: _export_findings([_finding(AgentRole.SUBSTANTIVE_REVIEW, 1)]),
+        2: _export_findings([_finding(AgentRole.COPYEDIT, 2)]),
     }
     recall = {
         "per_paper": [
@@ -824,7 +1120,7 @@ def test_component_output_validation_reports_missing_and_errored_judgments() -> 
 
 
 def test_component_output_validation_rejects_partial_pairs_and_invalid_labels() -> None:
-    exports = {1: benchmark_evaluate.export_findings([_finding(AgentRole.SUBSTANTIVE_REVIEW, 1)])}
+    exports = {1: _export_findings([_finding(AgentRole.SUBSTANTIVE_REVIEW, 1)])}
     recall, precision = _valid_component_outputs()
 
     assert benchmark_evaluate.validate_component_outputs(recall, precision, exports, {"1": 2}) == []
@@ -843,7 +1139,7 @@ def test_component_output_validation_rejects_invalid_timing(
     component: str,
     elapsed_seconds: object,
 ) -> None:
-    exports = {1: benchmark_evaluate.export_findings([_finding(AgentRole.SUBSTANTIVE_REVIEW, 1)])}
+    exports = {1: _export_findings([_finding(AgentRole.SUBSTANTIVE_REVIEW, 1)])}
     recall, precision = _valid_component_outputs()
     payload = recall if component == "recall" else precision
     payload["elapsed_seconds"] = elapsed_seconds
@@ -854,7 +1150,7 @@ def test_component_output_validation_rejects_invalid_timing(
 
 
 def test_component_output_validation_allows_missing_timing() -> None:
-    exports = {1: benchmark_evaluate.export_findings([_finding(AgentRole.SUBSTANTIVE_REVIEW, 1)])}
+    exports = {1: _export_findings([_finding(AgentRole.SUBSTANTIVE_REVIEW, 1)])}
     recall, precision = _valid_component_outputs()
     recall.pop("elapsed_seconds")
     precision.pop("elapsed_seconds")
@@ -863,7 +1159,7 @@ def test_component_output_validation_allows_missing_timing() -> None:
 
 
 def test_recall_validation_rejects_self_consistent_truncated_rubric() -> None:
-    exports = {1: benchmark_evaluate.export_findings([_finding(AgentRole.SUBSTANTIVE_REVIEW, 1)])}
+    exports = {1: _export_findings([_finding(AgentRole.SUBSTANTIVE_REVIEW, 1)])}
     recall, _ = _valid_component_outputs()
     row = recall["per_paper"][0]
     row["n_rubric"] = 1
@@ -887,7 +1183,7 @@ def test_recall_validation_rejects_self_consistent_truncated_rubric() -> None:
 @pytest.mark.parametrize("field", ["paper_id", "item_number"])
 @pytest.mark.parametrize("value", [True, 1.0, 1.9, "1"])
 def test_precision_validation_rejects_non_integer_identities(field: str, value: object) -> None:
-    exports = {1: benchmark_evaluate.export_findings([_finding(AgentRole.SUBSTANTIVE_REVIEW, 1)])}
+    exports = {1: _export_findings([_finding(AgentRole.SUBSTANTIVE_REVIEW, 1)])}
     _, precision = _valid_component_outputs()
     precision["per_item"][0][field] = value
 
@@ -899,7 +1195,7 @@ def test_precision_validation_rejects_non_integer_identities(field: str, value: 
 @pytest.mark.parametrize("field", ["paper_id", "rubric_idx", "ai_item_number"])
 @pytest.mark.parametrize("value", [True, 1.0, 1.9, "1"])
 def test_recall_validation_rejects_non_integer_identities(field: str, value: object) -> None:
-    exports = {1: benchmark_evaluate.export_findings([_finding(AgentRole.SUBSTANTIVE_REVIEW, 1)])}
+    exports = {1: _export_findings([_finding(AgentRole.SUBSTANTIVE_REVIEW, 1)])}
     recall, _ = _valid_component_outputs()
     if field == "paper_id":
         recall["per_paper"][0][field] = value
@@ -915,8 +1211,8 @@ def test_recall_validation_rejects_non_integer_identities(field: str, value: obj
 
 def test_precision_validation_identifies_only_the_bad_paper() -> None:
     exports = {
-        1: benchmark_evaluate.export_findings([_finding(AgentRole.SUBSTANTIVE_REVIEW, 1)]),
-        2: benchmark_evaluate.export_findings([_finding(AgentRole.COPYEDIT, 2)]),
+        1: _export_findings([_finding(AgentRole.SUBSTANTIVE_REVIEW, 1)]),
+        2: _export_findings([_finding(AgentRole.COPYEDIT, 2)]),
     }
     precision = {
         "n_papers": 2,
@@ -956,8 +1252,8 @@ def test_precision_validation_identifies_only_the_bad_paper() -> None:
 
 def test_recall_validation_identifies_only_the_bad_paper() -> None:
     exports = {
-        1: benchmark_evaluate.export_findings([_finding(AgentRole.SUBSTANTIVE_REVIEW, 1)]),
-        2: benchmark_evaluate.export_findings([_finding(AgentRole.COPYEDIT, 2)]),
+        1: _export_findings([_finding(AgentRole.SUBSTANTIVE_REVIEW, 1)]),
+        2: _export_findings([_finding(AgentRole.COPYEDIT, 2)]),
     }
     recall = {
         "n_papers": 2,
@@ -1016,7 +1312,7 @@ def test_recall_validation_identifies_only_the_bad_paper() -> None:
 
 @pytest.mark.parametrize("paper_recall", [float("nan"), float("inf"), float("-inf")])
 def test_recall_validation_rejects_non_finite_per_paper_score(paper_recall: float) -> None:
-    exports = {1: benchmark_evaluate.export_findings([_finding(AgentRole.SUBSTANTIVE_REVIEW, 1)])}
+    exports = {1: _export_findings([_finding(AgentRole.SUBSTANTIVE_REVIEW, 1)])}
     recall, _ = _valid_component_outputs()
     recall["per_paper"][0]["recall"] = paper_recall
     invalid_papers: set[int] = set()
@@ -1028,7 +1324,7 @@ def test_recall_validation_rejects_non_finite_per_paper_score(paper_recall: floa
 
 
 def test_complete_summary_reuse_requires_unchanged_component_outputs(tmp_path) -> None:
-    exports = {1: benchmark_evaluate.export_findings([_finding(AgentRole.SUBSTANTIVE_REVIEW, 1)])}
+    exports = {1: _export_findings([_finding(AgentRole.SUBSTANTIVE_REVIEW, 1)])}
     recall, precision = _valid_component_outputs()
     recall_path = tmp_path / "recall.json"
     precision_path = tmp_path / "precision.json"
@@ -1142,7 +1438,7 @@ def test_complete_evaluation_is_reused_without_reinvoking_judges(tmp_path, monke
     run_dir = tmp_path / "benchmark-run"
     run_dir.mkdir()
     evaluations_root = tmp_path / "evaluations"
-    exports = {1: benchmark_evaluate.export_findings([_finding(AgentRole.SUBSTANTIVE_REVIEW, 1)])}
+    exports = {1: _export_findings([_finding(AgentRole.SUBSTANTIVE_REVIEW, 1)])}
     selection = _selection_stats()
     lock = {
         "dataset": {"id": "owner/dataset", "revision": "revision-1", "rubric_items": 2},
@@ -1298,7 +1594,7 @@ def test_upstream_is_revalidated_between_judge_stages(
     run_dir = tmp_path / "benchmark-run"
     run_dir.mkdir()
     evaluations_root = tmp_path / "evaluations"
-    exports = {1: benchmark_evaluate.export_findings([_finding(AgentRole.SUBSTANTIVE_REVIEW, 1)])}
+    exports = {1: _export_findings([_finding(AgentRole.SUBSTANTIVE_REVIEW, 1)])}
     selection = _selection_stats()
     lock = {
         "dataset": {"id": "owner/dataset", "revision": "revision-1", "rubric_items": 2},
@@ -1463,13 +1759,13 @@ def test_judge_endpoint_identity_is_stable_and_secret_free(monkeypatch) -> None:
 
 def test_role_metrics_attribute_items_and_compute_f1() -> None:
     exports = {
-        1: benchmark_evaluate.export_findings(
+        1: _export_findings(
             [
                 _finding(AgentRole.SUBSTANTIVE_REVIEW, 1),
                 _finding(AgentRole.COPYEDIT, 2),
             ]
         ),
-        2: benchmark_evaluate.export_findings([_finding(AgentRole.SUBSTANTIVE_REVIEW, 3)]),
+        2: _export_findings([_finding(AgentRole.SUBSTANTIVE_REVIEW, 3)]),
     }
     recall = {
         "total_rubric_items": 4,
@@ -1520,7 +1816,7 @@ def test_evaluate_summary_marks_judge_errors_incomplete_and_keeps_f1(tmp_path, m
     run_dir = tmp_path / "run"
     run_dir.mkdir()
     evaluations_root = tmp_path / "evaluations"
-    export = benchmark_evaluate.export_findings([_finding(AgentRole.SUBSTANTIVE_REVIEW, 1)])
+    export = _export_findings([_finding(AgentRole.SUBSTANTIVE_REVIEW, 1)])
     exports = {1: export}
     selection = _selection_stats()
     run_manifest = {

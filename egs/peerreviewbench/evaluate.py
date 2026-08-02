@@ -17,7 +17,7 @@ from typing import Any, Callable, Iterable
 from urllib.parse import urlparse
 import uuid
 
-from scriptorium.domain import Finding
+from scriptorium.domain import Event, Finding
 from scriptorium.service import ScriptoriumService
 
 try:
@@ -72,6 +72,10 @@ except ImportError:  # Direct script execution.
 HERE = Path(__file__).resolve().parent
 DEFAULT_EVALUATIONS_ROOT = HERE / "evaluations"
 ROLE_ORDER = ("substantive_review", "copyedit", "consistency", "figure_review")
+ROLE_POSITION = {role: index for index, role in enumerate(ROLE_ORDER)}
+SEVERITY_POSITION = {
+    severity: index for index, severity in enumerate(("blocker", "major", "moderate", "minor", "suggestion"))
+}
 FINDING_MODES = ("all", "per-role-5")
 ComponentRunner = Callable[..., subprocess.CompletedProcess[str]]
 PINNED_DATASET_LAUNCHER = (
@@ -214,13 +218,49 @@ def load_run_manifest(run_dir: Path) -> dict[str, Any]:
     return manifest
 
 
-def select_findings(findings: list[Finding], mode: str) -> tuple[list[Finding], dict[str, Any]]:
+def _finding_attributions(
+    findings: list[Finding],
+    duplicate_events: Iterable[Event],
+) -> dict[str, tuple[str, str]]:
+    occurrences = {finding.id: {finding.role.value: finding.created_at} for finding in findings}
+    for event in duplicate_events:
+        if event.event_type != "finding.duplicate" or event.entity_type != "finding":
+            continue
+        roles = occurrences.get(event.entity_id)
+        role = event.payload.get("role")
+        if roles is None or role not in ROLE_POSITION:
+            continue
+        recorded = roles.get(role)
+        if recorded is None or event.created_at < recorded:
+            roles[role] = event.created_at
+
+    attributions = {}
+    for finding in findings:
+        roles = occurrences[finding.id]
+        canonical_role = min(roles, key=ROLE_POSITION.__getitem__)
+        attributions[finding.id] = (canonical_role, roles[canonical_role])
+    return attributions
+
+
+def select_findings(
+    findings: list[Finding],
+    attributions: dict[str, tuple[str, str]],
+    mode: str,
+) -> tuple[list[Finding], dict[str, Any]]:
     if mode not in FINDING_MODES:
         raise BenchmarkError(f"Unknown finding mode: {mode}")
     by_role = {role: [] for role in ROLE_ORDER}
     for finding in findings:
-        if finding.role.value in by_role:
-            by_role[finding.role.value].append(finding)
+        role, _ = attributions[finding.id]
+        by_role[role].append(finding)
+    for role_findings in by_role.values():
+        role_findings.sort(
+            key=lambda finding: (
+                SEVERITY_POSITION[finding.severity.value],
+                attributions[finding.id][1],
+                finding.fingerprint,
+            )
+        )
     if mode == "all":
         selected = list(findings)
     else:
@@ -262,7 +302,10 @@ def _evidence_text(finding: Finding) -> str:
     return "\n\n".join(blocks)
 
 
-def export_findings(findings: Iterable[Finding]) -> list[dict[str, Any]]:
+def export_findings(
+    findings: Iterable[Finding],
+    attributions: dict[str, tuple[str, str]],
+) -> list[dict[str, Any]]:
     items = []
     for item_number, finding in enumerate(findings, 1):
         evidence_full = _evidence_text(finding)
@@ -280,7 +323,7 @@ def export_findings(findings: Iterable[Finding]) -> list[dict[str, Any]]:
                 "text": text,
                 "scriptorium": {
                     "finding_id": finding.id,
-                    "role": finding.role.value,
+                    "role": attributions[finding.id][0],
                     "category": finding.category,
                     "severity": finding.severity.value,
                     "confidence": finding.confidence,
@@ -317,9 +360,14 @@ def collect_exports(
         manager = PeerReviewBenchManuscriptManager(project, prepared)
         with ScriptoriumService(project, manuscript_manager=manager) as service:
             validate_completed_scriptorium_state(service, entry)
-            findings = service.list_findings(entry["scriptorium_run_id"])
-        selected, stats = select_findings(findings, finding_mode)
-        exports[int(paper_id)] = export_findings(selected)
+            run_id = entry["scriptorium_run_id"]
+            findings = service.list_findings(run_id)
+            duplicate_events = [
+                event for event in service.database.list_events(run_id) if event.event_type == "finding.duplicate"
+            ]
+        attributions = _finding_attributions(findings, duplicate_events)
+        selected, stats = select_findings(findings, attributions, finding_mode)
+        exports[int(paper_id)] = export_findings(selected, attributions)
         per_paper_stats[str(paper_id)] = stats
         for key in ("raw", "selected", "dropped"):
             totals[key] += stats[key]
