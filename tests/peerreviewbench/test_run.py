@@ -398,6 +398,22 @@ def test_package_versions_include_pydantic() -> None:
     assert "pydantic" in benchmark_run.package_versions()
 
 
+def test_benchmark_rejects_scriptorium_imported_from_another_checkout(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    installed_package = tmp_path / "other-checkout" / "src" / "scriptorium" / "__init__.py"
+    installed_package.parent.mkdir(parents=True)
+    installed_package.write_text("", encoding="utf-8")
+    monkeypatch.setattr(benchmark_run.scriptorium, "__file__", str(installed_package))
+    runs_root = tmp_path / "runs"
+
+    with pytest.raises(BenchmarkError, match="Imported Scriptorium package does not match this repository"):
+        asyncio.run(run_benchmark(runs_root=runs_root))
+
+    assert not runs_root.exists()
+
+
 def test_full_profile_service_persists_findings_artifacts_and_cost(tmp_path: Path) -> None:
     prepared = _prepared_paper(
         tmp_path / "prepared",

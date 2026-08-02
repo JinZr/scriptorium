@@ -22,6 +22,7 @@ import uuid
 
 import fitz
 
+import scriptorium
 from scriptorium.config import LocalConfig, ManuscriptConfig, load_local_config, load_project_config, validate_ready
 from scriptorium.domain import RunStatus
 from scriptorium.errors import ConfigurationError, InfrastructureError, StateError
@@ -393,6 +394,14 @@ def repository_commit(repo: Path = REPOSITORY_ROOT) -> str:
     if result.returncode != 0:
         raise BenchmarkError(f"Cannot resolve Scriptorium commit: {result.stderr.strip()}")
     return result.stdout.strip()
+
+
+def validate_imported_scriptorium(repo: Path = REPOSITORY_ROOT) -> None:
+    expected = (repo / "src" / "scriptorium").resolve()
+    package_file = getattr(scriptorium, "__file__", None)
+    actual = Path(package_file).resolve().parent if package_file else None
+    if actual != expected:
+        raise BenchmarkError(f"Imported Scriptorium package does not match this repository: {actual} != {expected}")
 
 
 def source_manifest(repo: Path = REPOSITORY_ROOT) -> list[dict[str, Any]]:
@@ -842,6 +851,7 @@ async def run_benchmark(
 ) -> tuple[Path, dict[str, Any]]:
     if budget_usd is not None and (not math.isfinite(budget_usd) or budget_usd < 0):
         raise BenchmarkError("--budget-usd must be finite and non-negative")
+    validate_imported_scriptorium()
     lock = load_lock()
     dataset = lock["dataset"]
     if cache_root.is_symlink():
