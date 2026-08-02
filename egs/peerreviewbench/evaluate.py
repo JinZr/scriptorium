@@ -787,6 +787,21 @@ def validate_component_outputs(
     return _validate_recall_output(recall, exports, rubric_counts) + _validate_precision_output(precision, exports)
 
 
+def _component_elapsed_seconds(
+    payload: dict[str, Any],
+    component: str,
+    errors: list[str] | None = None,
+) -> int | float | None:
+    value = payload.get("elapsed_seconds")
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value < 0:
+        if errors is not None:
+            errors.append(f"{component} elapsed_seconds must be a finite non-negative number")
+        return None
+    return value
+
+
 def _validate_recall_output(
     recall: dict[str, Any],
     exports: dict[int, list[dict[str, Any]]],
@@ -794,6 +809,7 @@ def _validate_recall_output(
     invalid_papers: set[int] | None = None,
 ) -> list[str]:
     errors = []
+    _component_elapsed_seconds(recall, "recall", errors)
     expected_papers = set(exports)
     recall_rows = recall.get("per_paper")
     if not isinstance(recall_rows, list):
@@ -947,6 +963,7 @@ def _validate_precision_output(
     invalid_papers: set[int] | None = None,
 ) -> list[str]:
     errors = []
+    _component_elapsed_seconds(precision, "precision", errors)
     expected_papers = set(exports)
     precision_rows = precision.get("per_item")
     if not isinstance(precision_rows, list):
@@ -1140,6 +1157,8 @@ def complete_summary_is_reusable(
         precision_value = metric_value(precision, "precision", metric_errors)
         if output_errors or metric_errors:
             return False
+        recall_elapsed = _component_elapsed_seconds(recall, "recall")
+        precision_elapsed = _component_elapsed_seconds(precision, "precision")
         f1 = (
             2 * recall_value * precision_value / (recall_value + precision_value)
             if recall_value is not None and precision_value is not None and recall_value + precision_value
@@ -1184,8 +1203,8 @@ def complete_summary_is_reusable(
             },
             "timing": {
                 "wrapper_elapsed_seconds": wrapper_elapsed,
-                "recall_elapsed_seconds": recall.get("elapsed_seconds"),
-                "precision_elapsed_seconds": precision.get("elapsed_seconds"),
+                "recall_elapsed_seconds": recall_elapsed,
+                "precision_elapsed_seconds": precision_elapsed,
             },
             "component_exit_codes": {"recall": 0, "precision": 0},
             "invalidated_component_caches": {},
@@ -1426,6 +1445,8 @@ def evaluate_benchmark(
         if recall_value is not None and precision_value is not None and recall_value + precision_value
         else 0.0 if recall_value is not None and precision_value is not None else None
     )
+    recall_elapsed = _component_elapsed_seconds(recall, "recall") if recall_loaded else None
+    precision_elapsed = _component_elapsed_seconds(precision, "precision") if precision_loaded else None
     summary = {
         "benchmark": "peerreviewbench",
         "status": "complete" if not errors else "incomplete",
@@ -1457,8 +1478,8 @@ def evaluate_benchmark(
         },
         "timing": {
             "wrapper_elapsed_seconds": round(time.monotonic() - started, 1),
-            "recall_elapsed_seconds": (recall.get("elapsed_seconds") if recall_loaded else None),
-            "precision_elapsed_seconds": (precision.get("elapsed_seconds") if precision_loaded else None),
+            "recall_elapsed_seconds": recall_elapsed,
+            "precision_elapsed_seconds": precision_elapsed,
         },
         "component_exit_codes": component_codes,
         "invalidated_component_caches": cache_invalidations,

@@ -88,6 +88,7 @@ def _selection_stats(*, raw: int = 1, selected: int = 1) -> dict[str, object]:
 
 def _valid_component_outputs() -> tuple[dict[str, object], dict[str, object]]:
     recall = {
+        "elapsed_seconds": 1.25,
         "n_papers": 1,
         "total_rubric_items": 2,
         "total_covered": 1,
@@ -120,6 +121,7 @@ def _valid_component_outputs() -> tuple[dict[str, object], dict[str, object]]:
         ],
     }
     precision = {
+        "elapsed_seconds": 2.5,
         "n_papers": 1,
         "n_items": 1,
         "n_fully_good": 1,
@@ -793,6 +795,31 @@ def test_component_output_validation_rejects_partial_pairs_and_invalid_labels() 
     assert any("precision judge labels are invalid" in error for error in errors)
 
 
+@pytest.mark.parametrize("component", ["recall", "precision"])
+@pytest.mark.parametrize("elapsed_seconds", [float("nan"), float("inf"), -0.1, True, "1"])
+def test_component_output_validation_rejects_invalid_timing(
+    component: str,
+    elapsed_seconds: object,
+) -> None:
+    exports = {1: benchmark_evaluate.export_findings([_finding(AgentRole.SUBSTANTIVE_REVIEW, 1)])}
+    recall, precision = _valid_component_outputs()
+    payload = recall if component == "recall" else precision
+    payload["elapsed_seconds"] = elapsed_seconds
+
+    errors = benchmark_evaluate.validate_component_outputs(recall, precision, exports, {"1": 2})
+
+    assert f"{component} elapsed_seconds must be a finite non-negative number" in errors
+
+
+def test_component_output_validation_allows_missing_timing() -> None:
+    exports = {1: benchmark_evaluate.export_findings([_finding(AgentRole.SUBSTANTIVE_REVIEW, 1)])}
+    recall, precision = _valid_component_outputs()
+    recall.pop("elapsed_seconds")
+    precision.pop("elapsed_seconds")
+
+    assert benchmark_evaluate.validate_component_outputs(recall, precision, exports, {"1": 2}) == []
+
+
 def test_recall_validation_rejects_self_consistent_truncated_rubric() -> None:
     exports = {1: benchmark_evaluate.export_findings([_finding(AgentRole.SUBSTANTIVE_REVIEW, 1)])}
     recall, _ = _valid_component_outputs()
@@ -1012,8 +1039,8 @@ def test_complete_summary_reuse_requires_unchanged_component_outputs(tmp_path) -
         },
         "timing": {
             "wrapper_elapsed_seconds": 1.0,
-            "recall_elapsed_seconds": None,
-            "precision_elapsed_seconds": None,
+            "recall_elapsed_seconds": 1.25,
+            "precision_elapsed_seconds": 2.5,
         },
         "component_exit_codes": {"recall": 0, "precision": 0},
         "invalidated_component_caches": {},
@@ -1473,7 +1500,7 @@ def test_malformed_component_rows_are_reported_instead_of_raising() -> None:
     assert any("item count differs" in error for error in errors)
 
 
-def test_unattributable_component_errors_invalidate_all_selected_caches(tmp_path, monkeypatch) -> None:
+def test_non_finite_component_timing_invalidates_all_selected_caches(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv("LITELLM_API_KEY", "test-key")
     run_dir = tmp_path / "run"
     run_dir.mkdir()
@@ -1568,8 +1595,9 @@ def test_unattributable_component_errors_invalidate_all_selected_caches(tmp_path
         ],
     }
     precision = {
+        "elapsed_seconds": float("nan"),
         "n_papers": 2,
-        "n_items": 0,
+        "n_items": 2,
         "n_fully_good": 2,
         "precision": 1.0,
         "per_item": [
@@ -1632,7 +1660,12 @@ def test_unattributable_component_errors_invalidate_all_selected_caches(tmp_path
     )
     cache_prefix = "precision-work/reviewer_scriptorium_all_meta_reviewer_precision-model_precision_trajectories"
     assert summary["status"] == "incomplete"
+    assert "precision elapsed_seconds must be a finite non-negative number" in summary["errors"]
+    assert summary["timing"]["precision_elapsed_seconds"] is None
     assert summary["invalidated_component_caches"]["precision"] == [
         f"{cache_prefix}/paper{paper_id}/prediction.json" for paper_id in (1, 2)
     ]
     assert all(not (precision_root / f"paper{paper_id}" / "prediction.json").exists() for paper_id in (1, 2))
+    summary_text = (evaluation_dir / "summary.json").read_text(encoding="utf-8")
+    assert "NaN" not in summary_text
+    assert json.loads(summary_text) == summary
