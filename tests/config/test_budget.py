@@ -60,16 +60,15 @@ def test_budget_accepts_explicit_zero_prices_for_gateway_routes(tmp_path: Path) 
     validate_ready(load_project_config(tmp_path), load_local_config(tmp_path), "quick", 1)
 
 
-def test_visual_transcription_route_is_required(tmp_path: Path) -> None:
+def test_unused_visual_transcription_route_is_not_required(tmp_path: Path) -> None:
     (tmp_path / ".git").mkdir()
     initialize_project(tmp_path, "main.tex", "pdflatex")
     local_path = tmp_path / ".scriptorium" / "config.toml"
     local_path.write_text(
         local_path.read_text(encoding="utf-8")
         .replace(MODEL_PLACEHOLDER, "configured-model")
-        .replace('visual_transcription = "visual"\n', ""),
+        .replace("[routes.primary]", 'visual_transcription = "missing"\n\n[routes.primary]'),
         encoding="utf-8",
     )
 
-    with pytest.raises(ConfigurationError, match="visual_transcription"):
-        validate_ready(load_project_config(tmp_path), load_local_config(tmp_path), "quick", None)
+    validate_ready(load_project_config(tmp_path), load_local_config(tmp_path), "quick", None)

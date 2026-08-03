@@ -501,6 +501,8 @@ def summarize_scriptorium_run(service: ScriptoriumService, run_id: str) -> dict[
         attempts = []
         for attempt in task_view["attempts"]:
             attempt_data = _jsonable(asdict(attempt))
+            if attempt_data.get("validation_report_artifact_digest") is None:
+                attempt_data.pop("validation_report_artifact_digest", None)
             attempts.append(attempt_data)
             for key in totals:
                 totals[key] += int(attempt_data.get(key) or 0)
@@ -769,7 +771,7 @@ def _validate_completed_bundle(service: ScriptoriumService, core_run: Any, paper
             raise BenchmarkError(f"paper{paper_id} bundle contains an unsafe symlink: {path}")
 
     try:
-        bundle = service.armarius._bundle_for_run(core_run)
+        bundle = service.armarius._bundle_for_run(core_run, allow_legacy=True)
         run_manifest_path = service.armarius._run_dir(core_run.id) / "manifest.json"
         if run_manifest_path.is_symlink():
             raise BenchmarkError(f"paper{paper_id} core run manifest is unsafe: {run_manifest_path}")
@@ -832,6 +834,7 @@ def validate_completed_scriptorium_state(
                 "schema_digest",
                 "trace_artifact_digest",
                 "output_artifact_digest",
+                "validation_report_artifact_digest",
             ):
                 digest = attempt.get(field)
                 if digest is None:

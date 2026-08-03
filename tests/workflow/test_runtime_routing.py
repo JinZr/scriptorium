@@ -3,9 +3,24 @@ from dataclasses import replace
 import json
 
 from scriptorium.domain import AgentRole, AttemptStatus, RunStatus
+from scriptorium.runtime.contained import ContainedAgentRuntime
 from scriptorium.service import ScriptoriumService
 
 from ._support import FakeAgentRuntime, PdfBuildingManuscriptManager, make_repository
+
+
+def test_default_runtime_composition_uses_per_attempt_containment(tmp_path):
+    repo = make_repository(tmp_path)
+
+    with ScriptoriumService(repo, manuscript_manager=PdfBuildingManuscriptManager(repo)) as service:
+        route = replace(
+            service.local_config.route_for_role(AgentRole.SUBSTANTIVE_REVIEW.value),
+            runtime_version="0.144.4",
+        )
+        runtime = service.armarius.runtime_factory(route)
+
+    assert isinstance(runtime, ContainedAgentRuntime)
+    assert runtime.repo == repo.resolve()
 
 
 def test_runtime_provenance_mismatch_is_not_accepted_as_a_completed_attempt(tmp_path):
@@ -29,6 +44,7 @@ def test_runtime_provenance_mismatch_is_not_accepted_as_a_completed_attempt(tmp_
         assert attempts
         assert all(attempt.status == AttemptStatus.FAILED for attempt in attempts)
         assert all(attempt.error.startswith("runtime provenance mismatch:") for attempt in attempts)
+        assert all(attempt.validation_report_artifact_digest is None for attempt in attempts)
 
 
 def test_mixed_native_routes_freeze_and_record_per_route_runtime(tmp_path):

@@ -183,7 +183,7 @@ def validate_ready(project: ProjectConfig, local: LocalConfig, profile: str, bud
         roles = project.profiles[profile]
     except KeyError as exc:
         raise ConfigurationError(f"Unknown review profile {profile!r}") from exc
-    for role_key in (*roles, "visual_transcription", "revision", "verification"):
+    for role_key in (*roles, "revision", "verification"):
         route = local.route_for_role(role_key)
         if route.model == MODEL_PLACEHOLDER:
             raise ConfigurationError(f"Route {route.name!r} still uses {MODEL_PLACEHOLDER}")
@@ -228,7 +228,6 @@ def initialize_project(repo: Path, main: str, engine: str) -> None:
         'copyedit = "primary"\n'
         'consistency = "primary"\n'
         'figure_review = "primary"\n'
-        'visual_transcription = "visual"\n'
         'revision = "primary"\n'
         'verification = "primary"\n\n'
         "[routes.primary]\n"
@@ -238,13 +237,6 @@ def initialize_project(repo: Path, main: str, engine: str) -> None:
         "input_usd_per_million = 0\n"
         "output_usd_per_million = 0\n"
         'reasoning_effort = "high"\n\n'
-        "[routes.visual]\n"
-        'runtime = "codex"\n'
-        'model_provider = "openai"\n'
-        f'model = "{MODEL_PLACEHOLDER}"\n'
-        "input_usd_per_million = 0\n"
-        "output_usd_per_million = 0\n"
-        'reasoning_effort = "high"\n'
     )
     local_path.write_text(local_text, encoding="utf-8")
     ignore_path = repo / ".gitignore"

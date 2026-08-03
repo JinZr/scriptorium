@@ -13,10 +13,23 @@ from tempfile import TemporaryDirectory
 from typing import Any
 
 from ..domain import AgentRole
-from .base import CLAUDE_SDK_VERSION, AgentResult, AgentStatus, AgentUsage, RuntimeUnavailable, _role_instructions
+from .base import (
+    CLAUDE_SDK_VERSION,
+    AgentCancelled,
+    AgentResult,
+    AgentStatus,
+    AgentUsage,
+    RuntimeUnavailable,
+    SessionStartedCallback,
+    _notify_session_started,
+    _role_instructions,
+    _SessionStartedCallbackError,
+)
 
 _READ_TOOLS = frozenset({"Read", "Glob", "Grep"})
 _INTERRUPTED_REASONS = frozenset({"aborted_streaming", "aborted_tools"})
+_CANCEL_RPC_SECONDS = 2.0
+_CANCEL_DRAIN_SECONDS = 2.0
 
 
 class ClaudeCodeAgentRuntime:
@@ -50,7 +63,7 @@ class ClaudeCodeAgentRuntime:
                 f"but found {version or 'an unknown version'}."
             )
 
-        self._query = sdk.query
+        self._client_type = sdk.ClaudeSDKClient
         self._options_type = sdk.ClaudeAgentOptions
         self._hook_matcher_type = sdk.HookMatcher
         self._result_type = sdk.ResultMessage
@@ -68,6 +81,7 @@ class ClaudeCodeAgentRuntime:
         workspace: Path,
         schema: Mapping[str, object],
         session_dir: Path,
+        on_session_started: SessionStartedCallback | None = None,
     ) -> AgentResult:
         return await self._run(
             thread_id=None,
@@ -76,6 +90,7 @@ class ClaudeCodeAgentRuntime:
             workspace=workspace,
             schema=schema,
             session_dir=session_dir,
+            on_session_started=on_session_started,
         )
 
     async def resume_agent(
@@ -86,6 +101,7 @@ class ClaudeCodeAgentRuntime:
         workspace: Path,
         schema: Mapping[str, object],
         session_dir: Path,
+        on_session_started: SessionStartedCallback | None = None,
     ) -> AgentResult:
         return await self._run(
             thread_id=thread_id,
@@ -94,6 +110,7 @@ class ClaudeCodeAgentRuntime:
             workspace=workspace,
             schema=schema,
             session_dir=session_dir,
+            on_session_started=on_session_started,
         )
 
     async def _run(
@@ -105,9 +122,11 @@ class ClaudeCodeAgentRuntime:
         workspace: Path,
         schema: Mapping[str, object],
         session_dir: Path,
+        on_session_started: SessionStartedCallback | None,
     ) -> AgentResult:
         resolved_workspace = workspace.resolve()
         resolved_session_dir = session_dir.resolve()
+        resolved_session_dir.mkdir(parents=True, exist_ok=True)
         store = _FileSessionStore(resolved_session_dir)
         if thread_id is not None and not store.contains(thread_id):
             return self._failed_result(
@@ -117,7 +136,11 @@ class ClaudeCodeAgentRuntime:
             )
 
         guard = _workspace_guard(resolved_workspace)
-        with TemporaryDirectory(prefix="scriptorium-claude-") as native_dir:
+        with TemporaryDirectory(
+            prefix="scriptorium-claude-",
+            dir=resolved_session_dir,
+            ignore_cleanup_errors=True,
+        ) as native_dir:
             native_config_dir = Path(native_dir)
             self._copy_auth_files(native_config_dir, {})
             options = self._options_type(
@@ -156,23 +179,88 @@ class ClaudeCodeAgentRuntime:
             messages: list[Any] = []
             result_message: Any = None
             current_thread_id = thread_id
-            stream: Any = None
+            # Claude 0.2.128's top-level query() cannot interrupt a live turn;
+            # the public persistent client provides interrupt and ordered disconnect.
+            client = self._client_type(options=options)
+            receive_task: asyncio.Task[Any] | None = None
+            connected = False
+            cancelled = False
+            callback_error: Exception | None = None
+            runtime_error: Exception | None = None
+            cleanup_errors: list[str] = []
             try:
-                stream = self._query(prompt=task, options=options)
-                async for message in stream:
-                    messages.append(message)
-                    message_thread_id = _message_session_id(message)
-                    if message_thread_id is not None:
-                        current_thread_id = message_thread_id
-                    if isinstance(message, self._result_type):
-                        result_message = message
+                await client.connect()
+                connected = True
+                await client.query(task)
+                receive_task = asyncio.create_task(
+                    _receive_claude_response(
+                        client,
+                        messages,
+                        self._result_type,
+                        on_session_started,
+                    )
+                )
+                try:
+                    result_message, current_thread_id = await asyncio.shield(receive_task)
+                    current_thread_id = current_thread_id or thread_id
+                except _SessionStartedCallbackError as exc:
+                    callback_error = exc.error
+                    _, _, cleanup_error = await _interrupt_claude(client, receive_task)
+                    if cleanup_error:
+                        cleanup_errors.append(cleanup_error)
+                except asyncio.CancelledError:
+                    cancelled = True
+                    drained_result, drained_thread_id, cleanup_error = await _interrupt_claude(client, receive_task)
+                    result_message = drained_result
+                    current_thread_id = drained_thread_id or _latest_session_id(messages) or thread_id
+                    if cleanup_error:
+                        cleanup_errors.append(cleanup_error)
             except asyncio.CancelledError:
-                raise
+                cancelled = True
+                if connected:
+                    drained_result, drained_thread_id, cleanup_error = await _interrupt_claude(client, receive_task)
+                    result_message = drained_result
+                    current_thread_id = drained_thread_id or _latest_session_id(messages) or thread_id
+                    if cleanup_error:
+                        cleanup_errors.append(cleanup_error)
+            except _SessionStartedCallbackError as exc:
+                callback_error = exc.error
+                if connected:
+                    _, _, cleanup_error = await _interrupt_claude(client, receive_task)
+                    if cleanup_error:
+                        cleanup_errors.append(cleanup_error)
             except Exception as exc:
-                return self._failed_result(current_thread_id, exc, messages)
+                runtime_error = exc
             finally:
-                if stream is not None and hasattr(stream, "aclose"):
-                    await stream.aclose()
+                try:
+                    await client.disconnect()
+                except asyncio.CancelledError:
+                    cancelled = True
+                    cleanup_errors.append("disconnect was cancelled")
+                except Exception as exc:
+                    cleanup_errors.append(f"disconnect failed: {str(exc) or type(exc).__name__}")
+
+            current_thread_id = _latest_session_id(messages) or current_thread_id
+            if callback_error is not None:
+                raise callback_error
+            if cancelled:
+                raise AgentCancelled(
+                    self._interrupted_result(
+                        current_thread_id,
+                        result_message,
+                        messages,
+                        "; ".join(cleanup_errors) or None,
+                    )
+                )
+            if runtime_error is not None:
+                if cleanup_errors:
+                    runtime_error = RuntimeError(
+                        f"{str(runtime_error) or type(runtime_error).__name__}; "
+                        f"native cleanup: {'; '.join(cleanup_errors)}"
+                    )
+                return self._failed_result(current_thread_id, runtime_error, messages)
+            if cleanup_errors:
+                return self._failed_result(current_thread_id, RuntimeError("; ".join(cleanup_errors)), messages)
 
         if result_message is None:
             return self._failed_result(
@@ -192,6 +280,31 @@ class ClaudeCodeAgentRuntime:
                 error="Claude session state could not be persisted.",
             )
         return result
+
+    def _interrupted_result(
+        self,
+        thread_id: str | None,
+        result: Any,
+        messages: list[Any],
+        cleanup_error: str | None,
+    ) -> AgentResult:
+        usage = _normalize_usage(getattr(result, "usage", None))
+        error = _result_error(result, "interrupted") if result is not None else "Claude turn was cancelled."
+        if cleanup_error:
+            error = f"{error} Native cleanup: {cleanup_error}"
+        return AgentResult(
+            thread_id=_optional_string(getattr(result, "session_id", None)) or thread_id,
+            status="interrupted",
+            final_response=None,
+            usage=usage,
+            trace_jsonl=_trace_jsonl(messages, "interrupted", usage),
+            runtime_name="claude_code",
+            runtime_version=self._runtime_version,
+            model=self.model,
+            model_provider=self.provider,
+            duration_ms=_optional_int(getattr(result, "duration_ms", None)),
+            error=error,
+        )
 
     def _normalize_result(self, result: Any, messages: list[Any]) -> AgentResult:
         thread_id = _optional_string(getattr(result, "session_id", None))
@@ -241,6 +354,76 @@ class ClaudeCodeAgentRuntime:
             duration_ms=None,
             error=str(exc) or "Claude Code runtime failed.",
         )
+
+
+async def _receive_claude_response(
+    client: Any,
+    messages: list[Any],
+    result_type: type[Any],
+    on_session_started: SessionStartedCallback | None,
+) -> tuple[Any, str | None]:
+    result_message: Any = None
+    current_thread_id: str | None = None
+    reported_thread_id: str | None = None
+    async for message in client.receive_response():
+        messages.append(message)
+        message_thread_id = _message_session_id(message)
+        if message_thread_id is not None:
+            current_thread_id = message_thread_id
+            if message_thread_id != reported_thread_id:
+                await _notify_session_started(on_session_started, message_thread_id)
+                reported_thread_id = message_thread_id
+        if isinstance(message, result_type):
+            result_message = message
+    return result_message, current_thread_id
+
+
+async def _interrupt_claude(
+    client: Any,
+    receive_task: asyncio.Task[Any] | None,
+) -> tuple[Any, str | None, str | None]:
+    errors: list[str] = []
+    try:
+        await asyncio.wait_for(asyncio.shield(client.interrupt()), _CANCEL_RPC_SECONDS)
+    except asyncio.CancelledError:
+        errors.append("interrupt request was cancelled")
+    except Exception as exc:
+        errors.append(f"interrupt failed: {str(exc) or type(exc).__name__}")
+
+    result_message: Any = None
+    thread_id: str | None = None
+    if receive_task is not None:
+        try:
+            result_message, thread_id = await asyncio.wait_for(
+                asyncio.shield(receive_task),
+                _CANCEL_DRAIN_SECONDS,
+            )
+        except _SessionStartedCallbackError:
+            pass
+        except asyncio.CancelledError:
+            errors.append("interrupted response drain was cancelled")
+        except asyncio.TimeoutError:
+            errors.append("interrupted response did not finish before the drain deadline")
+            receive_task.cancel()
+            await _consume_cancelled_task(receive_task)
+        except Exception as exc:
+            errors.append(f"interrupted response drain failed: {str(exc) or type(exc).__name__}")
+    return result_message, thread_id, "; ".join(errors) or None
+
+
+async def _consume_cancelled_task(task: asyncio.Task[Any]) -> None:
+    try:
+        await task
+    except BaseException:
+        pass
+
+
+def _latest_session_id(messages: list[Any]) -> str | None:
+    for message in reversed(messages):
+        thread_id = _message_session_id(message)
+        if thread_id is not None:
+            return thread_id
+    return None
 
 
 class _FileSessionStore:

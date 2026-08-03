@@ -113,7 +113,7 @@ ROLE_CATALOG: Mapping[AgentRole, RoleSpec] = {
     AgentRole.VISUAL_TRANSCRIPTION: RoleSpec(
         key=AgentRole.VISUAL_TRANSCRIPTION,
         display_name="Visual Transcriber",
-        description="Verbatim transcription of text visible in raster manuscript content",
+        description="Historical visual-transcription task retained for persisted run decoding",
     ),
     AgentRole.SUBSTANTIVE_REVIEW: RoleSpec(
         key=AgentRole.SUBSTANTIVE_REVIEW,
@@ -259,6 +259,7 @@ class Attempt:
     estimated_cost_usd: float = 0.0
     trace_artifact_digest: str | None = None
     output_artifact_digest: str | None = None
+    validation_report_artifact_digest: str | None = None
     duration_ms: int | None = None
     error: str | None = None
     created_at: str = field(default_factory=utc_now)

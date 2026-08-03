@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 from enum import Enum
 from types import SimpleNamespace
@@ -67,10 +68,74 @@ class FakeStreamingThread:
         return SimpleNamespace(id="turn_stream", stream=lambda: _notification_stream(notifications))
 
 
+class FakeCancellableHandle:
+    def __init__(
+        self,
+        *,
+        interrupt_error: Exception | None = None,
+        terminal_error: Exception | None = None,
+        complete_on_interrupt: bool = True,
+    ) -> None:
+        self.id = "turn_cancel"
+        self.interrupt_error = interrupt_error
+        self.terminal_error = terminal_error
+        self.complete_on_interrupt = complete_on_interrupt
+        self.interrupted = False
+        self.streaming = asyncio.Event()
+        self._completed = asyncio.Event()
+
+    def stream(self):
+        async def notifications():
+            self.streaming.set()
+            await self._completed.wait()
+            yield SimpleNamespace(
+                method="turn/completed",
+                payload=SimpleNamespace(
+                    turn=SimpleNamespace(
+                        id=self.id,
+                        status=FakeStatus.INTERRUPTED,
+                        error=self.terminal_error,
+                        duration_ms=17,
+                        items=[],
+                    )
+                ),
+            )
+
+        return notifications()
+
+    async def interrupt(self) -> None:
+        self.interrupted = True
+        if self.complete_on_interrupt:
+            self._completed.set()
+        if self.interrupt_error is not None:
+            raise self.interrupt_error
+
+
+class FakeCancellableThread:
+    def __init__(self, handle: FakeCancellableHandle, *, start_delay: float = 0.0) -> None:
+        self.id = "thread_cancel"
+        self.handle = handle
+        self.start_delay = start_delay
+        self.turn_started = asyncio.Event()
+
+    async def turn(self, task: str, **kwargs: Any) -> FakeCancellableHandle:
+        self.turn_started.set()
+        if self.start_delay:
+            await asyncio.sleep(self.start_delay)
+        return self.handle
+
+
 class FakeClient:
-    def __init__(self, start_thread: FakeThread, resume_thread: FakeThread | None = None) -> None:
+    def __init__(
+        self,
+        start_thread: FakeThread,
+        resume_thread: FakeThread | None = None,
+        *,
+        exit_error: Exception | None = None,
+    ) -> None:
         self.start_thread = start_thread
         self.resume_thread = resume_thread or start_thread
+        self.exit_error = exit_error
         self.start_calls: list[dict[str, Any]] = []
         self.resume_calls: list[tuple[str, dict[str, Any]]] = []
         self.entered = False
@@ -82,6 +147,8 @@ class FakeClient:
 
     async def __aexit__(self, _exc_type: Any, _exc: Any, _tb: Any) -> None:
         self.exited = True
+        if self.exit_error is not None:
+            raise self.exit_error
 
     async def thread_start(self, **kwargs: Any) -> FakeThread:
         self.start_calls.append(kwargs)

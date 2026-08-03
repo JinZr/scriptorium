@@ -4,7 +4,7 @@ import asyncio
 from dataclasses import dataclass
 from enum import Enum
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, Callable
 
 import pytest
 
@@ -113,24 +113,36 @@ class FakeResponse:
 
 
 class FakeConversation:
-    def __init__(self, history: list[FakeStep] | None = None) -> None:
+    def __init__(
+        self,
+        history: list[FakeStep] | None = None,
+        on_cancel: Callable[[], None] | None = None,
+    ) -> None:
         self.history = list(history or [])
         self.cancelled = False
+        self.on_cancel = on_cancel
 
     async def cancel(self) -> None:
         self.cancelled = True
+        if self.on_cancel is not None:
+            self.on_cancel()
 
 
 class FakeAgent:
     response: FakeResponse
     prior_history: list[FakeStep]
     current_steps: list[FakeStep]
-    conversation_id_value: str
+    conversation_id_value: str | None
+    cancelled_conversation_id_value: str | None
+    exit_error_value: Exception | None
+    exit_started_event: asyncio.Event | None
+    exit_release_event: asyncio.Event | None
     instances: list["FakeAgent"] = []
 
     def __init__(self, config: Any) -> None:
         self.config = config
-        self.conversation = FakeConversation(self.prior_history)
+        self._conversation_id = self.conversation_id_value
+        self.conversation = FakeConversation(self.prior_history, self._set_cancelled_conversation_id)
         self.is_started = False
         self.chat_calls: list[str] = []
         self.instances.append(self)
@@ -140,7 +152,19 @@ class FakeAgent:
         return self
 
     async def __aexit__(self, _exc_type: Any, _exc: Any, _tb: Any) -> None:
+        if self.exit_started_event is not None:
+            self.exit_started_event.set()
+        try:
+            if self.exit_release_event is not None:
+                await self.exit_release_event.wait()
+        except asyncio.CancelledError:
+            self.is_started = False
+            if self.exit_error_value is not None:
+                raise self.exit_error_value
+            raise
         self.is_started = False
+        if self.exit_error_value is not None:
+            raise self.exit_error_value
 
     async def chat(self, task: str) -> FakeResponse:
         self.chat_calls.append(task)
@@ -148,8 +172,12 @@ class FakeAgent:
         return self.response
 
     @property
-    def conversation_id(self) -> str:
-        return self.conversation_id_value
+    def conversation_id(self) -> str | None:
+        return self._conversation_id
+
+    def _set_cancelled_conversation_id(self) -> None:
+        if self.cancelled_conversation_id_value is not None:
+            self._conversation_id = self.cancelled_conversation_id_value
 
 
 class FakeLocalAgentConfig:
@@ -162,12 +190,18 @@ def make_sdk(
     response: FakeResponse,
     current_steps: list[FakeStep],
     prior_history: list[FakeStep] | None = None,
-    conversation_id: str = "12345678-1234-1234-1234-123456789012",
+    conversation_id: str | None = "12345678-1234-1234-1234-123456789012",
+    cancelled_conversation_id: str | None = None,
+    exit_error: Exception | None = None,
 ) -> Any:
     FakeAgent.response = response
     FakeAgent.current_steps = current_steps
     FakeAgent.prior_history = list(prior_history or [])
     FakeAgent.conversation_id_value = conversation_id
+    FakeAgent.cancelled_conversation_id_value = cancelled_conversation_id
+    FakeAgent.exit_error_value = exit_error
+    FakeAgent.exit_started_event = None
+    FakeAgent.exit_release_event = None
     FakeAgent.instances = []
     types = SimpleNamespace(
         AntigravityCancelledError=FakeAntigravityCancelledError,

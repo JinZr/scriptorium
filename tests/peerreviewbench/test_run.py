@@ -1,4 +1,5 @@
 import asyncio
+from dataclasses import replace
 from hashlib import sha256
 import json
 from pathlib import Path
@@ -11,8 +12,10 @@ from egs.peerreviewbench.prepare import BenchmarkError, file_digest, load_lock
 import egs.peerreviewbench.run as benchmark_run
 from egs.peerreviewbench.run import PeerReviewBenchManuscriptManager, create_paper_project, run_benchmark
 from scriptorium.config import MODEL_PLACEHOLDER, load_local_config, load_project_config
-from scriptorium.domain import AgentRole, AttemptStatus, RunStatus, TaskStatus
+from scriptorium.domain import AgentRole, AttemptStatus, RunStatus, TaskStatus, canonical_json
+from scriptorium.errors import InfrastructureError
 from scriptorium.runtime import AgentResult, AgentUsage
+from scriptorium.schemas import DEFAULT_EVIDENCE_ANCHOR_CONTRACT
 from scriptorium.service import ScriptoriumService
 
 ROLES = {
@@ -30,36 +33,9 @@ class FullProfileRuntime:
     def __init__(self) -> None:
         self.calls: list[AgentRole] = []
 
-    async def run_agent(self, task, role, workspace, schema, session_dir):
+    async def run_agent(self, task, role, workspace, schema, session_dir, on_session_started=None):
         del task, schema, session_dir
         self.calls.append(role)
-        if role == AgentRole.VISUAL_TRANSCRIPTION:
-            manifest = json.loads((workspace / "manifest.json").read_text(encoding="utf-8"))
-            output = {
-                "pdf_digest": manifest["pdf_digest"],
-                "pages": [
-                    {
-                        "page": page["page"],
-                        "page_digest": page["page_digest"],
-                        "text": "result",
-                    }
-                    for page in manifest["pages"]
-                ],
-            }
-            return AgentResult(
-                thread_id="thread-visual-transcription",
-                status="completed",
-                final_response=json.dumps(output),
-                usage=AgentUsage(input_tokens=10, cached_input_tokens=2, output_tokens=4, reasoning_tokens=1),
-                trace_jsonl=json.dumps({"role": role.value, "status": "completed"}) + "\n",
-                runtime_name="codex",
-                runtime_version="0.144.4",
-                model="fake-model",
-                model_provider="test",
-                duration_ms=5,
-                error=None,
-            )
-
         assert role in ROLES
         source = workspace / "sources" / "preprint" / "preprint.md"
         output = {
@@ -76,7 +52,6 @@ class FullProfileRuntime:
                             "start_line": 3,
                             "end_line": 3,
                             "source_digest": sha256(source.read_bytes()).hexdigest(),
-                            "page": 1,
                             "quoted_text": "The reported result needs review.",
                         }
                     ],
@@ -100,7 +75,7 @@ class FullProfileRuntime:
             error=None,
         )
 
-    async def resume_agent(self, thread_id, task, role, workspace, schema, session_dir):
+    async def resume_agent(self, thread_id, task, role, workspace, schema, session_dir, on_session_started=None):
         raise AssertionError(f"unexpected resume for {thread_id}/{role.value}")
 
 
@@ -110,7 +85,7 @@ class InterruptingFullProfileRuntime(FullProfileRuntime):
         self.interrupted = False
         self.resume_calls: list[AgentRole] = []
 
-    async def run_agent(self, task, role, workspace, schema, session_dir):
+    async def run_agent(self, task, role, workspace, schema, session_dir, on_session_started=None):
         if role == AgentRole.COPYEDIT and not self.interrupted:
             self.interrupted = True
             self.calls.append(role)
@@ -127,13 +102,18 @@ class InterruptingFullProfileRuntime(FullProfileRuntime):
                 duration_ms=5,
                 error="simulated interruption",
             )
-        return await super().run_agent(task, role, workspace, schema, session_dir)
+        return await super().run_agent(
+            task, role, workspace, schema, session_dir, on_session_started=on_session_started
+        )
 
-    async def resume_agent(self, thread_id, task, role, workspace, schema, session_dir):
+    async def resume_agent(self, thread_id, task, role, workspace, schema, session_dir, on_session_started=None):
         assert thread_id == "thread-copyedit-interrupted"
         assert role == AgentRole.COPYEDIT
         self.resume_calls.append(role)
-        return await super().run_agent(task, role, workspace, schema, session_dir)
+        result = await super().run_agent(
+            task, role, workspace, schema, session_dir, on_session_started=on_session_started
+        )
+        return replace(result, thread_id=thread_id)
 
 
 def _write_png(path: Path) -> None:
@@ -197,7 +177,6 @@ def _routes(path: Path) -> Path:
             'copyedit = "primary"\n'
             'consistency = "primary"\n'
             'figure_review = "primary"\n'
-            'visual_transcription = "primary"\n'
             'revision = "primary"\n'
             'verification = "primary"\n\n'
             "[routes.primary]\n"
@@ -231,10 +210,10 @@ def test_route_config_summary_uses_normalized_route_values(tmp_path: Path) -> No
     assert summary["routes"]["primary"]["runtime"] == "codex"
     assert summary["routes"]["primary"]["model_provider"] == "test"
     assert summary["routes"]["primary"]["model"] == "fake-model"
-    assert summary["roles"]["visual_transcription"] == "primary"
+    assert "visual_transcription" not in summary["roles"]
 
 
-def test_example_routes_use_a_dedicated_visual_transcription_route(tmp_path: Path) -> None:
+def test_example_routes_need_only_review_revision_and_verification_routes(tmp_path: Path) -> None:
     project = tmp_path / "project"
     routes = benchmark_run.HERE / "routes.example.toml"
     route_config = routes.read_bytes()
@@ -242,8 +221,9 @@ def test_example_routes_use_a_dedicated_visual_transcription_route(tmp_path: Pat
 
     config = load_local_config(project)
 
-    assert config.roles["visual_transcription"] == "visual"
-    assert config.routes["visual"].model == MODEL_PLACEHOLDER
+    assert "visual_transcription" not in config.roles
+    assert "visual" not in config.routes
+    assert config.routes["primary"].model == MODEL_PLACEHOLDER
 
 
 def _project(tmp_path: Path, prepared: Path) -> tuple[Path, PeerReviewBenchManuscriptManager]:
@@ -291,7 +271,14 @@ def test_markdown_manager_builds_standard_bundle_without_project_sentinel(tmp_pa
     repeated = manager.build(repeat_workspace, load_project_config(snapshot).manuscript)
     assert file_digest(repeated.pdf_path) == file_digest(build.pdf_path)
 
-    bundle = manager.create_bundle(snapshot, tmp_path / "bundle", revision, sources, build.pdf_path)
+    bundle = manager.create_bundle(
+        snapshot,
+        tmp_path / "bundle",
+        revision,
+        sources,
+        build.pdf_path,
+        DEFAULT_EVIDENCE_ANCHOR_CONTRACT,
+    )
 
     assert bundle.pdf_pages == 2
     assert (bundle.workspace / "manuscript.pdf").is_file()
@@ -453,21 +440,9 @@ def test_full_profile_service_persists_findings_artifacts_and_cost(tmp_path: Pat
         run = view["run"]
 
         assert run.status == RunStatus.AWAITING_DECISION
-        assert run.estimated_cost_usd == pytest.approx(0.000160)
-        assert runtime.calls[0] == AgentRole.VISUAL_TRANSCRIPTION
-        assert set(runtime.calls[1:]) == ROLES
-        assert len(runtime.calls) == 5
-
-        transcription_tasks = [item for item in view["tasks"] if item["task"].stage == "review_transcription"]
-        assert len(transcription_tasks) == 1
-        assert transcription_tasks[0]["task"].role == AgentRole.VISUAL_TRANSCRIPTION
-        assert transcription_tasks[0]["task"].status == TaskStatus.COMPLETED
-        transcription_attempts = transcription_tasks[0]["attempts"]
-        assert len(transcription_attempts) == 1
-        assert transcription_attempts[0].estimated_cost_usd == pytest.approx(0.000032)
-        assert service.database.get_artifact(transcription_attempts[0].output_artifact_digest).media_type == (
-            "application/json"
-        )
+        assert run.estimated_cost_usd == pytest.approx(0.000128)
+        assert set(runtime.calls) == ROLES
+        assert len(runtime.calls) == 4
 
         review_tasks = [item for item in view["tasks"] if item["task"].stage == "review"]
         assert {item["task"].role for item in review_tasks} == ROLES
@@ -528,6 +503,49 @@ def test_full_profile_service_persists_findings_artifacts_and_cost(tmp_path: Pat
             benchmark_run.validate_completed_scriptorium_state(service, valid_entry)
 
 
+def test_completed_bundle_validation_allows_explicit_legacy_source_map_read_only(tmp_path: Path) -> None:
+    prepared = _prepared_paper(
+        tmp_path / "prepared",
+        paper_id=18,
+        dataset_id="test/peerreview-bench",
+        dataset_revision="locked-revision",
+    )
+    project, manager = _project(tmp_path, prepared)
+    runtime = FullProfileRuntime()
+
+    with ScriptoriumService(
+        project,
+        runtime_factory=lambda route: runtime,
+        manuscript_manager=manager,
+    ) as service:
+        run = asyncio.run(service.start_run("prepared", "full", None))["run"]
+        run_dir = service.armarius._run_dir(run.id)
+        bundle_dir = run_dir / "bundle"
+        bundle_manifest = json.loads((bundle_dir / "manifest.json").read_text(encoding="utf-8"))
+        source_map_path = bundle_dir / "source-map.json"
+        source_map_path.write_text(
+            json.dumps({"sources": bundle_manifest["sources"]}, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        run_manifest_path = run_dir / "manifest.json"
+        run_manifest = json.loads(run_manifest_path.read_text(encoding="utf-8"))
+        run_manifest["bundle_digest"] = service.armarius._directory_digest(bundle_dir)
+        run_manifest_path.write_text(
+            json.dumps(run_manifest, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        service.armarius._record_file(source_map_path, "application/json")
+        service.armarius._record_text(canonical_json(run_manifest), "application/json")
+        legacy_config = dict(run.frozen_config)
+        legacy_config.pop("evidence_anchor_contract")
+        legacy_run = replace(run, frozen_config=legacy_config)
+
+        benchmark_run._validate_completed_bundle(service, legacy_run, 18)
+        with pytest.raises(InfrastructureError, match="predates the frozen evidence anchor contract"):
+            service.armarius._bundle_for_run(legacy_run)
+        assert len(runtime.calls) == 4
+
+
 def test_completed_benchmark_paper_is_not_repeated_on_resume(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -564,16 +582,19 @@ def test_completed_benchmark_paper_is_not_repeated_on_resume(
     assert "src/scriptorium/service.py" in source_paths
     paper_summary = initial["papers"]["9"]["scriptorium"]
     assert paper_summary["status"] == RunStatus.AWAITING_DECISION.value
-    assert paper_summary["estimated_cost_usd"] == pytest.approx(0.000160)
-    assert len(paper_summary["tasks"]) == 5
-    assert [(task["stage"], task["role"]) for task in paper_summary["tasks"]].count(
-        ("review_transcription", AgentRole.VISUAL_TRANSCRIPTION.value)
-    ) == 1
+    assert paper_summary["estimated_cost_usd"] == pytest.approx(0.000128)
+    assert len(paper_summary["tasks"]) == 4
+    assert all("transcription" not in task["stage"] for task in paper_summary["tasks"])
     assert len(paper_summary["finding_payload_digest"]) == 64
     assert {
         (attempt["model"], attempt["model_provider"]) for task in paper_summary["tasks"] for attempt in task["attempts"]
     } == {("fake-model", "test")}
-    assert len(runtime.calls) == 5
+    assert all(
+        "validation_report_artifact_digest" not in attempt
+        for task in paper_summary["tasks"]
+        for attempt in task["attempts"]
+    )
+    assert len(runtime.calls) == 4
     manifest_bytes = (run_dir / "run_manifest.json").read_bytes()
 
     resumed_dir, resumed = asyncio.run(
@@ -589,7 +610,7 @@ def test_completed_benchmark_paper_is_not_repeated_on_resume(
     assert resumed_dir == run_dir
     assert resumed["status"] == "complete"
     assert resumed["papers"]["9"]["scriptorium_run_id"] == initial["papers"]["9"]["scriptorium_run_id"]
-    assert len(runtime.calls) == 5
+    assert len(runtime.calls) == 4
     assert (run_dir / "run_manifest.json").read_bytes() == manifest_bytes
 
     monkeypatch.setattr(benchmark_run, "source_manifest", lambda: [{"path": "changed"}])
@@ -641,7 +662,7 @@ def test_corrupt_completed_artifact_stays_incomplete_across_resumes(tmp_path: Pa
         )
         assert resumed["status"] == "incomplete"
         assert resumed["papers"]["13"]["status"] == "incomplete"
-    assert len(runtime.calls) == 5
+    assert len(runtime.calls) == 4
 
 
 def test_benchmark_manifest_rejects_project_path_escape() -> None:
@@ -733,9 +754,8 @@ def test_incomplete_benchmark_resumes_only_interrupted_review_lane(tmp_path: Pat
 
     assert initial["status"] == "incomplete"
     assert initial["papers"]["10"]["status"] == "incomplete"
-    assert runtime.calls[0] == AgentRole.VISUAL_TRANSCRIPTION
-    assert set(runtime.calls[1:]) == ROLES
-    assert len(runtime.calls) == 5
+    assert set(runtime.calls) == ROLES
+    assert len(runtime.calls) == 4
 
     project = run_dir / "papers" / "paper10"
     run_id = initial["papers"]["10"]["scriptorium_run_id"]
@@ -774,7 +794,6 @@ def test_incomplete_benchmark_resumes_only_interrupted_review_lane(tmp_path: Pat
     assert resumed["papers"]["10"]["status"] == "complete"
     assert resumed["papers"]["10"]["scriptorium"]["status"] == RunStatus.AWAITING_DECISION.value
     assert runtime.resume_calls == [AgentRole.COPYEDIT]
-    assert runtime.calls.count(AgentRole.VISUAL_TRANSCRIPTION) == 1
     assert runtime.calls.count(AgentRole.COPYEDIT) == 2
     assert all(runtime.calls.count(role) == 1 for role in ROLES - {AgentRole.COPYEDIT})
 
@@ -1091,7 +1110,6 @@ def test_paper_project_uses_route_content_captured_at_startup(
         ('model = "fake-model"', f'model = "{MODEL_PLACEHOLDER}"', None, MODEL_PLACEHOLDER),
         ("output_usd_per_million = 3\n", "", 1.0, "needs input_usd_per_million"),
         ('figure_review = "primary"\n', "", None, "No model route configured"),
-        ('visual_transcription = "primary"\n', "", None, "No model route configured"),
     ],
 )
 def test_unready_route_configuration_is_rejected_before_run_creation(

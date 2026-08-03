@@ -25,9 +25,26 @@ State lives under the manuscript repository:
     patched/
     sessions/<normalized-runtime-role-route-digest>/
   locks/
+    <run-id>.lock
+    <run-id>.providers.lock
+  control/cancel/
 ```
 
-`scriptorium init` adds `.scriptorium/` to `.gitignore`. SQLite uses WAL, foreign keys, a busy timeout, numbered SQL migrations, and short transactions. Git, LaTeX, and model calls happen outside transactions. A mutating command holds a per-run OS file lock; read-only status and reporting commands do not.
+`scriptorium init` adds `.scriptorium/` to `.gitignore`. SQLite uses WAL, foreign keys, a busy timeout, numbered SQL migrations, and short transactions. Git, LaTeX, and model calls happen outside transactions. An invalid structured response is preserved as a raw output artifact and accompanied by an immutable validation-report artifact; the terminal attempt transaction records both digests atomically.
+
+### Run mutation ownership
+
+A per-run kernel `flock` is the sole authority for whether a live process owns a run. The lock file may also contain same-inode JSON describing the apparent owner and operation, but that content is diagnostic only: it may be stale or incomplete and must never be used to override, break, or infer the absence of the kernel lock. Replacing or renaming the lock file would create a different inode and is not a valid ownership update.
+
+The protected run mutations are `run start` after its run ID is reserved, `run resume`, `run retry`, `run cancel`, `finding decide`, `patch decide`, and `patch apply`. Each holds the same per-run lock across its state-changing operation. If another live owner holds the lock, ordinary mutations reject without changing SQLite, artifacts, or the author worktree.
+
+`run cancel` is the cooperative control operation. It atomically publishes a durable request under `control/cancel/` without changing SQLite, then waits up to 15 seconds for the active owner to observe it. The owner cancels its workflow tasks, waits for provider cleanup, and records interrupted attempts, cancelled tasks, the cancelled run, and one `run.cancelled` event before removing the request. A request left by a crashed requester or owner is replayed idempotently by the next mutation that obtains the run lock. Read-only commands never consume it.
+
+Every production runtime attempt executes in a foreground, per-attempt containment worker that owns a separate POSIX session and process group. It is not a background service, queue, or distributed worker. Workers hold a shared `<run-id>.providers.lock` while provider descendants may still exist. After reporting a terminal result, the worker stays alive with that barrier until its parent reaps the process group; if the parent disappears, control-channel EOF starts the same watchdog cleanup. A new owner takes the main run lock first and then waits up to 15 seconds for an exclusive pass through this provider cleanup barrier before recovering attempts or starting new work. The provider lock is not mutation authority, and persisted PID, PGID, or diagnostic owner JSON is never used to kill or reclaim work.
+
+Containment covers the pinned SDK harnesses and descendants that inherit their POSIX session. A third-party child that deliberately starts a different session falls outside this guarantee; the supported harness versions must not detach in that way.
+
+Recovery of leftover `running` attempts happens only after `run resume`, `run retry`, or `run cancel` acquires the per-run lock and passes the provider cleanup barrier. `run status`, `run report`, and `run gate` remain read-only, do not acquire mutation ownership, and never recover, consume cancellation requests, or rewrite state. After a driver exits unexpectedly, stale attempts therefore remain visible until one of those recovery-capable lifecycle commands safely acquires ownership and records their interruption.
 
 Runtime-native session state stays under the stable run session directory, outside disposable task workspaces. Antigravity keeps separate `save/` and `app/` children there. Rebuilding a task bundle therefore cannot erase resumable native state.
 
@@ -44,7 +61,7 @@ Runtime-native session state stays under the stable run session directory, outsi
 - `service`: application methods shared by the CLI and any future interface.
 - `cli`: argument parsing plus text or JSON rendering; no business rules.
 
-The public service surface is `start_run`, `get_run`, `resume_run`, `retry_task`, `cancel_run`, `list_findings`, `get_finding`, `decide_finding`, `get_patch`, `decide_patch`, `apply_patch`, `render_report`, and `evaluate_gate`.
+The public service surface is `doctor`, `start_run`, `get_run`, `resume_run`, `retry_task`, `cancel_run`, `list_findings`, `get_finding`, `decide_finding`, `get_patch`, `decide_patch`, `apply_patch`, `render_report`, and `evaluate_gate`.
 
 ## Runtime boundary
 
@@ -59,6 +76,7 @@ class AgentRuntime(Protocol):
         workspace: Path,
         schema: Mapping[str, object],
         session_dir: Path,
+        on_session_started: SessionStartedCallback | None = None,
     ) -> AgentResult: ...
 
     async def resume_agent(
@@ -69,10 +87,11 @@ class AgentRuntime(Protocol):
         workspace: Path,
         schema: Mapping[str, object],
         session_dir: Path,
+        on_session_started: SessionStartedCallback | None = None,
     ) -> AgentResult: ...
 ```
 
-`AgentResult` contains normalized thread status, structured response text, token usage, JSONL trace, runtime/model metadata, duration, and error information. Native SDK objects, notifications, exceptions, and configuration do not cross this adapter boundary. The database column remains named `thread_id`, but its cross-runtime meaning is an opaque native session or conversation ID.
+`AgentResult` contains normalized thread status, structured response text, token usage, JSONL trace, runtime/model metadata, duration, and error information. The session-start callback persists a newly allocated opaque native session ID while the attempt is still running. Runtime cancellation carries a normalized interrupted result back across the boundary so Armarius can durably finish the attempt before cancellation propagates. Native SDK objects, notifications, exceptions, and configuration do not cross this adapter boundary. The database column remains named `thread_id`, but its cross-runtime meaning is an opaque native session or conversation ID.
 
 Each adapter is bound to one exact native harness version:
 
@@ -83,6 +102,12 @@ Each adapter is bound to one exact native harness version:
 The optional SDKs are imported only inside their adapters and only when selected. Claude Code accepts `structured_output` and persists SDK messages as NDJSON. Antigravity accepts structured output and persists the current turn's incremental steps as NDJSON. Cancellation first requests native session cancellation; adapters then normalize completion, failure, or interruption.
 
 A session can be resumed only when runtime name, exact runtime version, provider, and model match the recorded attempt. A retry that changes to a different named route always creates a new native session; naming the same frozen route may resume a compatible failed or interrupted attempt. If a recorded native session ID exists but its state has disappeared, recovery reports failure instead of creating an unrelated session.
+
+## Doctor preflight
+
+`scriptorium doctor` resolves its requested revision to a commit before loading project configuration. It creates a disposable Git snapshot, scans the same manuscript dependency closure used by run preparation, and compiles a separate copy with the shared `ManuscriptManager.build()` implementation. The ignored local runtime configuration still comes from the current repository because it describes this machine, while `scriptorium.toml` and manuscript inputs come only from the frozen snapshot.
+
+Doctor is a foreground preflight, not a durable workflow stage. It does not create a run, workflow records, artifacts, bundles, rendered pages, or provider work, and it recompiles on every invocation so a previously successful commit does not hide changes in the local LaTeX environment. Its temporary snapshot and generated build files are removed when the command returns or is interrupted normally.
 
 ## Frozen manuscript and agent bundle
 
@@ -99,7 +124,13 @@ task.md
 
 The bundle becomes the selected runtime's workspace. Repository-level `.codex/`, `AGENTS.md`, source code, scripts, unrelated files, and uncommitted changes are excluded.
 
-If the PDF contains raster images, Armarius identifies those pages and runs one separately routed `visual_transcription` task before starting reviewers. That task's workspace contains only the target page PNGs and a digest request manifest, not manuscript sources, the PDF, or unrelated pages. Its output is an immutable, digest-bound transcription artifact used only for evidence validation; it is not copied into reviewer workspaces. PDF quotations are matched first against the page's native text and then against the frozen transcription, with whitespace normalization only. Patched PDFs receive an independent transcription before verification. Scriptorium does not perform local OCR or depend on Tesseract.
+`source-map.json` is the per-bundle authority for evidence anchors. It separates the runtime read namespace from the durable output namespace: a source is read at `sources/<relative-path>` but cited and edited as the bare `<relative-path>`, while a rendered page is read at the map's exact `pages/page-0001.png`-style path but cited as `source_path="manuscript.pdf"` plus a 1-based page number. Read paths are not aliases and are never normalized into durable anchors. The map also records source digests, line counts, text-anchor eligibility, compiled page count, and page-image digests, and is checked against the bundle manifest before a provider starts.
+
+Evidence has exactly two shapes. Source-line evidence requires a bare source path, inclusive line range, source digest, and non-empty verbatim quotation, and forbids `page`. Compiled-PDF evidence requires only `manuscript.pdf` and a 1-based page, and forbids quotations, line fields, and source digests. Revision edits likewise use bare paths and may target only sources marked `text_anchorable`. The provider JSON Schema and semantic validator are both derived from the run's frozen evidence-anchor contract, so they enforce the same distinction. PDF identity is already bound by the attempt bundle digest, manifest PDF digest, and source-map page digest and is not repeated in each evidence object.
+
+Each new run freezes the content-addressed evidence-anchor contract together with the exact review, revision, and verification prompt templates generated from it. Dynamic findings, feedback, and diffs fill deterministic placeholders without changing the frozen base task. Same-route resume and retry therefore reuse the original template, task identity, input digest, and compatible native session even if the installed renderer later changes.
+
+A compiled-PDF anchor proves only the identity of a rendered page in the immutable bundle. It does not prove the finding's interpretation or any quoted page text. Reviewers should prefer source-line evidence for textual claims and use page anchors for layout, figures, color, labels, rendering, and other visual properties that source text cannot establish. The human finding-decision gate checks that visual interpretation. Neither native PDF text extraction, OCR, nor model-generated visual transcription is used as textual authority.
 
 ## Durable workflow
 
@@ -114,9 +145,15 @@ preparing
 → completed
 ```
 
-`waiting_budget`, `failed`, and `cancelled` are pause or terminal states. A task is the stable logical unit keyed by run, stage, role, route, and input digest. Every new or resumed model turn creates an immutable attempt. Completed tasks with the same input digest are reused; failed or interrupted work appends a new attempt.
+`waiting_budget`, `failed`, and `cancelled` are pause or terminal states. A task is the stable logical unit keyed by run, stage, role, route, and base-input digest. Correction diagnostics change only the attempt prompt digest, not task identity. Every new or resumed model turn creates an immutable attempt. A resume attempt records its known session ID when it begins; a new session is filled exactly once with compare-and-set semantics and cannot be replaced at completion. Completed tasks with the same input digest are reused; failed or interrupted work appends a new attempt. Ctrl+C finishes active attempts as `interrupted` while leaving the run at its resumable workflow stage; it does not imply durable run cancellation.
 
-Review aggregation performs schema and anchor validation, exact-fingerprint deduplication, provenance preservation, and severity ordering only. It does not ask a consensus model or perform semantic clustering. The visual transcriber supplies page text but cannot submit findings or validate its own output. Confirmed findings are passed to the read-only Scribe, whose exact, non-overlapping edits are applied to a separate snapshot and compiled. An independent Verifier checks resolution and regression. A failed verification returns to patch approval and never starts an automatic infinite loop.
+Structured outputs are accepted atomically. JSON syntax is checked first, then all Pydantic schema errors are normalized, and semantic anchor or workflow validation runs only after the schema is complete. Semantic validation accumulates every independently decidable issue while skipping checks whose prerequisites are absent. Any issue rejects the whole output, so no finding, patch, or verification is partially materialized. Runtime provenance, artifact access, PDF I/O, SQLite, and internal state failures remain infrastructure errors rather than model-correctable diagnostics.
+
+Each validation report binds the output artifact, frozen schema digest, and attempt bundle digest. Reports contain stable error codes, RFC 6901 JSON Pointers, bounded expected and actual values, and bounded diffs where an exact target exists. They contain no attempt-specific timestamp or random field, so identical invalid output under the same bindings has the same artifact digest. PDF page anchors are shape- and page-range-validated without extracting or transcribing page text.
+
+An initial base turn may receive one automatic same-session correction. If that correction also fails, the mutation stops. A later same-route resume or retry loads the latest durable report and adds exactly one correction attempt without replaying the base prompt. An interrupted correction reuses its exact recorded prompt artifact. A different named route creates a new task and session with the full base prompt plus the compatible prior report. Reports are never recomputed during recovery; missing, corrupt, wrongly typed, or mismatched report artifacts are infrastructure failures.
+
+Review aggregation performs schema and anchor validation, exact-fingerprint deduplication, provenance preservation, and severity ordering only. It does not ask a consensus model or perform semantic clustering. Confirmed findings are passed to the read-only Scribe, whose exact, non-overlapping edits are applied to a separate snapshot and compiled. An independent Verifier checks resolution and regression against the patched bundle. A failed verification returns to patch approval and never starts an automatic infinite loop.
 
 The release gate requires successful required reviews, no unresolved blocker or major finding, verified coverage of confirmed findings or a later waiver, a successful patched build, a passing Verifier, and successful patch application when changes are required.
 

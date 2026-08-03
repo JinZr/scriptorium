@@ -3,11 +3,13 @@ from .base import (
     CLAUDE_SDK_VERSION,
     CODEX_SDK_VERSION,
     RUNTIME_SDK_VERSIONS,
+    AgentCancelled,
     AgentResult,
     AgentRuntime,
     AgentStatus,
     AgentUsage,
     RuntimeUnavailable,
+    SessionStartedCallback,
 )
 
 __all__ = [
@@ -15,9 +17,11 @@ __all__ = [
     "CLAUDE_SDK_VERSION",
     "CODEX_SDK_VERSION",
     "RUNTIME_SDK_VERSIONS",
+    "AgentCancelled",
     "AgentResult",
     "AgentRuntime",
     "AgentStatus",
     "AgentUsage",
     "RuntimeUnavailable",
+    "SessionStartedCallback",
 ]

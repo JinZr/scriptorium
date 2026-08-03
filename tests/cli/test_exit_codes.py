@@ -1,7 +1,16 @@
+import asyncio
 import json
+import os
+from pathlib import Path
+import signal
+import subprocess
+import sys
+import time
+
+import pytest
 
 from scriptorium import cli
-from scriptorium.errors import ConfigurationError
+from scriptorium.errors import ConfigurationError, StateError
 
 from ._fake_service import FakeService, install_fake_service
 
@@ -70,4 +79,68 @@ def test_known_and_unexpected_errors_map_to_exit_codes(monkeypatch, capsys) -> N
     assert unexpected == {
         "ok": False,
         "error": {"code": "infrastructure_error", "message": "database unavailable"},
+    }
+
+
+def test_owner_conflict_keeps_the_stable_json_error_envelope(monkeypatch, capsys) -> None:
+    service = FakeService()
+    install_fake_service(monkeypatch, service)
+    message = (
+        "run run_1 is already being changed by run start "
+        "(pid 123, host test-host, acquired_at 2026-08-03T00:00:00+00:00, age 4s)"
+    )
+    service.error = StateError(message)
+
+    assert cli.main(["--json", "run", "resume", "run_1"]) == 1
+    output = json.loads(capsys.readouterr().out)
+    assert output == {
+        "ok": False,
+        "error": {"code": "invalid_state", "message": message},
+    }
+
+
+def test_cross_process_cancellation_uses_the_interrupted_envelope(monkeypatch, capsys) -> None:
+    service = FakeService()
+    install_fake_service(monkeypatch, service)
+    service.error = asyncio.CancelledError("cancelled by request")
+
+    assert cli.main(["--json", "run", "resume", "run_1"]) == 3
+    output = json.loads(capsys.readouterr().out)
+    assert output == {
+        "ok": False,
+        "error": {"code": "interrupted", "message": "operation interrupted"},
+    }
+
+
+def test_real_sigint_uses_exit_three_and_the_interrupted_json_envelope(tmp_path) -> None:
+    ready = tmp_path / "ready"
+    process = subprocess.Popen(
+        [sys.executable, "-m", "tests.cli._interrupt_driver", str(ready)],
+        cwd=Path(__file__).parents[2],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        close_fds=True,
+    )
+    try:
+        deadline = time.monotonic() + 5
+        while not ready.exists():
+            if process.poll() is not None:
+                pytest.fail(f"interrupt driver exited early: {process.stderr.read()}")
+            if time.monotonic() >= deadline:
+                pytest.fail("interrupt driver did not become ready")
+            time.sleep(0.02)
+        os.kill(process.pid, signal.SIGINT)
+        stdout, stderr = process.communicate(timeout=10)
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.wait(timeout=5)
+
+    assert process.returncode == 3
+    assert stderr == ""
+    assert json.loads(stdout) == {
+        "ok": False,
+        "error": {"code": "interrupted", "message": "operation interrupted"},
     }

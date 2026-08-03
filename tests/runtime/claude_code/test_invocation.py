@@ -73,7 +73,7 @@ def test_run_agent_uses_isolated_read_only_options_and_normalizes_result(
     native_config_dir = Path(options.env["CLAUDE_CONFIG_DIR"])
     assert native_config_dir != ambient_config_dir
     assert native_config_dir.name.startswith("scriptorium-claude-")
-    assert not native_config_dir.is_relative_to(session_dir.resolve())
+    assert native_config_dir.is_relative_to(session_dir.resolve())
     assert query.native_configs_ready == [True]
     assert not native_config_dir.exists()
     assert options.mcp_servers == {}
@@ -108,3 +108,23 @@ def test_run_agent_uses_isolated_read_only_options_and_normalizes_result(
             "reasoning_tokens": 0,
         },
     }
+
+
+def test_session_callback_receives_provider_session_id(tmp_path: Path) -> None:
+    session_id = "88888888-8888-4888-8888-888888888888"
+    query = FakeQuery([[_success(session_id)]])
+    seen: list[str] = []
+
+    result = asyncio.run(
+        _runtime(query).run_agent(
+            "Review.",
+            AgentRole.SUBSTANTIVE_REVIEW,
+            tmp_path,
+            {"type": "object"},
+            tmp_path / "session",
+            on_session_started=seen.append,
+        )
+    )
+
+    assert result.status == "completed"
+    assert seen == [session_id]

@@ -24,8 +24,13 @@ class FakeService:
         self.calls.append(call)
         return Result("result_1", RunStatus.REVIEWING)
 
-    def doctor(self, profile: str | None = None, budget_usd: float | None = None) -> dict:
-        self.calls.append(("doctor", profile, budget_usd))
+    def doctor(
+        self,
+        profile: str | None = None,
+        budget_usd: float | None = None,
+        revision: str = "HEAD",
+    ) -> dict:
+        self.calls.append(("doctor", profile, budget_usd, revision))
         return self.doctor_result
 
     async def start_run(self, revision: str, profile: str, budget_usd: float | None) -> Result:

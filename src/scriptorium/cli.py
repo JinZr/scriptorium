@@ -35,6 +35,7 @@ def build_parser() -> argparse.ArgumentParser:
     init_parser.add_argument("--engine", default="pdflatex")
 
     doctor_parser = commands.add_parser("doctor", help="check local configuration and dependencies")
+    doctor_parser.add_argument("--revision", default="HEAD")
     doctor_parser.add_argument("--profile")
     doctor_parser.add_argument("--budget-usd", type=_nonnegative_float)
 
@@ -118,7 +119,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     except ScriptoriumError as exc:
         _emit_error(exc.code, str(exc), json_output)
         return exc.exit_code
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, asyncio.CancelledError):
         _emit_error("interrupted", "operation interrupted", json_output)
         return 3
     except Exception as exc:
@@ -139,7 +140,11 @@ def _dispatch(arguments: argparse.Namespace) -> tuple[Any, int, str | None]:
     service = _build_service(repo)
 
     if arguments.command == "doctor":
-        result = service.doctor(profile=arguments.profile, budget_usd=arguments.budget_usd)
+        result = service.doctor(
+            profile=arguments.profile,
+            budget_usd=arguments.budget_usd,
+            revision=arguments.revision,
+        )
         exit_code = _doctor_exit_code(result)
         if exit_code:
             error = InfrastructureError if exit_code == 3 else ConfigurationError

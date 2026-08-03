@@ -8,7 +8,7 @@ from ._support import MANUSCRIPT, FakeAgentRuntime, PdfBuildingManuscriptManager
 
 
 class FailingVerifierRuntime(FakeAgentRuntime):
-    async def run_agent(self, task, role, workspace, schema, session_dir):
+    async def run_agent(self, task, role, workspace, schema, session_dir, on_session_started=None):
         if role != AgentRole.VERIFICATION:
             return await super().run_agent(task, role, workspace, schema, session_dir)
         self.run_calls[role] += 1

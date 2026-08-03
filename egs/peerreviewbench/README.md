@@ -27,11 +27,10 @@ cp egs/peerreviewbench/routes.example.toml \
   egs/peerreviewbench/.scriptorium/config.toml
 ```
 
-Edit the copied route file before running. All four review roles are used, and `visual_transcription` must point to an
-explicitly configured vision-capable route. Revision and verification routes are also present because the core
-configuration freeze validates them, but this benchmark never invokes those stages. Replace the example's zero token
-prices if model cost should be meaningful; those values are placeholders, not a claim that the configured models are
-free.
+Edit the copied route file before running. All four review roles are used. Revision and verification routes are also
+present because the core configuration freeze validates them, but this benchmark never invokes those stages. Replace
+the example's zero token prices if model cost should be meaningful; those values are placeholders, not a claim that
+the configured models are free.
 
 Docker is required only for precision evaluation. The image name is locked in `benchmark.lock.toml`, and the exact
 local image ID is frozen in each evaluation manifest. Evaluation fails before invoking either judge if the image has
@@ -87,11 +86,9 @@ recursively exposes the Markdown, figures, code, and supplementary files as norm
 neutral PDF rendering of `preprint.md` and the images listed by the dataset so the existing PDF/page bundle contract
 and figure-review role remain active.
 
-When a prepared paper has appended figures, their raster pages trigger one independent `visual_transcription` task
-before the four reviewers. It transcribes visible labels, legends, axes, and table text for PDF evidence validation;
-the transcription is not copied into reviewer workspaces and cannot create findings. This is a separately metered
-model call recorded with the other task attempts and artifacts. The benchmark does not install or use local OCR or
-Tesseract.
+Rendered pages are exposed through the frozen source map. Reviewers use exact source-line evidence for text and a
+page-only `manuscript.pdf` anchor for visual findings; OCR or model-generated transcription is not used as a text
+authority.
 
 The locked dataset contains dangling Markdown crop placeholders such as `page_1012_172_388_388.png`; these files are
 not present in the benchmark blobs. The adapter ignores only missing root-level names matching that exact conversion
@@ -105,10 +102,8 @@ The generated `benchmark.tex` is only a configuration sentinel: the core project
 The command prints the new run directory. Its atomic `run_manifest.json` freezes the Scriptorium commit, hashes of the
 relevant core, prompt, and benchmark source files, dataset and upstream revisions, a secret-free route summary and
 digest, paper selection, per-paper core run IDs, attempt provenance, prompt/schema/artifact digests, token use, cost,
-duration, finding payload digest, and status. A paper is complete only after its pre-review visual-transcription task
-(when raster pages exist) and all four review tasks complete, leaving the core run at `awaiting_decision`. Findings
-and per-role selection remain limited to the four configured reviewer roles; the transcription task contributes only
-provenance, artifacts, token usage, duration, and estimated cost.
+duration, finding payload digest, and status. A paper is complete only after all four review tasks finish, leaving the
+core run at `awaiting_decision`. Findings and per-role selection remain limited to the four configured reviewer roles.
 
 The wrapper rechecks the frozen Scriptorium commit and source-file hashes before and after every paper. It captures
 the route configuration once at startup and creates every paper project from those same frozen bytes, while still
@@ -152,7 +147,7 @@ The two modes use the exact BYOJ slugs `scriptorium_per_role_5` and `scriptorium
 
 - `main_point` is the claim;
 - `claim_full` combines the claim and explanation;
-- `evidence_full` contains quoted evidence with source locations;
+- `evidence_full` contains source-line quotations or page-only visual anchors;
 - `text` combines those judgeable fields and deliberately excludes the suggested action;
 - the nested `scriptorium` object preserves the finding ID, role, severity, category, confidence, and anchors.
 
@@ -207,6 +202,6 @@ egs/peerreviewbench/runs/
 egs/peerreviewbench/evaluations/
 ```
 
-Do not compare scores without the corresponding review and evaluation manifests: reviewer and visual-transcription
-code, routes, models, prompts, parser/schema digests, dataset revision, judge models, finding policy, cost, and latency
-are part of the result contract. The manifest's Scriptorium cost includes any pre-review transcription call.
+Do not compare scores without the corresponding review and evaluation manifests: reviewer code, routes, models,
+prompts, parser/schema digests, dataset revision, judge models, finding policy, cost, and latency are part of the result
+contract.

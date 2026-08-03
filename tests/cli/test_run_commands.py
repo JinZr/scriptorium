@@ -32,6 +32,17 @@ def test_start_emits_json_and_passes_route_inputs(monkeypatch, capsys) -> None:
     }
 
 
+def test_doctor_passes_default_and_explicit_revision(monkeypatch, capsys) -> None:
+    service = FakeService()
+    install_fake_service(monkeypatch, service)
+
+    assert cli.main(["doctor"]) == 0
+    assert service.calls[-1] == ("doctor", None, None, "HEAD")
+    assert cli.main(["doctor", "--revision", "abc123", "--profile", "quick"]) == 0
+    assert service.calls[-1] == ("doctor", "quick", None, "abc123")
+    capsys.readouterr()
+
+
 def test_run_commands_dispatch_to_service(monkeypatch, capsys) -> None:
     service = FakeService()
     install_fake_service(monkeypatch, service)

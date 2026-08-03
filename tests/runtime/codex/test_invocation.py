@@ -5,6 +5,8 @@ from dataclasses import asdict
 import json
 from pathlib import Path
 
+import pytest
+
 from scriptorium.domain import AgentRole
 from scriptorium.runtime import AgentResult, AgentRuntime, AgentUsage
 
@@ -136,6 +138,52 @@ def test_resume_agent_reapplies_workspace_role_and_schema(tmp_path: Path) -> Non
                 "effort": "high",
                 "model": "test-model",
                 "output_schema": schema,
+                "sandbox": "read-only",
+            },
+        )
+    ]
+
+
+def test_session_callback_runs_before_the_turn_and_errors_propagate(tmp_path: Path) -> None:
+    thread = FakeThread("thread_1", result=make_result())
+    runtime = make_runtime(FakeClient(thread))
+    seen: list[str] = []
+
+    result = asyncio.run(
+        runtime.run_agent(
+            "Review.",
+            AgentRole.SUBSTANTIVE_REVIEW,
+            tmp_path,
+            {"type": "object"},
+            tmp_path / "session",
+            on_session_started=seen.append,
+        )
+    )
+
+    assert result.status == "completed"
+    assert seen == ["thread_1"]
+
+    async def fail_callback(_thread_id: str) -> None:
+        raise RuntimeError("session persistence failed")
+
+    with pytest.raises(RuntimeError, match="session persistence failed"):
+        asyncio.run(
+            runtime.run_agent(
+                "Review again.",
+                AgentRole.SUBSTANTIVE_REVIEW,
+                tmp_path,
+                {"type": "object"},
+                tmp_path / "session",
+                on_session_started=fail_callback,
+            )
+        )
+    assert thread.run_calls == [
+        (
+            "Review.",
+            {
+                "effort": "high",
+                "model": "test-model",
+                "output_schema": {"type": "object"},
                 "sandbox": "read-only",
             },
         )

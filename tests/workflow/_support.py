@@ -1,4 +1,5 @@
 from collections import Counter
+from dataclasses import replace
 from hashlib import sha256
 import json
 from pathlib import Path
@@ -52,13 +53,15 @@ class FakeAgentRuntime:
         self.session_dirs = {}
         self.session_dir_calls = []
 
-    async def run_agent(self, task, role, workspace, schema, session_dir):
+    async def run_agent(self, task, role, workspace, schema, session_dir, on_session_started=None):
         self.run_calls[role] += 1
         self.tasks[role] = task
         self.workspaces[role] = workspace
         self.session_dirs[role] = session_dir
         self.session_dir_calls.append((role, session_dir))
         ordinal = self.run_calls[role]
+        if on_session_started is not None:
+            on_session_started(f"thread-{role.value}-{ordinal}")
         if role == AgentRole.COPYEDIT and self.interrupt_copyedit_once and ordinal == 1:
             return self._result(role, ordinal, "interrupted", None)
         if role in {AgentRole.SUBSTANTIVE_REVIEW, AgentRole.COPYEDIT}:
@@ -73,11 +76,22 @@ class FakeAgentRuntime:
             raise AssertionError(f"unexpected role: {role}")
         return self._result(role, ordinal, "completed", output)
 
-    async def resume_agent(self, thread_id, task, role, workspace, schema, session_dir):
+    async def resume_agent(
+        self,
+        thread_id,
+        task,
+        role,
+        workspace,
+        schema,
+        session_dir,
+        on_session_started=None,
+    ):
         self.resume_calls.append(role)
         self.tasks[role] = task
         assert session_dir == self.session_dirs[role]
         self.session_dir_calls.append((role, session_dir))
+        if on_session_started is not None:
+            on_session_started(thread_id)
         if role == AgentRole.COPYEDIT:
             output = {"summary": "No copyediting findings.", "findings": []}
         elif role == AgentRole.SUBSTANTIVE_REVIEW:
@@ -86,7 +100,7 @@ class FakeAgentRuntime:
             output = self._revision_output(task, workspace)
         else:
             raise AssertionError(f"unexpected resumed role: {role}")
-        return self._result(role, 2, "completed", output)
+        return replace(self._result(role, 2, "completed", output), thread_id=thread_id)
 
     @staticmethod
     def _review_output(role, workspace):
@@ -107,7 +121,6 @@ class FakeAgentRuntime:
                             "start_line": 3,
                             "end_line": 3,
                             "source_digest": sha256(source.read_bytes()).hexdigest(),
-                            "page": 1,
                             "quoted_text": "The result is teh clear.",
                         }
                     ],
@@ -120,10 +133,12 @@ class FakeAgentRuntime:
 
     @staticmethod
     def _revision_output(task, workspace):
-        finding_ids = re.findall(r'"id": "(finding_[^"]+)"', task)
+        finding_ids = re.findall(r'"id"\s*:\s*"(finding_[^"]+)"', task)
         source = workspace / "sources" / "main.tex"
         replacement = (
-            "The result is clear and precise." if "Human rejection feedback:" in task else "The result is clear."
+            "The result is clear and precise."
+            if "Human rejection feedback:\nnull" not in task
+            else "The result is clear."
         )
         return {
             "summary": "Correct the result sentence.",
@@ -143,7 +158,7 @@ class FakeAgentRuntime:
 
     @staticmethod
     def _verification_output(task):
-        finding_ids = re.findall(r'"id": "(finding_[^"]+)"', task)
+        finding_ids = re.findall(r'"id"\s*:\s*"(finding_[^"]+)"', task)
         return {
             "verdict": "pass",
             "summary": "The approved edit resolves the finding without regression.",

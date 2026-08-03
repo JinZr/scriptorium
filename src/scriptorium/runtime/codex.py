@@ -11,7 +11,29 @@ from types import SimpleNamespace
 from typing import Any
 
 from ..domain import AgentRole
-from .base import CODEX_SDK_VERSION, AgentResult, AgentStatus, AgentUsage, RuntimeUnavailable, _role_instructions
+from .base import (
+    CODEX_SDK_VERSION,
+    AgentCancelled,
+    AgentResult,
+    AgentStatus,
+    AgentUsage,
+    RuntimeUnavailable,
+    SessionStartedCallback,
+    _notify_session_started,
+    _role_instructions,
+    _SessionStartedCallbackError,
+)
+
+_LATE_TURN_START_SECONDS = 1.0
+_CANCEL_RPC_SECONDS = 2.0
+_CANCEL_DRAIN_SECONDS = 2.0
+
+
+class _CodexTurnCancelled(Exception):
+    def __init__(self, turn: Any | None, cleanup_error: str | None, turn_id: str | None = None) -> None:
+        self.turn = turn
+        self.cleanup_error = cleanup_error
+        self.turn_id = turn_id
 
 
 class CodexAgentRuntime:
@@ -58,39 +80,84 @@ class CodexAgentRuntime:
         workspace: Path,
         schema: Mapping[str, object],
         session_dir: Path,
+        on_session_started: SessionStartedCallback | None = None,
     ) -> AgentResult:
         thread_id: str | None = None
         notifications: list[dict[str, Any]] = []
+        turn: Any = None
+        cancellation: _CodexTurnCancelled | asyncio.CancelledError | None = None
+        callback_error: Exception | None = None
+        runtime_error: Exception | None = None
+        context_cleanup_error: str | None = None
         try:
             async with self._client_factory() as client:
-                thread = await client.thread_start(
-                    approval_mode=self._approval_mode,
-                    config={
-                        "model_reasoning_effort": self.reasoning,
-                        "project_root_markers": ["manifest.json"],
-                    },
-                    cwd=str(workspace.resolve()),
-                    developer_instructions=_role_instructions(role),
-                    model=self.model,
-                    model_provider=self.provider,
-                    sandbox=self._sandbox,
-                )
-                thread_id = str(thread.id)
-                turn = await _run_thread_turn(
-                    thread,
-                    task,
-                    {
-                        "effort": self.reasoning,
-                        "model": self.model,
-                        "output_schema": dict(schema),
-                        "sandbox": self._sandbox,
-                    },
-                    notifications,
-                )
-        except asyncio.CancelledError:
-            raise
+                try:
+                    thread = await client.thread_start(
+                        approval_mode=self._approval_mode,
+                        config={
+                            "model_reasoning_effort": self.reasoning,
+                            "project_root_markers": ["manifest.json"],
+                        },
+                        cwd=str(workspace.resolve()),
+                        developer_instructions=_role_instructions(role),
+                        model=self.model,
+                        model_provider=self.provider,
+                        sandbox=self._sandbox,
+                    )
+                    thread_id = str(thread.id)
+                    await _notify_session_started(on_session_started, thread_id)
+                    turn = await _run_thread_turn(
+                        thread,
+                        task,
+                        {
+                            "effort": self.reasoning,
+                            "model": self.model,
+                            "output_schema": dict(schema),
+                            "sandbox": self._sandbox,
+                        },
+                        notifications,
+                    )
+                except _SessionStartedCallbackError as exc:
+                    callback_error = exc.error
+                except _CodexTurnCancelled as exc:
+                    cancellation = exc
+                except asyncio.CancelledError as exc:
+                    cancellation = exc
+                except Exception as exc:
+                    runtime_error = exc
+        except asyncio.CancelledError as exc:
+            if cancellation is None:
+                cancellation = exc
+            else:
+                context_cleanup_error = "Codex client cleanup was cancelled"
         except Exception as exc:
-            return self._failed_result(thread_id, exc, notifications)
+            if cancellation is not None or callback_error is not None or runtime_error is not None:
+                context_cleanup_error = str(exc) or type(exc).__name__
+            else:
+                runtime_error = exc
+        if callback_error is not None:
+            if context_cleanup_error:
+                raise callback_error from RuntimeError(context_cleanup_error)
+            raise callback_error
+        if cancellation is not None:
+            cancelled_turn = cancellation.turn if isinstance(cancellation, _CodexTurnCancelled) else turn
+            turn_id = cancellation.turn_id if isinstance(cancellation, _CodexTurnCancelled) else None
+            cleanup_error = cancellation.cleanup_error if isinstance(cancellation, _CodexTurnCancelled) else None
+            raise AgentCancelled(
+                self._interrupted_result(
+                    thread_id,
+                    cancelled_turn,
+                    notifications,
+                    _join_errors(cleanup_error, context_cleanup_error),
+                    turn_id,
+                )
+            )
+        if runtime_error is not None:
+            if context_cleanup_error:
+                runtime_error = RuntimeError(
+                    f"{str(runtime_error) or type(runtime_error).__name__}; " f"native cleanup: {context_cleanup_error}"
+                )
+            return self._failed_result(thread_id, runtime_error, notifications)
         return self._normalize_result(thread_id, turn, notifications)
 
     async def resume_agent(
@@ -101,40 +168,133 @@ class CodexAgentRuntime:
         workspace: Path,
         schema: Mapping[str, object],
         session_dir: Path,
+        on_session_started: SessionStartedCallback | None = None,
     ) -> AgentResult:
         notifications: list[dict[str, Any]] = []
+        resumed_thread_id = thread_id
+        turn: Any = None
+        cancellation: _CodexTurnCancelled | asyncio.CancelledError | None = None
+        callback_error: Exception | None = None
+        runtime_error: Exception | None = None
+        context_cleanup_error: str | None = None
         try:
             async with self._client_factory() as client:
-                thread = await client.thread_resume(
-                    thread_id,
-                    approval_mode=self._approval_mode,
-                    config={
-                        "model_reasoning_effort": self.reasoning,
-                        "project_root_markers": ["manifest.json"],
-                    },
-                    cwd=str(workspace.resolve()),
-                    developer_instructions=_role_instructions(role),
-                    model=self.model,
-                    model_provider=self.provider,
-                    sandbox=self._sandbox,
-                )
-                resumed_thread_id = str(thread.id)
-                turn = await _run_thread_turn(
-                    thread,
-                    task,
-                    {
-                        "effort": self.reasoning,
-                        "model": self.model,
-                        "output_schema": dict(schema),
-                        "sandbox": self._sandbox,
-                    },
-                    notifications,
-                )
-        except asyncio.CancelledError:
-            raise
+                try:
+                    thread = await client.thread_resume(
+                        thread_id,
+                        approval_mode=self._approval_mode,
+                        config={
+                            "model_reasoning_effort": self.reasoning,
+                            "project_root_markers": ["manifest.json"],
+                        },
+                        cwd=str(workspace.resolve()),
+                        developer_instructions=_role_instructions(role),
+                        model=self.model,
+                        model_provider=self.provider,
+                        sandbox=self._sandbox,
+                    )
+                    resumed_thread_id = str(thread.id)
+                    await _notify_session_started(on_session_started, resumed_thread_id)
+                    turn = await _run_thread_turn(
+                        thread,
+                        task,
+                        {
+                            "effort": self.reasoning,
+                            "model": self.model,
+                            "output_schema": dict(schema),
+                            "sandbox": self._sandbox,
+                        },
+                        notifications,
+                    )
+                except _SessionStartedCallbackError as exc:
+                    callback_error = exc.error
+                except _CodexTurnCancelled as exc:
+                    cancellation = exc
+                except asyncio.CancelledError as exc:
+                    cancellation = exc
+                except Exception as exc:
+                    runtime_error = exc
+        except asyncio.CancelledError as exc:
+            if cancellation is None:
+                cancellation = exc
+            else:
+                context_cleanup_error = "Codex client cleanup was cancelled"
         except Exception as exc:
-            return self._failed_result(thread_id, exc, notifications)
+            if cancellation is not None or callback_error is not None or runtime_error is not None:
+                context_cleanup_error = str(exc) or type(exc).__name__
+            else:
+                runtime_error = exc
+        if callback_error is not None:
+            if context_cleanup_error:
+                raise callback_error from RuntimeError(context_cleanup_error)
+            raise callback_error
+        if cancellation is not None:
+            cancelled_turn = cancellation.turn if isinstance(cancellation, _CodexTurnCancelled) else turn
+            turn_id = cancellation.turn_id if isinstance(cancellation, _CodexTurnCancelled) else None
+            cleanup_error = cancellation.cleanup_error if isinstance(cancellation, _CodexTurnCancelled) else None
+            raise AgentCancelled(
+                self._interrupted_result(
+                    resumed_thread_id,
+                    cancelled_turn,
+                    notifications,
+                    _join_errors(cleanup_error, context_cleanup_error),
+                    turn_id,
+                )
+            )
+        if runtime_error is not None:
+            if context_cleanup_error:
+                runtime_error = RuntimeError(
+                    f"{str(runtime_error) or type(runtime_error).__name__}; " f"native cleanup: {context_cleanup_error}"
+                )
+            return self._failed_result(resumed_thread_id, runtime_error, notifications)
         return self._normalize_result(resumed_thread_id, turn, notifications)
+
+    def _interrupted_result(
+        self,
+        thread_id: str | None,
+        turn: Any | None,
+        notifications: list[dict[str, Any]],
+        cleanup_error: str | None,
+        turn_id: str | None = None,
+    ) -> AgentResult:
+        error = _error_message(getattr(turn, "error", None)) or "Codex turn was cancelled."
+        if cleanup_error:
+            error = f"{error} Native cleanup: {cleanup_error}"
+        if turn is not None:
+            usage = _normalize_usage(getattr(turn, "usage", None))
+            return AgentResult(
+                thread_id=thread_id,
+                status="interrupted",
+                final_response=None,
+                usage=usage,
+                trace_jsonl=_trace_jsonl(
+                    getattr(turn, "id", None) or turn_id,
+                    "interrupted",
+                    getattr(turn, "items", ()),
+                    usage,
+                    notifications,
+                ),
+                runtime_name="codex",
+                runtime_version=self._runtime_version,
+                model=self.model,
+                model_provider=self.provider,
+                duration_ms=_optional_int(getattr(turn, "duration_ms", None)),
+                error=error,
+            )
+        usage = AgentUsage()
+        return AgentResult(
+            thread_id=thread_id,
+            status="interrupted",
+            final_response=None,
+            usage=usage,
+            trace_jsonl=_trace_jsonl(turn_id, "interrupted", (), usage, notifications),
+            runtime_name="codex",
+            runtime_version=self._runtime_version,
+            model=self.model,
+            model_provider=self.provider,
+            duration_ms=None,
+            error=error,
+        )
 
     def _normalize_result(
         self,
@@ -207,7 +367,27 @@ async def _run_thread_turn(
     if not hasattr(thread, "turn"):
         return await thread.run(task, **kwargs)
 
-    handle = await thread.turn(task, **kwargs)
+    # openai-codex 0.144.4 starts turns in asyncio.to_thread(), so shielding keeps
+    # the late turn handle reachable long enough to interrupt it after cancellation.
+    start_task = asyncio.create_task(thread.turn(task, **kwargs))
+    try:
+        handle = await asyncio.shield(start_task)
+    except asyncio.CancelledError:
+        handle, start_error = await _wait_for_late_handle(start_task)
+        if handle is None:
+            raise _CodexTurnCancelled(None, start_error)
+        turn, cleanup_error = await _interrupt_turn(handle, notifications)
+        raise _CodexTurnCancelled(turn, _join_errors(start_error, cleanup_error), str(handle.id))
+
+    collect_task = asyncio.create_task(_collect_thread_turn(handle, notifications))
+    try:
+        return await asyncio.shield(collect_task)
+    except asyncio.CancelledError:
+        turn, cleanup_error = await _interrupt_turn(handle, notifications, collect_task)
+        raise _CodexTurnCancelled(turn, cleanup_error, str(handle.id))
+
+
+async def _collect_thread_turn(handle: Any, notifications: list[dict[str, Any]]) -> Any:
     stream = handle.stream()
     items: list[Any] = []
     usage: Any = None
@@ -246,6 +426,62 @@ async def _run_thread_turn(
         items=items,
         usage=usage,
     )
+
+
+async def _wait_for_late_handle(start_task: asyncio.Task[Any]) -> tuple[Any | None, str | None]:
+    try:
+        return await asyncio.wait_for(asyncio.shield(start_task), _LATE_TURN_START_SECONDS), None
+    except asyncio.TimeoutError:
+        # The underlying SDK thread cannot be cancelled; consume its eventual result
+        # while the containment worker remains responsible for process-level cleanup.
+        start_task.add_done_callback(_consume_task_result)
+        return None, "turn handle was not available before the cancellation deadline"
+    except Exception as exc:
+        return None, str(exc) or "turn start failed during cancellation"
+
+
+async def _interrupt_turn(
+    handle: Any,
+    notifications: list[dict[str, Any]],
+    collect_task: asyncio.Task[Any] | None = None,
+) -> tuple[Any | None, str | None]:
+    errors: list[str] = []
+    if collect_task is None:
+        collect_task = asyncio.create_task(_collect_thread_turn(handle, notifications))
+    try:
+        await asyncio.wait_for(asyncio.shield(handle.interrupt()), _CANCEL_RPC_SECONDS)
+    except Exception as exc:
+        errors.append(f"interrupt failed: {str(exc) or type(exc).__name__}")
+
+    try:
+        turn = await asyncio.wait_for(asyncio.shield(collect_task), _CANCEL_DRAIN_SECONDS)
+    except asyncio.TimeoutError:
+        errors.append("interrupted turn did not reach a terminal event before the drain deadline")
+        collect_task.cancel()
+        await _consume_cancelled_task(collect_task)
+        turn = None
+    except Exception as exc:
+        errors.append(f"interrupted turn drain failed: {str(exc) or type(exc).__name__}")
+        turn = None
+    return turn, "; ".join(errors) or None
+
+
+async def _consume_cancelled_task(task: asyncio.Task[Any]) -> None:
+    try:
+        await task
+    except BaseException:
+        pass
+
+
+def _consume_task_result(task: asyncio.Task[Any]) -> None:
+    try:
+        task.result()
+    except BaseException:
+        pass
+
+
+def _join_errors(*errors: str | None) -> str | None:
+    return "; ".join(error for error in errors if error) or None
 
 
 def _normalize_usage(value: Any) -> AgentUsage:
