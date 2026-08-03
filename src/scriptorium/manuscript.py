@@ -81,9 +81,17 @@ class ManuscriptManager:
         self.repo = repo.resolve()
 
     def resolve_revision(self, revision: str) -> FrozenRevision:
-        commit = self._git("rev-parse", "--verify", "--end-of-options", f"{revision}^{{commit}}").strip()
-        tree = self._git("rev-parse", "--end-of-options", f"{commit}^{{tree}}").strip()
+        commit = self._git_object_id(self._git("rev-parse", "--verify", "--end-of-options", f"{revision}^{{commit}}"))
+        # Some Apple Git releases echo --end-of-options as a revision unless --verify is present.
+        tree = self._git_object_id(self._git("rev-parse", "--verify", "--end-of-options", f"{commit}^{{tree}}"))
         return FrozenRevision(commit, tree)
+
+    @staticmethod
+    def _git_object_id(output: str) -> str:
+        lines = output.splitlines()
+        if len(lines) != 1 or re.fullmatch(r"[0-9a-f]+", lines[0]) is None:
+            raise InfrastructureError("git returned an invalid object ID")
+        return lines[0]
 
     def create_snapshot(self, revision: FrozenRevision, destination: Path) -> None:
         if destination.exists() and any(destination.iterdir()):
