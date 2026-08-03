@@ -1,10 +1,52 @@
 import asyncio
 from collections import Counter
 
+import pytest
+
 from scriptorium.domain import AgentRole, AttemptStatus, RunStatus, TaskStatus
+from scriptorium.runtime import AgentCancelled
 from scriptorium.service import ScriptoriumService
 
 from ._support import FakeAgentRuntime, PdfBuildingManuscriptManager, make_repository
+
+
+class CancellingRuntime(FakeAgentRuntime):
+    async def run_agent(self, task, role, workspace, schema, session_dir, on_session_started=None):
+        if role != AgentRole.COPYEDIT:
+            return await super().run_agent(
+                task,
+                role,
+                workspace,
+                schema,
+                session_dir,
+                on_session_started,
+            )
+        if on_session_started is not None:
+            on_session_started("thread-copyedit-1")
+        result = self._result(role, 1, "interrupted", None)
+        raise AgentCancelled(result)
+
+
+def test_runtime_cancellation_durably_interrupts_the_attempt(tmp_path):
+    repo = make_repository(tmp_path)
+    runtime = CancellingRuntime()
+
+    with ScriptoriumService(
+        repo,
+        runtime_factory=lambda route: runtime,
+        manuscript_manager=PdfBuildingManuscriptManager(repo),
+    ) as service:
+        with pytest.raises(asyncio.CancelledError):
+            asyncio.run(service.start_run("HEAD", "quick", None))
+
+        run = service.database.list_runs()[0]
+        copyedit = next(task for task in service.database.list_tasks(run.id) if task.role == AgentRole.COPYEDIT)
+        attempt = service.database.list_attempts(copyedit.id)[0]
+
+        assert run.status == RunStatus.REVIEWING
+        assert copyedit.status == TaskStatus.INTERRUPTED
+        assert attempt.status == AttemptStatus.INTERRUPTED
+        assert attempt.thread_id == "thread-copyedit-1"
 
 
 def test_resume_reuses_completed_review_and_appends_attempt_for_interrupted_lane(tmp_path):

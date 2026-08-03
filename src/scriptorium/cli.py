@@ -118,7 +118,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     except ScriptoriumError as exc:
         _emit_error(exc.code, str(exc), json_output)
         return exc.exit_code
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, asyncio.CancelledError):
         _emit_error("interrupted", "operation interrupted", json_output)
         return 3
     except Exception as exc:

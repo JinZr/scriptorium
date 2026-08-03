@@ -25,6 +25,9 @@ State lives under the manuscript repository:
     patched/
     sessions/<normalized-runtime-role-route-digest>/
   locks/
+    <run-id>.lock
+    <run-id>.providers.lock
+  control/cancel/
 ```
 
 `scriptorium init` adds `.scriptorium/` to `.gitignore`. SQLite uses WAL, foreign keys, a busy timeout, numbered SQL migrations, and short transactions. Git, LaTeX, and model calls happen outside transactions.
@@ -33,9 +36,15 @@ State lives under the manuscript repository:
 
 A per-run kernel `flock` is the sole authority for whether a live process owns a run. The lock file may also contain same-inode JSON describing the apparent owner and operation, but that content is diagnostic only: it may be stale or incomplete and must never be used to override, break, or infer the absence of the kernel lock. Replacing or renaming the lock file would create a different inode and is not a valid ownership update.
 
-The protected run mutations are `run start` after its run ID is reserved, `run resume`, `run retry`, `run cancel`, `finding decide`, `patch decide`, and `patch apply`. Each holds the same per-run lock across its state-changing operation. If another live owner holds the lock, the mutation rejects without changing SQLite, artifacts, or the author worktree. In particular, `run cancel` is safe-rejecting; it does not signal, kill, or modify a run owned by another process.
+The protected run mutations are `run start` after its run ID is reserved, `run resume`, `run retry`, `run cancel`, `finding decide`, `patch decide`, and `patch apply`. Each holds the same per-run lock across its state-changing operation. If another live owner holds the lock, ordinary mutations reject without changing SQLite, artifacts, or the author worktree.
 
-Recovery of leftover `running` attempts happens only after `run resume`, `run retry`, or `run cancel` acquires the per-run lock. `run status`, `run report`, and `run gate` remain read-only, do not acquire mutation ownership, and never recover or rewrite state. After a driver exits unexpectedly, stale attempts therefore remain visible until one of those recovery-capable lifecycle commands safely acquires ownership and records their interruption.
+`run cancel` is the cooperative control operation. It atomically publishes a durable request under `control/cancel/` without changing SQLite, then waits up to 15 seconds for the active owner to observe it. The owner cancels its workflow tasks, waits for provider cleanup, and records interrupted attempts, cancelled tasks, the cancelled run, and one `run.cancelled` event before removing the request. A request left by a crashed requester or owner is replayed idempotently by the next mutation that obtains the run lock. Read-only commands never consume it.
+
+Every production runtime attempt executes in a foreground, per-attempt containment worker that owns a separate POSIX session and process group. It is not a background service, queue, or distributed worker. Workers hold a shared `<run-id>.providers.lock` while provider descendants may still exist. After reporting a terminal result, the worker stays alive with that barrier until its parent reaps the process group; if the parent disappears, control-channel EOF starts the same watchdog cleanup. A new owner takes the main run lock first and then waits up to 15 seconds for an exclusive pass through this provider cleanup barrier before recovering attempts or starting new work. The provider lock is not mutation authority, and persisted PID, PGID, or diagnostic owner JSON is never used to kill or reclaim work.
+
+Containment covers the pinned SDK harnesses and descendants that inherit their POSIX session. A third-party child that deliberately starts a different session falls outside this guarantee; the supported harness versions must not detach in that way.
+
+Recovery of leftover `running` attempts happens only after `run resume`, `run retry`, or `run cancel` acquires the per-run lock and passes the provider cleanup barrier. `run status`, `run report`, and `run gate` remain read-only, do not acquire mutation ownership, and never recover, consume cancellation requests, or rewrite state. After a driver exits unexpectedly, stale attempts therefore remain visible until one of those recovery-capable lifecycle commands safely acquires ownership and records their interruption.
 
 Runtime-native session state stays under the stable run session directory, outside disposable task workspaces. Antigravity keeps separate `save/` and `app/` children there. Rebuilding a task bundle therefore cannot erase resumable native state.
 
@@ -67,6 +76,7 @@ class AgentRuntime(Protocol):
         workspace: Path,
         schema: Mapping[str, object],
         session_dir: Path,
+        on_session_started: SessionStartedCallback | None = None,
     ) -> AgentResult: ...
 
     async def resume_agent(
@@ -77,10 +87,11 @@ class AgentRuntime(Protocol):
         workspace: Path,
         schema: Mapping[str, object],
         session_dir: Path,
+        on_session_started: SessionStartedCallback | None = None,
     ) -> AgentResult: ...
 ```
 
-`AgentResult` contains normalized thread status, structured response text, token usage, JSONL trace, runtime/model metadata, duration, and error information. Native SDK objects, notifications, exceptions, and configuration do not cross this adapter boundary. The database column remains named `thread_id`, but its cross-runtime meaning is an opaque native session or conversation ID.
+`AgentResult` contains normalized thread status, structured response text, token usage, JSONL trace, runtime/model metadata, duration, and error information. The session-start callback persists a newly allocated opaque native session ID while the attempt is still running. Runtime cancellation carries a normalized interrupted result back across the boundary so Armarius can durably finish the attempt before cancellation propagates. Native SDK objects, notifications, exceptions, and configuration do not cross this adapter boundary. The database column remains named `thread_id`, but its cross-runtime meaning is an opaque native session or conversation ID.
 
 Each adapter is bound to one exact native harness version:
 
@@ -122,7 +133,7 @@ preparing
 → completed
 ```
 
-`waiting_budget`, `failed`, and `cancelled` are pause or terminal states. A task is the stable logical unit keyed by run, stage, role, route, and input digest. Every new or resumed model turn creates an immutable attempt. Completed tasks with the same input digest are reused; failed or interrupted work appends a new attempt.
+`waiting_budget`, `failed`, and `cancelled` are pause or terminal states. A task is the stable logical unit keyed by run, stage, role, route, and input digest. Every new or resumed model turn creates an immutable attempt. A resume attempt records its known session ID when it begins; a new session is filled exactly once with compare-and-set semantics and cannot be replaced at completion. Completed tasks with the same input digest are reused; failed or interrupted work appends a new attempt. Ctrl+C finishes active attempts as `interrupted` while leaving the run at its resumable workflow stage; it does not imply durable run cancellation.
 
 Review aggregation performs schema and anchor validation, exact-fingerprint deduplication, provenance preservation, and severity ordering only. It does not ask a consensus model or perform semantic clustering. The visual transcriber supplies page text but cannot submit findings or validate its own output. Confirmed findings are passed to the read-only Scribe, whose exact, non-overlapping edits are applied to a separate snapshot and compiled. An independent Verifier checks resolution and regression. A failed verification returns to patch approval and never starts an automatic infinite loop.
 

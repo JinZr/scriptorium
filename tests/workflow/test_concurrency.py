@@ -14,7 +14,7 @@ class ConcurrentFakeAgentRuntime(FakeAgentRuntime):
         self.active = 0
         self.max_active = 0
 
-    async def run_agent(self, task, role, workspace, schema, session_dir):
+    async def run_agent(self, task, role, workspace, schema, session_dir, on_session_started=None):
         self.active += 1
         self.max_active = max(self.max_active, self.active)
         await asyncio.sleep(0)

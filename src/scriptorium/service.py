@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from contextlib import contextmanager
+import asyncio
+from contextlib import contextmanager, suppress
 from dataclasses import asdict, is_dataclass
 from datetime import datetime, timezone
 from enum import Enum
@@ -15,7 +16,8 @@ import socket
 import sqlite3
 import stat
 import subprocess
-from typing import Any, Iterator
+import time
+from typing import Any, Awaitable, Callable, Iterator
 
 from .artifacts import ArtifactStore
 from .config import find_repo, load_local_config, load_project_config, validate_ready
@@ -35,6 +37,14 @@ from .manuscript import ManuscriptManager
 from .runtime import RUNTIME_SDK_VERSIONS
 from .storage import ConflictError, Database, NotFoundError as StorageNotFoundError, StorageError
 from .workflow import Armarius, RuntimeFactory
+
+
+class _RunBusyError(StateError):
+    pass
+
+
+_CANCEL_WAIT_SECONDS = 15.0
+_CANCEL_POLL_SECONDS = 0.2
 
 
 class ScriptoriumService:
@@ -196,8 +206,13 @@ class ScriptoriumService:
         # Reserve the trusted ID before any run files or database rows exist so ownership starts first.
         run_id = new_id("run")
         with self._run_operation(run_id, "run start"):
-            await self.armarius.start_run(revision, profile, budget_usd, run_id=run_id)
-            return self.get_run(run_id)
+            return await self._run_with_cancel_watcher(
+                run_id,
+                self._run_and_build_view(
+                    run_id,
+                    lambda: self.armarius.start_run(revision, profile, budget_usd, run_id=run_id),
+                ),
+            )
 
     def get_run(self, run_id: str) -> dict[str, Any]:
         run = self._storage(self.database.get_run, run_id)
@@ -220,8 +235,20 @@ class ScriptoriumService:
     async def resume_run(self, run_id: str) -> dict[str, Any]:
         run = self._storage(self.database.get_run, run_id)
         with self._run_operation(run.id, "run resume"):
-            await self.armarius.resume_run(run.id)
-            return self.get_run(run.id)
+            self._wait_for_provider_cleanup(run.id)
+            request = self._complete_pending_cancel(run.id, provider_cleanup_ready=True)
+            if request is not None:
+                current = self._storage(self.database.get_run, run.id)
+                if current.status == RunStatus.CANCELLED:
+                    raise StateError(f"run {run.id} was cancelled by request {request['request_id']}")
+                raise StateError(
+                    f"run {run.id} cannot be resumed while {current.status.value}; "
+                    f"cancellation request {request['request_id']} was cleared"
+                )
+            return await self._run_with_cancel_watcher(
+                run.id,
+                self._run_and_build_view(run.id, lambda: self.armarius.resume_run(run.id)),
+            )
 
     async def retry_task(
         self,
@@ -231,14 +258,69 @@ class ScriptoriumService:
     ) -> dict[str, Any]:
         run = self._storage(self.database.get_run, run_id)
         with self._run_operation(run.id, "run retry"):
-            await self.armarius.retry_task(run.id, task_id, route)
-            return self.get_run(run.id)
+            self._wait_for_provider_cleanup(run.id)
+            request = self._complete_pending_cancel(run.id, provider_cleanup_ready=True)
+            if request is not None:
+                current = self._storage(self.database.get_run, run.id)
+                if current.status == RunStatus.CANCELLED:
+                    raise StateError(f"run {run.id} was cancelled by request {request['request_id']}")
+                raise StateError(
+                    f"run {run.id} cannot be retried while {current.status.value}; "
+                    f"cancellation request {request['request_id']} was cleared"
+                )
+            return await self._run_with_cancel_watcher(
+                run.id,
+                self._run_and_build_view(
+                    run.id,
+                    lambda: self.armarius.retry_task(run.id, task_id, route),
+                ),
+            )
 
     def cancel_run(self, run_id: str, reason: str) -> dict[str, Any]:
+        if not reason.strip():
+            raise StateError("cancellation reason is required")
         run = self._storage(self.database.get_run, run_id)
-        with self._run_operation(run.id, "run cancel"):
-            self._storage(self.armarius.cancel_run, run.id, reason)
-            return self.get_run(run.id)
+        if run.status in {RunStatus.COMPLETED, RunStatus.FAILED, RunStatus.CANCELLED}:
+            with self._run_operation(run.id, "run cancel"):
+                request = self._complete_pending_cancel(run.id)
+                if request is not None and run.status == RunStatus.CANCELLED:
+                    return self.get_run(run.id)
+            raise StateError(f"run cannot be cancelled while {run.status.value}")
+        request = self._publish_cancel_request(run.id, reason)
+        deadline = time.monotonic() + _CANCEL_WAIT_SECONDS
+        while True:
+            try:
+                with self._run_operation(run.id, "run cancel"):
+                    remaining = max(0.0, deadline - time.monotonic())
+                    from .runtime.contained import ProviderCleanupTimeout
+
+                    try:
+                        self._wait_for_provider_cleanup(run.id, timeout=remaining)
+                    except ProviderCleanupTimeout:
+                        raise StateError(
+                            f"cancellation request {request['request_id']} remains pending for run {run.id}"
+                        ) from None
+                    self._complete_pending_cancel(run.id, provider_cleanup_ready=True)
+                    current = self._storage(self.database.get_run, run.id)
+                    if current.status == RunStatus.CANCELLED:
+                        return self.get_run(run.id)
+                    raise StateError(f"run cannot be cancelled while {current.status.value}")
+            except _RunBusyError:
+                if time.monotonic() >= deadline:
+                    pending = any(item["request_id"] == request["request_id"] for item in self._cancel_requests(run.id))
+                    if pending:
+                        raise StateError(
+                            f"cancellation request {request['request_id']} remains pending for run {run.id}"
+                        ) from None
+                    current = self._storage(self.database.get_run, run.id)
+                    if current.status == RunStatus.CANCELLED:
+                        return self.get_run(run.id)
+                    if current.status in {RunStatus.COMPLETED, RunStatus.FAILED}:
+                        raise StateError(f"run cannot be cancelled while {current.status.value}") from None
+                    raise StateError(
+                        f"cancellation request {request['request_id']} remains pending for run {run.id}"
+                    ) from None
+                time.sleep(min(_CANCEL_POLL_SECONDS, max(0.0, deadline - time.monotonic())))
 
     def list_findings(self, run_id: str):
         self._storage(self.database.get_run, run_id)
@@ -257,6 +339,7 @@ class ScriptoriumService:
     ) -> dict[str, Any]:
         initial = self._storage(self.database.get_finding, finding_id)
         with self._run_operation(initial.run_id, "finding decide"):
+            self._reject_if_pending_cancel(initial.run_id)
             finding = self._storage(self.database.get_finding, finding_id)
             run = self._storage(self.database.get_run, finding.run_id)
             if run.status in {RunStatus.COMPLETED, RunStatus.FAILED, RunStatus.CANCELLED}:
@@ -287,6 +370,7 @@ class ScriptoriumService:
     ) -> dict[str, Any]:
         initial = self._storage(self.database.get_patch, patch_id)
         with self._run_operation(initial.run_id, "patch decide"):
+            self._reject_if_pending_cancel(initial.run_id)
             patch = self._storage(self.database.get_patch, patch_id)
             run = self._storage(self.database.get_run, patch.run_id)
             if run.status != RunStatus.AWAITING_PATCH_APPROVAL:
@@ -301,6 +385,7 @@ class ScriptoriumService:
     def apply_patch(self, patch_id: str):
         initial = self._storage(self.database.get_patch, patch_id)
         with self._run_operation(initial.run_id, "patch apply"):
+            self._reject_if_pending_cancel(initial.run_id)
             patch = self._storage(self.database.get_patch, patch_id)
             run = self._storage(self.database.get_run, patch.run_id)
             if run.status != RunStatus.READY_TO_APPLY:
@@ -405,6 +490,259 @@ class ScriptoriumService:
             "reasons": reasons,
         }
 
+    async def _run_and_build_view(
+        self,
+        run_id: str,
+        operation_factory: Callable[[], Awaitable[Any]],
+    ) -> dict[str, Any]:
+        await operation_factory()
+        return self.get_run(run_id)
+
+    async def _run_with_cancel_watcher(self, run_id: str, operation) -> Any:
+        operation_task = asyncio.create_task(operation)
+        watcher = asyncio.create_task(self._wait_for_cancel_request(run_id))
+        try:
+            done, _ = await asyncio.wait(
+                {operation_task, watcher},
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+        except BaseException:
+            operation_task.cancel()
+            try:
+                await operation_task
+            except asyncio.CancelledError:
+                pass
+            finally:
+                watcher.cancel()
+                with suppress(asyncio.CancelledError):
+                    await watcher
+            raise
+
+        if operation_task in done:
+            watcher.cancel()
+            with suppress(asyncio.CancelledError):
+                await watcher
+            result = await operation_task
+            request = self._complete_pending_cancel(run_id)
+            if request is not None and self._storage(self.database.get_run, run_id).status == RunStatus.CANCELLED:
+                raise asyncio.CancelledError(f"run {run_id} was cancelled by request {request['request_id']}")
+            return result
+
+        try:
+            request = watcher.result()
+        except BaseException:
+            operation_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await operation_task
+            raise
+        operation_task.cancel()
+        result: Any = None
+        operation_error: Exception | None = None
+        try:
+            result = await operation_task
+        except asyncio.CancelledError:
+            pass
+        except Exception as exc:
+            operation_error = exc
+        self._wait_for_provider_cleanup(run_id)
+        self._complete_pending_cancel(run_id, provider_cleanup_ready=True)
+        status = self._storage(self.database.get_run, run_id).status
+        if status == RunStatus.CANCELLED:
+            interrupted = asyncio.CancelledError(f"run {run_id} was cancelled by request {request['request_id']}")
+            if operation_error is not None:
+                raise interrupted from operation_error
+            raise interrupted
+        if status in {RunStatus.COMPLETED, RunStatus.FAILED}:
+            if operation_error is not None:
+                raise operation_error
+            return result if result is not None else self.get_run(run_id)
+        if operation_error is not None:
+            raise operation_error
+        raise asyncio.CancelledError(f"run {run_id} was cancelled by request {request['request_id']}")
+
+    async def _wait_for_cancel_request(self, run_id: str) -> dict[str, Any]:
+        while True:
+            requests = self._cancel_requests(run_id)
+            if requests:
+                return requests[0]
+            await asyncio.sleep(_CANCEL_POLL_SECONDS)
+
+    def _reject_if_pending_cancel(self, run_id: str) -> None:
+        request = self._complete_pending_cancel(run_id)
+        if request is not None:
+            status = self._storage(self.database.get_run, run_id).status
+            raise StateError(
+                f"run {run_id} has pending cancellation request {request['request_id']} " f"and is now {status.value}"
+            )
+
+    def _complete_pending_cancel(
+        self,
+        run_id: str,
+        *,
+        provider_cleanup_ready: bool = False,
+    ) -> dict[str, Any] | None:
+        requests = self._cancel_requests(run_id)
+        if not requests:
+            return None
+        request = requests[0]
+        run = self._storage(self.database.get_run, run_id)
+        if run.status not in {RunStatus.COMPLETED, RunStatus.FAILED, RunStatus.CANCELLED}:
+            if not provider_cleanup_ready:
+                self._wait_for_provider_cleanup(run_id)
+            self._storage(
+                self.armarius.cancel_run,
+                run_id,
+                request["reason"],
+                request["request_id"],
+            )
+        self._remove_cancel_requests(run_id)
+        return request
+
+    def _wait_for_provider_cleanup(self, run_id: str, *, timeout: float = 15.0) -> None:
+        from .runtime.contained import wait_for_provider_cleanup
+
+        wait_for_provider_cleanup(self.repo, run_id, timeout=timeout)
+
+    def _publish_cancel_request(self, run_id: str, reason: str) -> dict[str, Any]:
+        request = {
+            "version": 1,
+            "request_id": new_id("cancel"),
+            "run_id": run_id,
+            "reason": reason,
+            "requested_at": utc_now(),
+        }
+        contents = (json.dumps(request, ensure_ascii=False, sort_keys=True) + "\n").encode("utf-8")
+        if len(contents) > 65536:
+            raise StateError("cancellation reason is too long")
+        final_name = f"{run_id}.{request['request_id']}.json"
+        temporary_name = f".{final_name}.{new_id('tmp')}"
+        with self._cancel_directory() as directory_descriptor:
+            descriptor = -1
+            try:
+                descriptor = os.open(
+                    temporary_name,
+                    os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                    0o600,
+                    dir_fd=directory_descriptor,
+                )
+                with os.fdopen(descriptor, "wb") as handle:
+                    descriptor = -1
+                    handle.write(contents)
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                # The inbox is durable before waiting, so either the current or next owner can replay it.
+                os.rename(
+                    temporary_name,
+                    final_name,
+                    src_dir_fd=directory_descriptor,
+                    dst_dir_fd=directory_descriptor,
+                )
+                os.fsync(directory_descriptor)
+            except OSError as exc:
+                with suppress(OSError):
+                    os.unlink(temporary_name, dir_fd=directory_descriptor)
+                raise InfrastructureError(f"cannot publish cancellation request for run {run_id}: {exc}") from exc
+            finally:
+                if descriptor >= 0:
+                    os.close(descriptor)
+        return request
+
+    def _cancel_requests(self, run_id: str) -> list[dict[str, Any]]:
+        requests: list[dict[str, Any]] = []
+        prefix = f"{run_id}."
+        with self._cancel_directory() as directory_descriptor:
+            for name in os.listdir(directory_descriptor):
+                if not name.startswith(prefix) or not name.endswith(".json"):
+                    continue
+                descriptor = -1
+                try:
+                    descriptor = os.open(name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=directory_descriptor)
+                    file_stat = os.fstat(descriptor)
+                    if not stat.S_ISREG(file_stat.st_mode) or file_stat.st_nlink != 1:
+                        raise InfrastructureError(f"unsafe cancellation request file: {name}")
+                    with os.fdopen(descriptor, "rb") as handle:
+                        descriptor = -1
+                        contents = handle.read(65537)
+                    if len(contents) > 65536:
+                        raise InfrastructureError(f"invalid cancellation request for run {run_id}: {name}")
+                    value = json.loads(contents.decode("utf-8"))
+                except FileNotFoundError:
+                    continue
+                except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+                    raise InfrastructureError(f"invalid cancellation request for run {run_id}: {name}") from exc
+                finally:
+                    if descriptor >= 0:
+                        os.close(descriptor)
+                if not self._valid_cancel_request(value, run_id, name):
+                    raise InfrastructureError(f"invalid cancellation request for run {run_id}: {name}")
+                value["_name"] = name
+                value["_requested_at_sort"] = datetime.fromisoformat(value["requested_at"])
+                requests.append(value)
+        return sorted(requests, key=lambda item: (item["_requested_at_sort"], item["request_id"]))
+
+    @staticmethod
+    def _valid_cancel_request(value: Any, run_id: str, name: str) -> bool:
+        expected = {"version", "request_id", "run_id", "reason", "requested_at"}
+        if not isinstance(value, dict) or set(value) != expected:
+            return False
+        if type(value["version"]) is not int or value["version"] != 1:
+            return False
+        if value.get("run_id") != run_id:
+            return False
+        request_id = value.get("request_id")
+        if not isinstance(request_id, str) or name != f"{run_id}.{request_id}.json":
+            return False
+        if not isinstance(value.get("reason"), str) or not value["reason"].strip():
+            return False
+        requested_at = value.get("requested_at")
+        if not isinstance(requested_at, str):
+            return False
+        try:
+            timestamp = datetime.fromisoformat(requested_at)
+        except ValueError:
+            return False
+        return timestamp.tzinfo is not None
+
+    def _remove_cancel_requests(self, run_id: str) -> None:
+        requests = self._cancel_requests(run_id)
+        with self._cancel_directory() as directory_descriptor:
+            for request in requests:
+                try:
+                    os.unlink(request["_name"], dir_fd=directory_descriptor)
+                except FileNotFoundError:
+                    continue
+                except OSError as exc:
+                    raise InfrastructureError(
+                        f"cannot remove cancellation request {request['request_id']}: {exc}"
+                    ) from exc
+            os.fsync(directory_descriptor)
+
+    @contextmanager
+    def _cancel_directory(self) -> Iterator[int]:
+        descriptors: list[int] = []
+        try:
+            # Walk from the trusted state directory so a linked control directory cannot redirect request I/O.
+            parent = os.open(self.state_dir, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+            descriptors.append(parent)
+            for name in ("control", "cancel"):
+                created = False
+                try:
+                    os.mkdir(name, 0o700, dir_fd=parent)
+                    created = True
+                except FileExistsError:
+                    pass
+                if created:
+                    os.fsync(parent)
+                child = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent)
+                descriptors.append(child)
+                parent = child
+            yield parent
+        except OSError as exc:
+            raise InfrastructureError(f"cannot open cancellation request directory: {exc}") from exc
+        finally:
+            for descriptor in reversed(descriptors):
+                os.close(descriptor)
+
     @contextmanager
     def _run_operation(self, run_id: str, operation: str) -> Iterator[None]:
         locks = self.state_dir / "locks"
@@ -446,7 +784,7 @@ class ScriptoriumService:
                         f"(pid {owner['pid']}, host {owner['hostname']}, "
                         f"acquired_at {owner['acquired_at']}, age {owner['age_seconds']}s)"
                     )
-                raise StateError(message) from exc
+                raise _RunBusyError(message) from exc
             try:
                 owner = {
                     "operation": operation,

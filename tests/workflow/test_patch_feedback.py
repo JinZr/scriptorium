@@ -1,4 +1,5 @@
 import asyncio
+from dataclasses import replace
 
 import pytest
 
@@ -15,7 +16,16 @@ class RecordingRevisionRuntime(FakeAgentRuntime):
         self.revision_resume_prompts = []
         self.revision_resume_thread_ids = []
 
-    async def resume_agent(self, thread_id, task, role, workspace, schema, session_dir):
+    async def resume_agent(
+        self,
+        thread_id,
+        task,
+        role,
+        workspace,
+        schema,
+        session_dir,
+        on_session_started=None,
+    ):
         if role != AgentRole.REVISION:
             return await super().resume_agent(thread_id, task, role, workspace, schema, session_dir)
         self.revision_resume_prompts.append(task)
@@ -26,7 +36,7 @@ class RecordingRevisionRuntime(FakeAgentRuntime):
             self.resume_calls.append(role)
             assert session_dir == self.session_dirs[role]
             self.session_dir_calls.append((role, session_dir))
-            return self._result(role, 2, status, None)
+            return replace(self._result(role, 2, status, None), thread_id=thread_id)
         return await super().resume_agent(thread_id, task, role, workspace, schema, session_dir)
 
 
@@ -186,7 +196,7 @@ def test_rejected_patch_correction_recovers_context_after_terminal_attempt(tmp_p
         assert second_correction["run"].status == RunStatus.AWAITING_PATCH_APPROVAL
         assert revision.revision_resume_thread_ids == [
             generating_attempt.thread_id,
-            f"thread-{AgentRole.REVISION.value}-2",
+            generating_attempt.thread_id,
         ]
         assert all(
             "Human rejection feedback:\nMake the replacement more precise." in prompt

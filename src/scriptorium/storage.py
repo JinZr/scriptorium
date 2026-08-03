@@ -552,6 +552,24 @@ class Database:
         ).fetchall()
         return [self._attempt_from_row(row) for row in rows]
 
+    def record_attempt_session(self, attempt_id: str, thread_id: str) -> Attempt:
+        with self.transaction() as connection:
+            row = connection.execute("SELECT * FROM attempts WHERE id = ?", (attempt_id,)).fetchone()
+            if row is None:
+                raise NotFoundError(f"attempt not found: {attempt_id}")
+            if AttemptStatus(row["status"]) != AttemptStatus.RUNNING:
+                raise ConflictError(f"attempt is already terminal: {attempt_id}")
+            current = row["thread_id"]
+            if current is not None and current != thread_id:
+                raise ConflictError(f"attempt already records a different session: {attempt_id}")
+            if current is None:
+                connection.execute(
+                    "UPDATE attempts SET thread_id = ? WHERE id = ?",
+                    (thread_id, attempt_id),
+                )
+                row = connection.execute("SELECT * FROM attempts WHERE id = ?", (attempt_id,)).fetchone()
+        return self._attempt_from_row(row)
+
     def finish_attempt(
         self,
         attempt_id: str,
@@ -587,6 +605,8 @@ class Database:
                 raise NotFoundError(f"attempt not found: {attempt_id}")
             if AttemptStatus(row["status"]) != AttemptStatus.RUNNING:
                 raise ConflictError(f"attempt is already terminal: {attempt_id}")
+            if row["thread_id"] is not None and thread_id is not None and row["thread_id"] != thread_id:
+                raise ConflictError(f"attempt already records a different session: {attempt_id}")
             completed_at = utc_now()
             connection.execute(
                 """
@@ -690,6 +710,116 @@ class Database:
                     ),
                 )
         return len(rows)
+
+    def cancel_run(self, run_id: str, reason: str, request_id: str) -> Run:
+        with self.transaction() as connection:
+            run_row = connection.execute("SELECT * FROM runs WHERE id = ?", (run_id,)).fetchone()
+            if run_row is None:
+                raise NotFoundError(f"run not found: {run_id}")
+            current_run_status = RunStatus(run_row["status"])
+            if current_run_status == RunStatus.CANCELLED:
+                return self._run_from_row(run_row)
+            if current_run_status in {RunStatus.COMPLETED, RunStatus.FAILED}:
+                raise ConflictError(f"run cannot be cancelled while {current_run_status.value}")
+
+            attempt_rows = connection.execute(
+                """
+                SELECT attempts.id, attempts.task_id, attempts.ordinal
+                FROM attempts
+                JOIN tasks ON tasks.id = attempts.task_id
+                WHERE tasks.run_id = ? AND attempts.status = ?
+                ORDER BY attempts.created_at, attempts.id
+                """,
+                (run_id, AttemptStatus.RUNNING.value),
+            ).fetchall()
+            updated_at = utc_now()
+            for row in attempt_rows:
+                connection.execute(
+                    "UPDATE attempts SET status = ?, completed_at = ?, error = ? WHERE id = ?",
+                    (
+                        AttemptStatus.INTERRUPTED.value,
+                        updated_at,
+                        "process exited before attempt completion",
+                        row["id"],
+                    ),
+                )
+                connection.execute(
+                    "UPDATE tasks SET status = ?, updated_at = ? WHERE id = ?",
+                    (TaskStatus.INTERRUPTED.value, updated_at, row["task_id"]),
+                )
+                self._append_event_row(
+                    connection,
+                    Event(
+                        run_id=run_id,
+                        event_type="attempt.interrupted",
+                        entity_type="attempt",
+                        entity_id=row["id"],
+                        payload={"task_id": row["task_id"], "ordinal": row["ordinal"]},
+                    ),
+                )
+
+            task_rows = connection.execute(
+                """
+                SELECT * FROM tasks
+                WHERE run_id = ? AND status IN (?, ?, ?)
+                ORDER BY created_at, id
+                """,
+                (
+                    run_id,
+                    TaskStatus.PENDING.value,
+                    TaskStatus.FAILED.value,
+                    TaskStatus.INTERRUPTED.value,
+                ),
+            ).fetchall()
+            for row in task_rows:
+                current = TaskStatus(row["status"])
+                validate_task_transition(current, TaskStatus.CANCELLED)
+                connection.execute(
+                    "UPDATE tasks SET status = ?, updated_at = ? WHERE id = ?",
+                    (TaskStatus.CANCELLED.value, updated_at, row["id"]),
+                )
+                self._append_event_row(
+                    connection,
+                    Event(
+                        run_id=run_id,
+                        event_type="task.status_changed",
+                        entity_type="task",
+                        entity_id=row["id"],
+                        payload={"from": current.value, "to": TaskStatus.CANCELLED.value},
+                    ),
+                )
+
+            validate_run_transition(current_run_status, RunStatus.CANCELLED)
+            connection.execute(
+                "UPDATE runs SET status = ?, error = NULL, updated_at = ? WHERE id = ?",
+                (RunStatus.CANCELLED.value, updated_at, run_id),
+            )
+            self._append_event_row(
+                connection,
+                Event(
+                    run_id=run_id,
+                    event_type="run.status_changed",
+                    entity_type="run",
+                    entity_id=run_id,
+                    payload={
+                        "from": current_run_status.value,
+                        "to": RunStatus.CANCELLED.value,
+                        "error": None,
+                    },
+                ),
+            )
+            self._append_event_row(
+                connection,
+                Event(
+                    run_id=run_id,
+                    event_type="run.cancelled",
+                    entity_type="run",
+                    entity_id=run_id,
+                    payload={"reason": reason, "request_id": request_id},
+                ),
+            )
+            row = connection.execute("SELECT * FROM runs WHERE id = ?", (run_id,)).fetchone()
+        return self._run_from_row(row)
 
     def cancel_incomplete_tasks(self, run_id: str) -> int:
         with self.transaction() as connection:

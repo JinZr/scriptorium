@@ -1,7 +1,9 @@
 from __future__ import annotations
 
-from collections.abc import Mapping
+import asyncio
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
+import inspect
 from pathlib import Path
 from typing import Literal, Protocol, runtime_checkable
 
@@ -45,6 +47,20 @@ class AgentResult:
     error: str | None
 
 
+SessionStartedCallback = Callable[[str], Awaitable[None] | None]
+
+
+class AgentCancelled(asyncio.CancelledError):
+    def __init__(self, result: AgentResult) -> None:
+        super().__init__(result.error or "Agent runtime was cancelled.")
+        self.result = result
+
+
+class _SessionStartedCallbackError(Exception):
+    def __init__(self, error: Exception) -> None:
+        self.error = error
+
+
 @runtime_checkable
 class AgentRuntime(Protocol):
     async def run_agent(
@@ -54,6 +70,7 @@ class AgentRuntime(Protocol):
         workspace: Path,
         schema: Mapping[str, object],
         session_dir: Path,
+        on_session_started: SessionStartedCallback | None = None,
     ) -> AgentResult: ...
 
     async def resume_agent(
@@ -64,7 +81,21 @@ class AgentRuntime(Protocol):
         workspace: Path,
         schema: Mapping[str, object],
         session_dir: Path,
+        on_session_started: SessionStartedCallback | None = None,
     ) -> AgentResult: ...
+
+
+async def _notify_session_started(callback: SessionStartedCallback | None, thread_id: str) -> None:
+    if callback is None:
+        return
+    try:
+        pending = callback(thread_id)
+        if inspect.isawaitable(pending):
+            await pending
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        raise _SessionStartedCallbackError(exc) from exc
 
 
 def _role_instructions(role: AgentRole) -> str:

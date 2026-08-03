@@ -53,6 +53,9 @@ class FakeQuery:
         self.loaded_sessions: list[list[dict[str, Any]] | None] = []
         self.native_config_dirs: list[Path] = []
         self.native_configs_ready: list[bool] = []
+        self.client_events: list[str] = []
+        self.interrupt_calls = 0
+        self.disconnect_calls = 0
 
     def __call__(self, *, prompt: str, options: FakeOptions):
         self.calls.append((prompt, options))
@@ -85,13 +88,59 @@ class FakeQuery:
         return stream()
 
 
+class FixedStreamQuery:
+    def __init__(self, stream: Any) -> None:
+        self.stream = stream
+        self.calls: list[tuple[str, FakeOptions]] = []
+        self.client_events: list[str] = []
+        self.interrupt_calls = 0
+        self.disconnect_calls = 0
+
+    def __call__(self, *, prompt: str, options: FakeOptions) -> Any:
+        self.calls.append((prompt, options))
+        return self.stream
+
+
 def _sdk(query: Any, version: str = CLAUDE_SDK_VERSION) -> Any:
+    class FakeClaudeSDKClient:
+        def __init__(self, options: FakeOptions) -> None:
+            self.options = options
+            self.stream: Any = None
+
+        async def connect(self) -> None:
+            if hasattr(query, "client_events"):
+                query.client_events.append("connect")
+
+        async def query(self, prompt: str) -> None:
+            if hasattr(query, "client_events"):
+                query.client_events.append("query")
+            self.stream = query(prompt=prompt, options=self.options)
+
+        def receive_response(self):
+            if hasattr(query, "client_events"):
+                query.client_events.append("receive_response")
+            return self.stream
+
+        async def interrupt(self) -> None:
+            if hasattr(query, "client_events"):
+                query.client_events.append("interrupt")
+                query.interrupt_calls += 1
+            if hasattr(self.stream, "interrupt"):
+                await self.stream.interrupt()
+
+        async def disconnect(self) -> None:
+            if hasattr(query, "client_events"):
+                query.client_events.append("disconnect")
+                query.disconnect_calls += 1
+            if self.stream is not None and hasattr(self.stream, "aclose"):
+                await self.stream.aclose()
+
     return type(
         "FakeSDK",
         (),
         {
             "__version__": version,
-            "query": staticmethod(query),
+            "ClaudeSDKClient": FakeClaudeSDKClient,
             "ClaudeAgentOptions": FakeOptions,
             "HookMatcher": FakeHookMatcher,
             "ResultMessage": FakeResultMessage,
@@ -150,6 +199,30 @@ class CancellingStream:
 
     async def __anext__(self) -> Any:
         raise asyncio.CancelledError
+
+    async def aclose(self) -> None:
+        self.closed = True
+
+
+class InterruptibleStream:
+    def __init__(self, result: FakeResultMessage) -> None:
+        self.result = result
+        self.interrupted = asyncio.Event()
+        self.closed = False
+        self._yielded = False
+
+    def __aiter__(self) -> "InterruptibleStream":
+        return self
+
+    async def __anext__(self) -> Any:
+        if self._yielded:
+            raise StopAsyncIteration
+        await self.interrupted.wait()
+        self._yielded = True
+        return self.result
+
+    async def interrupt(self) -> None:
+        self.interrupted.set()
 
     async def aclose(self) -> None:
         self.closed = True

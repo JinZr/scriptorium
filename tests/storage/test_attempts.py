@@ -69,6 +69,62 @@ def test_attempt_retry_is_append_only(tmp_path) -> None:
             database.connection.execute("DELETE FROM attempts WHERE id = ?", (first.id,))
 
 
+def test_attempt_session_is_recorded_once_while_running(tmp_path) -> None:
+    with Database(tmp_path / "state.sqlite3") as database:
+        run = database.create_run(make_run())
+        task = database.create_task(
+            Task(
+                run_id=run.id,
+                stage="review",
+                role=AgentRole.CONSISTENCY,
+                route="primary",
+                input_digest="d" * 64,
+            )
+        )
+        attempt = database.begin_attempt(task.id)
+
+        recorded = database.record_attempt_session(attempt.id, "session-1")
+        replayed = database.record_attempt_session(attempt.id, "session-1")
+
+        assert recorded.thread_id == "session-1"
+        assert replayed == recorded
+        with pytest.raises(ConflictError, match="different session"):
+            database.record_attempt_session(attempt.id, "session-2")
+
+        finished = database.finish_attempt(
+            attempt.id,
+            AttemptStatus.INTERRUPTED,
+            thread_id="session-1",
+        )
+        assert finished.thread_id == "session-1"
+        with pytest.raises(ConflictError, match="already terminal"):
+            database.record_attempt_session(attempt.id, "session-1")
+
+
+def test_finish_attempt_rejects_a_different_recorded_session(tmp_path) -> None:
+    with Database(tmp_path / "state.sqlite3") as database:
+        run = database.create_run(make_run())
+        task = database.create_task(
+            Task(
+                run_id=run.id,
+                stage="review",
+                role=AgentRole.CONSISTENCY,
+                route="primary",
+                input_digest="d" * 64,
+            )
+        )
+        attempt = database.begin_attempt(task.id, thread_id="session-1")
+
+        with pytest.raises(ConflictError, match="different session"):
+            database.finish_attempt(
+                attempt.id,
+                AttemptStatus.INTERRUPTED,
+                thread_id="session-2",
+            )
+
+        assert database.get_attempt(attempt.id).status == AttemptStatus.RUNNING
+
+
 def test_cancel_incomplete_tasks_preserves_completed_history(tmp_path) -> None:
     with Database(tmp_path / "state.sqlite3") as database:
         run = database.create_run(make_run())
@@ -86,3 +142,34 @@ def test_cancel_incomplete_tasks_preserves_completed_history(tmp_path) -> None:
         assert database.cancel_incomplete_tasks(run.id) == 1
         assert database.get_task(completed.id).status == TaskStatus.COMPLETED
         assert database.get_task(pending.id).status == TaskStatus.CANCELLED
+
+
+def test_durable_cancel_is_atomic_and_idempotent_by_terminal_state(tmp_path) -> None:
+    with Database(tmp_path / "state.sqlite3") as database:
+        run = database.create_run(make_run())
+        database.update_run(run.id, RunStatus.REVIEWING)
+        task = database.create_task(
+            Task(
+                run_id=run.id,
+                stage="review",
+                role=AgentRole.CONSISTENCY,
+                route="primary",
+                input_digest="d" * 64,
+            )
+        )
+        attempt = database.begin_attempt(task.id, thread_id="session-1")
+
+        cancelled = database.cancel_run(run.id, "stop", "cancel-1")
+        replayed = database.cancel_run(run.id, "ignored replay", "cancel-2")
+
+        assert cancelled.status == RunStatus.CANCELLED
+        assert replayed == cancelled
+        assert database.get_attempt(attempt.id).status == AttemptStatus.INTERRUPTED
+        assert database.get_task(task.id).status == TaskStatus.CANCELLED
+        events = database.list_events(run.id)
+        cancellation_events = [event for event in events if event.event_type == "run.cancelled"]
+        assert len(cancellation_events) == 1
+        assert cancellation_events[0].payload == {
+            "reason": "stop",
+            "request_id": "cancel-1",
+        }

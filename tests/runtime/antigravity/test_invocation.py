@@ -108,3 +108,28 @@ def test_run_agent_uses_gemini_read_only_config_and_normalizes_result(
     assert trace[0]["step"]["id"] == "new"
     assert all(record.get("step", {}).get("id") != "old" for record in trace)
     assert trace[1]["usage"]["thoughts_token_count"] == 5
+
+
+def test_session_callback_receives_conversation_id(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sdk = make_sdk(
+        response=FakeResponse(structured_output={"summary": "ok"}, usage=FakeUsage()),
+        current_steps=[FakeStep("finish", "DONE", type="FINISH")],
+    )
+    seen: list[str] = []
+
+    result = asyncio.run(
+        make_runtime(monkeypatch, sdk).run_agent(
+            "Review.",
+            AgentRole.SUBSTANTIVE_REVIEW,
+            tmp_path,
+            {"type": "object"},
+            tmp_path / "state",
+            on_session_started=seen.append,
+        )
+    )
+
+    assert result.status == "completed"
+    assert seen == ["12345678-1234-1234-1234-123456789012"]

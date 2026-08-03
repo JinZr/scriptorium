@@ -35,7 +35,8 @@ from .domain import (
 )
 from .errors import InfrastructureError, StateError
 from .manuscript import BuildResult, FrozenRevision, ManuscriptBundle, ManuscriptManager, SourceFile
-from .runtime import RUNTIME_SDK_VERSIONS, AgentRuntime, RuntimeUnavailable
+from .runtime import RUNTIME_SDK_VERSIONS, AgentCancelled, AgentResult, AgentRuntime, AgentUsage
+from .runtime.contained import ContainedAgentRuntime
 from .schemas import (
     ExactEdit,
     ReviewOutput,
@@ -235,25 +236,10 @@ class Armarius:
         else:
             await self._run_verification(current)
 
-    def cancel_run(self, run_id: str, reason: str) -> Run:
+    def cancel_run(self, run_id: str, reason: str, request_id: str) -> Run:
         if not reason.strip():
             raise StateError("cancellation reason is required")
-        run = self.database.get_run(run_id)
-        if run.status in {RunStatus.COMPLETED, RunStatus.FAILED, RunStatus.CANCELLED}:
-            raise StateError(f"run cannot be cancelled while {run.status.value}")
-        self.database.recover_orphaned_attempts(run_id)
-        self.database.cancel_incomplete_tasks(run_id)
-        cancelled = self.database.update_run(run_id, RunStatus.CANCELLED)
-        self.database.append_event(
-            Event(
-                run_id=run_id,
-                event_type="run.cancelled",
-                entity_type="run",
-                entity_id=run_id,
-                payload={"reason": reason},
-            )
-        )
-        return cancelled
+        return self.database.cancel_run(run_id, reason, request_id)
 
     async def _prepare_and_review(
         self,
@@ -972,6 +958,7 @@ class Armarius:
         while True:
             attempt = self.database.begin_attempt(
                 task.id,
+                thread_id=thread_id,
                 runtime_name=route.runtime,
                 runtime_version=route.runtime_version,
                 model=route.model,
@@ -980,22 +967,49 @@ class Armarius:
                 schema_digest=schema_artifact.digest,
                 bundle_digest=bundle_digest,
             )
-            if thread_id is None:
-                result = await runtime.run_agent(
-                    invocation_prompt,
-                    role,
-                    workspace,
-                    schema,
-                    session_dir,
-                )
-            else:
-                result = await runtime.resume_agent(
-                    thread_id,
-                    invocation_prompt,
-                    role,
-                    workspace,
-                    schema,
-                    session_dir,
+
+            def record_session(session_id: str) -> None:
+                self.database.record_attempt_session(attempt.id, session_id)
+
+            cancellation: asyncio.CancelledError | None = None
+            try:
+                if thread_id is None:
+                    result = await runtime.run_agent(
+                        invocation_prompt,
+                        role,
+                        workspace,
+                        schema,
+                        session_dir,
+                        on_session_started=record_session,
+                    )
+                else:
+                    result = await runtime.resume_agent(
+                        thread_id,
+                        invocation_prompt,
+                        role,
+                        workspace,
+                        schema,
+                        session_dir,
+                        on_session_started=record_session,
+                    )
+            except AgentCancelled as exc:
+                cancellation = exc
+                result = exc.result
+            except asyncio.CancelledError as exc:
+                cancellation = exc
+                recorded = self.database.get_attempt(attempt.id)
+                result = AgentResult(
+                    thread_id=recorded.thread_id,
+                    status="interrupted",
+                    final_response=None,
+                    usage=AgentUsage(),
+                    trace_jsonl=json.dumps({"status": "interrupted", "error": "operation interrupted"}) + "\n",
+                    runtime_name=route.runtime,
+                    runtime_version=route.runtime_version,
+                    model=route.model,
+                    model_provider=route.model_provider,
+                    duration_ms=None,
+                    error="operation interrupted",
                 )
             output_artifact = (
                 self._record_text(result.final_response, "application/json")
@@ -1020,7 +1034,9 @@ class Armarius:
                 except (ValidationError, ValueError, StateError) as exc:
                     parsed = None
                     error = f"invalid structured output: {exc}"
-            if provenance_error is not None:
+            if cancellation is not None:
+                terminal = AttemptStatus.INTERRUPTED
+            elif provenance_error is not None:
                 terminal = AttemptStatus.FAILED
             elif result.status == "completed" and parsed is not None:
                 terminal = AttemptStatus.COMPLETED
@@ -1052,6 +1068,8 @@ class Armarius:
                 duration_ms=result.duration_ms,
                 error=error,
             )
+            if cancellation is not None:
+                raise cancellation
             if parsed is not None:
                 return TaskOutcome(self.database.get_task(task.id), finished, parsed)
             if (
@@ -1526,34 +1544,5 @@ class Armarius:
         }:
             self.database.update_run(run_id, RunStatus.FAILED, str(exc))
 
-    @staticmethod
-    def _runtime_for_route(route: RouteConfig) -> AgentRuntime:
-        expected_version = RUNTIME_SDK_VERSIONS.get(route.runtime)
-        if expected_version is None:
-            raise RuntimeUnavailable(f"Unsupported runtime: {route.runtime}")
-        if route.runtime_version != expected_version:
-            raise RuntimeUnavailable(
-                f"Frozen route {route.name!r} requires {route.runtime}=={route.runtime_version}, "
-                f"but this Scriptorium build supports {expected_version}."
-            )
-        runtime_type: type[AgentRuntime]
-        if route.runtime == "codex":
-            from .runtime.codex import CodexAgentRuntime
-
-            runtime_type = CodexAgentRuntime
-        elif route.runtime == "claude_code":
-            from .runtime.claude_code import ClaudeCodeAgentRuntime
-
-            runtime_type = ClaudeCodeAgentRuntime
-        elif route.runtime == "antigravity":
-            from .runtime.antigravity import AntigravityAgentRuntime
-
-            runtime_type = AntigravityAgentRuntime
-        else:
-            raise RuntimeUnavailable(f"Unsupported runtime: {route.runtime}")
-        return runtime_type(
-            route=route.name,
-            model=route.model,
-            provider=route.model_provider,
-            reasoning=route.reasoning_effort,
-        )
+    def _runtime_for_route(self, route: RouteConfig) -> AgentRuntime:
+        return ContainedAgentRuntime(route, self.repo)

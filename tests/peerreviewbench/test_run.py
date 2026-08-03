@@ -1,4 +1,5 @@
 import asyncio
+from dataclasses import replace
 from hashlib import sha256
 import json
 from pathlib import Path
@@ -30,7 +31,7 @@ class FullProfileRuntime:
     def __init__(self) -> None:
         self.calls: list[AgentRole] = []
 
-    async def run_agent(self, task, role, workspace, schema, session_dir):
+    async def run_agent(self, task, role, workspace, schema, session_dir, on_session_started=None):
         del task, schema, session_dir
         self.calls.append(role)
         if role == AgentRole.VISUAL_TRANSCRIPTION:
@@ -100,7 +101,7 @@ class FullProfileRuntime:
             error=None,
         )
 
-    async def resume_agent(self, thread_id, task, role, workspace, schema, session_dir):
+    async def resume_agent(self, thread_id, task, role, workspace, schema, session_dir, on_session_started=None):
         raise AssertionError(f"unexpected resume for {thread_id}/{role.value}")
 
 
@@ -110,7 +111,7 @@ class InterruptingFullProfileRuntime(FullProfileRuntime):
         self.interrupted = False
         self.resume_calls: list[AgentRole] = []
 
-    async def run_agent(self, task, role, workspace, schema, session_dir):
+    async def run_agent(self, task, role, workspace, schema, session_dir, on_session_started=None):
         if role == AgentRole.COPYEDIT and not self.interrupted:
             self.interrupted = True
             self.calls.append(role)
@@ -127,13 +128,18 @@ class InterruptingFullProfileRuntime(FullProfileRuntime):
                 duration_ms=5,
                 error="simulated interruption",
             )
-        return await super().run_agent(task, role, workspace, schema, session_dir)
+        return await super().run_agent(
+            task, role, workspace, schema, session_dir, on_session_started=on_session_started
+        )
 
-    async def resume_agent(self, thread_id, task, role, workspace, schema, session_dir):
+    async def resume_agent(self, thread_id, task, role, workspace, schema, session_dir, on_session_started=None):
         assert thread_id == "thread-copyedit-interrupted"
         assert role == AgentRole.COPYEDIT
         self.resume_calls.append(role)
-        return await super().run_agent(task, role, workspace, schema, session_dir)
+        result = await super().run_agent(
+            task, role, workspace, schema, session_dir, on_session_started=on_session_started
+        )
+        return replace(result, thread_id=thread_id)
 
 
 def _write_png(path: Path) -> None:

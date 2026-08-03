@@ -1,4 +1,5 @@
 import asyncio
+from dataclasses import replace
 import json
 from pathlib import Path
 import re
@@ -60,7 +61,7 @@ class VisualRuntime(FakeAgentRuntime):
         self.visual_text = visual_text
         self.call_order = []
 
-    async def run_agent(self, task, role, workspace, schema, session_dir):
+    async def run_agent(self, task, role, workspace, schema, session_dir, on_session_started=None):
         self.call_order.append(role)
         if role != AgentRole.VISUAL_TRANSCRIPTION:
             return await super().run_agent(task, role, workspace, schema, session_dir)
@@ -74,7 +75,16 @@ class VisualRuntime(FakeAgentRuntime):
             return self._result(role, ordinal, "interrupted", None)
         return self._result(role, ordinal, "completed", self._visual_output(task, workspace))
 
-    async def resume_agent(self, thread_id, task, role, workspace, schema, session_dir):
+    async def resume_agent(
+        self,
+        thread_id,
+        task,
+        role,
+        workspace,
+        schema,
+        session_dir,
+        on_session_started=None,
+    ):
         self.call_order.append(role)
         if role != AgentRole.VISUAL_TRANSCRIPTION:
             return await super().resume_agent(thread_id, task, role, workspace, schema, session_dir)
@@ -82,7 +92,10 @@ class VisualRuntime(FakeAgentRuntime):
         self.tasks[role] = task
         assert session_dir == self.session_dirs[role]
         self.session_dir_calls.append((role, session_dir))
-        return self._result(role, 2, "completed", self._visual_output(task, workspace))
+        return replace(
+            self._result(role, 2, "completed", self._visual_output(task, workspace)),
+            thread_id=thread_id,
+        )
 
     def _review_output(self, role, workspace):
         output = super()._review_output(role, workspace)

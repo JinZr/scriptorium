@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Mapping
-from dataclasses import asdict, is_dataclass
+from dataclasses import asdict, is_dataclass, replace
 from enum import Enum
 from importlib import import_module
 from importlib.metadata import PackageNotFoundError, version as package_version
@@ -13,7 +13,18 @@ import time
 from typing import Any
 
 from ..domain import AgentRole, canonical_json
-from .base import ANTIGRAVITY_SDK_VERSION, AgentResult, AgentStatus, AgentUsage, RuntimeUnavailable, _role_instructions
+from .base import (
+    ANTIGRAVITY_SDK_VERSION,
+    AgentCancelled,
+    AgentResult,
+    AgentStatus,
+    AgentUsage,
+    RuntimeUnavailable,
+    SessionStartedCallback,
+    _notify_session_started,
+    _role_instructions,
+    _SessionStartedCallbackError,
+)
 
 _RUNTIME_NAME = "antigravity"
 
@@ -78,6 +89,7 @@ class AntigravityAgentRuntime:
         workspace: Path,
         schema: Mapping[str, object],
         session_dir: Path,
+        on_session_started: SessionStartedCallback | None = None,
     ) -> AgentResult:
         return await self._run(
             thread_id=None,
@@ -86,6 +98,7 @@ class AntigravityAgentRuntime:
             workspace=workspace,
             schema=schema,
             session_dir=session_dir,
+            on_session_started=on_session_started,
         )
 
     async def resume_agent(
@@ -96,6 +109,7 @@ class AntigravityAgentRuntime:
         workspace: Path,
         schema: Mapping[str, object],
         session_dir: Path,
+        on_session_started: SessionStartedCallback | None = None,
     ) -> AgentResult:
         return await self._run(
             thread_id=thread_id,
@@ -104,6 +118,7 @@ class AntigravityAgentRuntime:
             workspace=workspace,
             schema=schema,
             session_dir=session_dir,
+            on_session_started=on_session_started,
         )
 
     async def _run(
@@ -115,6 +130,7 @@ class AntigravityAgentRuntime:
         workspace: Path,
         schema: Mapping[str, object],
         session_dir: Path,
+        on_session_started: SessionStartedCallback | None,
     ) -> AgentResult:
         started = time.monotonic()
         resolved_session_dir = session_dir.resolve()
@@ -170,48 +186,123 @@ class AntigravityAgentRuntime:
         response: Any = None
         steps: list[Any] = []
         usage_value: Any = None
+        structured_output: Any = None
+        reported_thread_id: str | None = None
+        interrupted: AgentResult | None = None
+        external_cancelled = False
+        context_cleanup_error: str | None = None
+        history_start = 0
         try:
             config = self._sdk.LocalAgentConfig(**config_kwargs)
             async with self._sdk.Agent(config) as agent:
                 history_start = len(agent.conversation.history)
                 try:
+                    current_thread_id = _optional_string(agent.conversation_id) or current_thread_id
+                    if current_thread_id is not None:
+                        await _notify_session_started(on_session_started, current_thread_id)
+                        reported_thread_id = current_thread_id
                     response = await agent.chat(task)
                     structured_output = await response.structured_output()
                     usage_value = response.usage_metadata
                     steps = agent.conversation.history[history_start:]
                     current_thread_id = _optional_string(agent.conversation_id) or current_thread_id
+                    if current_thread_id is not None and current_thread_id != reported_thread_id:
+                        await _notify_session_started(on_session_started, current_thread_id)
+                        reported_thread_id = current_thread_id
                 except asyncio.CancelledError as exc:
-                    await _cancel_active(response, agent)
+                    cleanup_error = await _cancel_active(agent)
                     steps = agent.conversation.history[history_start:]
                     current_thread_id = _optional_string(agent.conversation_id) or current_thread_id
-                    if isinstance(exc, self._types.AntigravityCancelledError):
-                        return self._result(
-                            thread_id=current_thread_id,
-                            status="interrupted",
-                            structured_output=None,
-                            usage_value=getattr(response, "usage_metadata", None),
-                            steps=steps,
-                            duration_ms=_duration_ms(started),
-                            error=str(exc) or "Antigravity turn was cancelled.",
-                        )
-                    raise
+                    if current_thread_id is not None and current_thread_id != reported_thread_id:
+                        await _notify_session_started(on_session_started, current_thread_id)
+                        reported_thread_id = current_thread_id
+                    error = str(exc) or "Antigravity turn was cancelled."
+                    if cleanup_error:
+                        error = f"{error} Native cleanup: {cleanup_error}"
+                    interrupted = self._result(
+                        thread_id=current_thread_id,
+                        status="interrupted",
+                        structured_output=None,
+                        usage_value=getattr(response, "usage_metadata", None),
+                        steps=steps,
+                        duration_ms=_duration_ms(started),
+                        error=error,
+                    )
+                    external_cancelled = not isinstance(exc, self._types.AntigravityCancelledError)
                 except Exception:
                     steps = agent.conversation.history[history_start:]
                     current_thread_id = _optional_string(agent.conversation_id) or current_thread_id
                     usage_value = getattr(response, "usage_metadata", None)
                     raise
-        except asyncio.CancelledError:
-            raise
+        except _SessionStartedCallbackError as exc:
+            raise exc.error
+        except asyncio.CancelledError as exc:
+            if interrupted is None:
+                cleanup_error = await _cancel_active(agent)
+                if agent is not None:
+                    steps = agent.conversation.history[history_start:]
+                    current_thread_id = _optional_string(agent.conversation_id) or current_thread_id
+                error = str(exc) or "Antigravity turn was cancelled."
+                if cleanup_error:
+                    error = f"{error} Native cleanup: {cleanup_error}"
+                interrupted = self._result(
+                    thread_id=current_thread_id,
+                    status="interrupted",
+                    structured_output=None,
+                    usage_value=usage_value,
+                    steps=steps,
+                    duration_ms=_duration_ms(started),
+                    error=error,
+                )
+                external_cancelled = True
+            else:
+                context_cleanup_error = str(exc) or "Antigravity agent cleanup was cancelled"
         except Exception as exc:
-            return self._result(
-                thread_id=current_thread_id,
-                status="failed",
-                structured_output=None,
-                usage_value=usage_value,
-                steps=steps,
-                duration_ms=_duration_ms(started),
-                error=str(exc) or "Antigravity runtime failed.",
-            )
+            if interrupted is not None:
+                context_cleanup_error = str(exc) or type(exc).__name__
+            elif asyncio.current_task() is not None and asyncio.current_task().cancelling():
+                cleanup_error = await _cancel_active(agent)
+                if agent is not None:
+                    steps = agent.conversation.history[history_start:]
+                    current_thread_id = _optional_string(agent.conversation_id) or current_thread_id
+                error = "Antigravity turn was cancelled."
+                if cleanup_error:
+                    error = f"{error} Native cleanup: {cleanup_error}"
+                interrupted = self._result(
+                    thread_id=current_thread_id,
+                    status="interrupted",
+                    structured_output=None,
+                    usage_value=usage_value,
+                    steps=steps,
+                    duration_ms=_duration_ms(started),
+                    error=error,
+                )
+                external_cancelled = True
+                context_cleanup_error = str(exc) or type(exc).__name__
+            else:
+                return self._result(
+                    thread_id=current_thread_id,
+                    status="failed",
+                    structured_output=None,
+                    usage_value=usage_value,
+                    steps=steps,
+                    duration_ms=_duration_ms(started),
+                    error=str(exc) or "Antigravity runtime failed.",
+                )
+
+        if interrupted is not None:
+            if context_cleanup_error:
+                interrupted = replace(
+                    interrupted,
+                    error=(
+                        f"{interrupted.error} Native cleanup: {context_cleanup_error}"
+                        if interrupted.error
+                        else f"Native cleanup: {context_cleanup_error}"
+                    ),
+                )
+            if external_cancelled:
+                raise AgentCancelled(interrupted)
+            return interrupted
 
         status, error = _turn_status(steps, structured_output)
         return self._result(
@@ -251,16 +342,17 @@ class AntigravityAgentRuntime:
         )
 
 
-async def _cancel_active(response: Any, agent: Any) -> None:
+async def _cancel_active(agent: Any) -> str | None:
     try:
-        if response is not None:
-            await response.cancel()
-        elif agent is not None and agent.is_started:
+        if agent is not None and agent.is_started:
+            # google-antigravity 0.1.8 may mark the response done before external
+            # cancellation, making response.cancel() a no-op; conversation owns the turn.
             await agent.conversation.cancel()
-    except asyncio.CancelledError:
-        pass
-    except Exception:
-        pass
+    except asyncio.CancelledError as exc:
+        return str(exc) or "conversation cancellation was interrupted"
+    except Exception as exc:
+        return str(exc) or type(exc).__name__
+    return None
 
 
 def _turn_status(steps: list[Any], structured_output: Any) -> tuple[AgentStatus, str | None]:
