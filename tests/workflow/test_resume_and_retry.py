@@ -1,11 +1,14 @@
 import asyncio
 from collections import Counter
+import json
 
 import pytest
 
 from scriptorium.domain import AgentRole, AttemptStatus, RunStatus, TaskStatus
+from scriptorium.errors import InfrastructureError
 from scriptorium.runtime import AgentCancelled
 from scriptorium.service import ScriptoriumService
+from scriptorium.workflow import Armarius
 
 from ._support import FakeAgentRuntime, PdfBuildingManuscriptManager, make_repository
 
@@ -50,7 +53,7 @@ def test_runtime_cancellation_durably_interrupts_the_attempt(tmp_path):
         assert attempt.validation_report_artifact_digest is None
 
 
-def test_resume_reuses_completed_review_and_appends_attempt_for_interrupted_lane(tmp_path):
+def test_resume_reuses_completed_review_and_appends_attempt_for_interrupted_lane(tmp_path, monkeypatch):
     repo = make_repository(tmp_path)
     runtime = FakeAgentRuntime(interrupt_copyedit_once=True)
     manager = PdfBuildingManuscriptManager(repo)
@@ -66,6 +69,17 @@ def test_resume_reuses_completed_review_and_appends_attempt_for_interrupted_lane
         tasks = {item["task"].role: item["task"] for item in started["tasks"]}
         assert tasks[AgentRole.SUBSTANTIVE_REVIEW].status == TaskStatus.COMPLETED
         assert tasks[AgentRole.COPYEDIT].status == TaskStatus.INTERRUPTED
+        copyedit_task = tasks[AgentRole.COPYEDIT]
+        copyedit_attempt = next(
+            item["attempts"][0] for item in started["tasks"] if item["task"].role == AgentRole.COPYEDIT
+        )
+        frozen_prompt = runtime.tasks[AgentRole.COPYEDIT]
+
+    monkeypatch.setattr(
+        Armarius,
+        "_review_prompt_template",
+        staticmethod(lambda role_prompt, contract: "changed current renderer"),
+    )
 
     with ScriptoriumService(
         repo,
@@ -80,6 +94,10 @@ def test_resume_reuses_completed_review_and_appends_attempt_for_interrupted_lane
             AttemptStatus.INTERRUPTED,
             AttemptStatus.COMPLETED,
         ]
+        assert tasks[AgentRole.COPYEDIT]["task"].id == copyedit_task.id
+        assert tasks[AgentRole.COPYEDIT]["task"].input_digest == copyedit_task.input_digest
+        assert {attempt.thread_id for attempt in tasks[AgentRole.COPYEDIT]["attempts"]} == {copyedit_attempt.thread_id}
+        assert runtime.tasks[AgentRole.COPYEDIT] == frozen_prompt
 
     assert runtime.run_calls == Counter(
         {
@@ -88,6 +106,33 @@ def test_resume_reuses_completed_review_and_appends_attempt_for_interrupted_lane
         }
     )
     assert runtime.resume_calls == [AgentRole.COPYEDIT]
+
+
+def test_resume_rejects_corrupt_frozen_anchor_contract_before_runtime(tmp_path):
+    repo = make_repository(tmp_path)
+    runtime = FakeAgentRuntime(interrupt_copyedit_once=True)
+
+    with ScriptoriumService(
+        repo,
+        runtime_factory=lambda route: runtime,
+        manuscript_manager=PdfBuildingManuscriptManager(repo),
+    ) as service:
+        started = asyncio.run(service.start_run("HEAD", "quick", None))
+        run_id = started["run"].id
+        frozen_config = json.loads(json.dumps(started["run"].frozen_config))
+        frozen_config["evidence_anchor_contract"]["digest"] = "0" * 64
+        service.database.connection.execute(
+            "UPDATE runs SET frozen_config_json = ? WHERE id = ?",
+            (json.dumps(frozen_config), run_id),
+        )
+        before = {item["task"].id: [attempt.status for attempt in item["attempts"]] for item in started["tasks"]}
+
+        with pytest.raises(InfrastructureError, match="corrupt frozen evidence anchor contract"):
+            asyncio.run(service.resume_run(run_id))
+
+        after = service.get_run(run_id)
+        assert {item["task"].id: [attempt.status for attempt in item["attempts"]] for item in after["tasks"]} == before
+        assert runtime.resume_calls == []
 
 
 def test_retry_on_a_different_route_starts_a_new_session(tmp_path):

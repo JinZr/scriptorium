@@ -8,6 +8,7 @@ import json
 import math
 from pathlib import Path
 import shutil
+import stat
 from typing import Any, Callable
 
 import fitz
@@ -35,18 +36,31 @@ from .domain import (
     digest_json,
 )
 from .errors import InfrastructureError, StateError
-from .manuscript import BuildResult, FrozenRevision, ManuscriptBundle, ManuscriptManager, SourceFile
+from .manuscript import (
+    NON_TEXT_ANCHOR_EXTENSIONS,
+    BuildResult,
+    FrozenRevision,
+    ManuscriptBundle,
+    ManuscriptManager,
+    SourceFile,
+)
 from .runtime import RUNTIME_SDK_VERSIONS, AgentCancelled, AgentResult, AgentRuntime, AgentUsage
 from .runtime.contained import ContainedAgentRuntime
 from .schemas import (
+    DEFAULT_EVIDENCE_ANCHOR_CONTRACT,
     SCHEMA_MODELS,
+    EvidenceAnchorContract,
+    EvidenceAnchorMap,
     ExactEdit,
     ReviewOutput,
     RevisionOutput,
+    SourceAnchorRecord,
     ValidationIssue,
     ValidationReport,
     VerificationOutput,
     VisualTranscriptionOutput,
+    evidence_anchor_contract_content,
+    evidence_anchor_contract_digest,
     output_schema,
 )
 from .storage import Database, StorageError
@@ -56,6 +70,9 @@ VALIDATION_REPORT_MEDIA_TYPE = "application/vnd.scriptorium.validation-report+js
 _DIAGNOSTIC_TEXT_LIMIT = 2_000
 _DIAGNOSTIC_DIFF_LIMIT = 4_000
 _CORRECTION_PROJECTION_LIMIT = 64 * 1024
+_CONFIRMED_FINDINGS_SLOT = "{{SCRIPTORIUM_CONFIRMED_FINDINGS_JSON}}"
+_HUMAN_FEEDBACK_SLOT = "{{SCRIPTORIUM_HUMAN_FEEDBACK_JSON}}"
+_APPROVED_DIFF_SLOT = "{{SCRIPTORIUM_APPROVED_DIFF_JSON}}"
 
 
 @dataclass(frozen=True)
@@ -130,6 +147,7 @@ class Armarius:
         run = self.database.get_run(run_id)
         if run.status in {RunStatus.COMPLETED, RunStatus.CANCELLED}:
             return run
+        self.require_evidence_anchor_contract(run.id)
         self.database.recover_orphaned_attempts(run_id)
         if run.status == RunStatus.READY_TO_APPLY:
             if not self.database.list_findings(run.id, [FindingStatus.CONFIRMED]):
@@ -167,6 +185,8 @@ class Armarius:
             raise StateError(f"task {task_id} does not belong to run {run_id}")
         if task.status == TaskStatus.COMPLETED:
             raise StateError(f"task {task_id} is already completed")
+        if run.status not in {RunStatus.COMPLETED, RunStatus.CANCELLED}:
+            self.require_evidence_anchor_contract(run.id)
         self.database.recover_orphaned_attempts(run_id)
         task = self.database.get_task(task_id)
         attempts = self.database.list_attempts(task.id)
@@ -239,6 +259,45 @@ class Armarius:
             raise StateError(f"unknown task stage: {task.stage}")
         return self.database.get_run(run_id)
 
+    def require_evidence_anchor_contract(self, run_id: str) -> EvidenceAnchorContract:
+        run = self.database.get_run(run_id)
+        contract = self._evidence_anchor_contract_for_run(run, allow_missing=False)
+        assert contract is not None
+        return contract
+
+    def _evidence_anchor_contract_for_run(
+        self,
+        run: Run,
+        *,
+        allow_missing: bool,
+    ) -> EvidenceAnchorContract | None:
+        if "evidence_anchor_contract" not in run.frozen_config:
+            if allow_missing:
+                return None
+            # An old prompt cannot prove which path aliases its validator accepted, so synthesis is unsafe.
+            raise InfrastructureError(f"run {run.id} predates the frozen evidence anchor contract; start a new run")
+        record = run.frozen_config["evidence_anchor_contract"]
+        try:
+            content = record["content"]
+            contract = EvidenceAnchorContract.model_validate(content)
+            if record["digest"] != evidence_anchor_contract_digest(contract):
+                raise ValueError("contract digest mismatch")
+            templates = record["prompt_templates"]
+            expected_roles = {
+                *self._profile_roles(run),
+                AgentRole.REVISION.value,
+                AgentRole.VERIFICATION.value,
+            }
+            for role in expected_roles:
+                template = templates[role]
+                if not isinstance(template["content"], str) or template["digest"] != ArtifactStore.digest_bytes(
+                    template["content"].encode("utf-8")
+                ):
+                    raise ValueError(f"prompt template digest mismatch for {role}")
+        except (KeyError, TypeError, ValidationError, ValueError) as exc:
+            raise InfrastructureError(f"run {run.id} has a corrupt frozen evidence anchor contract") from exc
+        return contract
+
     async def _resume_budget_wait(self, run: Run) -> None:
         incomplete = [
             task
@@ -289,6 +348,7 @@ class Armarius:
             revision,
             sources,
             build.pdf_path,
+            self.require_evidence_anchor_contract(run.id),
         )
         self._record_file(snapshot / "scriptorium.toml", "application/toml")
         for source in sources:
@@ -390,8 +450,7 @@ class Armarius:
             base_bundle=bundle,
             validator=lambda output: self._validate_review_output(
                 output,
-                self._sources_for_run(run),
-                bundle.pdf_pages,
+                bundle.anchor_map,
                 self._run_dir(run.id) / "snapshot",
                 bundle.workspace / "manuscript.pdf",
                 strict_pdf_evidence,
@@ -404,7 +463,7 @@ class Armarius:
         output = outcome.output
         assert isinstance(output, ReviewOutput)
         for candidate in output.findings:
-            evidence = tuple(item.model_dump(mode="json") for item in candidate.evidence)
+            evidence = tuple(item.model_dump(mode="json", exclude_none=True) for item in candidate.evidence)
             fingerprint = digest_json(
                 {
                     "category": candidate.category,
@@ -503,6 +562,7 @@ class Armarius:
                     resume_attempt = generating_attempt
         route = self._route_for_run(run, AgentRole.REVISION, route_override)
         prompt = self._revision_prompt(run, confirmed, feedback)
+        bundle = self._bundle_for_run(run)
         outcome = await self._execute_task(
             run=run,
             stage="revision",
@@ -510,11 +570,11 @@ class Armarius:
             route=route,
             prompt=prompt,
             schema_kind="revision",
-            base_bundle=self._bundle_for_run(run),
+            base_bundle=bundle,
             validator=lambda output: self._validate_revision_output(
                 output,
                 confirmed,
-                self._sources_for_run(run),
+                bundle.anchor_map,
                 self._run_dir(run.id) / "snapshot",
             ),
             resume_attempt=resume_attempt,
@@ -650,8 +710,9 @@ class Armarius:
             return
         patched = self._run_dir(run.id) / "patched" / patch.id
         verification_workspace = self._run_dir(run.id) / "verifications" / patch.id / "bundle"
-        if (verification_workspace / "manifest.json").is_file():
-            verification_bundle = self._load_bundle(verification_workspace)
+        anchor_contract = self.require_evidence_anchor_contract(run.id)
+        if verification_workspace.exists():
+            verification_bundle = self._load_bundle(verification_workspace, anchor_contract)
         else:
             build = self._build_copy(
                 patched,
@@ -664,6 +725,7 @@ class Armarius:
                 FrozenRevision(run.commit_sha, run.tree_sha),
                 self.manuscript.scan_sources(patched, self._manuscript_config(run).main),
                 build.pdf_path,
+                anchor_contract,
             )
         strict_pdf_evidence = self._has_visual_transcription_contract(run)
         transcription = None
@@ -700,8 +762,7 @@ class Armarius:
             validator=lambda output: self._validate_verification_output(
                 output,
                 confirmed,
-                verification_bundle.sources,
-                verification_bundle.pdf_pages,
+                verification_bundle.anchor_map,
                 patched,
                 verification_bundle.workspace / "manuscript.pdf",
                 strict_pdf_evidence,
@@ -830,14 +891,15 @@ class Armarius:
         return json.loads((bundle.workspace / "manifest.json").read_text(encoding="utf-8"))
 
     def _visual_page_records(self, bundle: ManuscriptBundle) -> list[dict[str, Any]]:
-        manifest = self._bundle_manifest(bundle)
+        if bundle.anchor_map is None:
+            raise InfrastructureError("bundle has no evidence anchor map")
         with fitz.open(bundle.workspace / "manuscript.pdf") as document:
             page_numbers = [index + 1 for index, page in enumerate(document) if page.get_image_info()]
         return [
             {
                 "page": page_number,
-                "path": manifest["pages"][page_number - 1]["path"],
-                "page_digest": manifest["pages"][page_number - 1]["digest"],
+                "path": bundle.anchor_map.compiled_pdf.pages[page_number - 1].read_path,
+                "page_digest": bundle.anchor_map.compiled_pdf.pages[page_number - 1].page_digest,
             }
             for page_number in page_numbers
         ]
@@ -1561,14 +1623,13 @@ class Armarius:
     def _validate_review_output(
         self,
         output: ReviewOutput,
-        sources: tuple[SourceFile, ...],
-        pdf_pages: int,
+        anchor_map: EvidenceAnchorMap,
         source_root: Path,
         pdf_path: Path,
         strict_pdf_evidence: bool,
         visual_transcription: VisualTranscriptionOutput | None = None,
     ) -> list[ValidationIssue]:
-        source_index = {source.path: source for source in sources}
+        source_index = {source.source_path: source for source in anchor_map.sources}
         issues: list[ValidationIssue] = []
         for finding_index, finding in enumerate(output.findings):
             for evidence_index, evidence in enumerate(finding.evidence):
@@ -1576,7 +1637,7 @@ class Armarius:
                     self._validate_evidence(
                         evidence,
                         source_index,
-                        pdf_pages,
+                        anchor_map,
                         source_root,
                         pdf_path,
                         strict_pdf_evidence,
@@ -1590,10 +1651,10 @@ class Armarius:
         self,
         output: RevisionOutput,
         findings: list[Finding],
-        sources: tuple[SourceFile, ...],
+        anchor_map: EvidenceAnchorMap,
         snapshot: Path,
     ) -> list[ValidationIssue]:
-        source_index = {source.path: source for source in sources}
+        source_index = {source.source_path: source for source in anchor_map.sources}
         expected_ids = {finding.id for finding in findings}
         covered_ids: set[str] = set()
         issues: list[ValidationIssue] = []
@@ -1634,24 +1695,36 @@ class Armarius:
                     )
                 )
                 continue
-            if edit.source_digest != source.digest:
+            if not source.text_anchorable:
+                issues.append(
+                    self._issue(
+                        "revision.edit_path_not_editable",
+                        f"{prefix}/path",
+                        "Edit path is not a text-anchorable source.",
+                        expected={"text_anchorable": True},
+                        actual={"path": edit.path, "read_path": source.read_path},
+                    )
+                )
+                continue
+            if edit.source_digest != source.source_digest:
                 issues.append(
                     self._issue(
                         "revision.source_digest_mismatch",
                         f"{prefix}/source_digest",
                         f"Source digest does not match for {edit.path}.",
-                        expected=source.digest,
+                        expected=source.source_digest,
                         actual=edit.source_digest,
                     )
                 )
-            range_valid = edit.end_line <= source.lines
+            assert source.line_count is not None
+            range_valid = edit.end_line <= source.line_count
             if not range_valid:
                 issues.append(
                     self._issue(
                         "revision.range_out_of_bounds",
                         prefix,
                         f"Edit range is outside {edit.path}.",
-                        expected={"start_line": 1, "end_line": source.lines},
+                        expected={"start_line": 1, "end_line": source.line_count},
                         actual={"start_line": edit.start_line, "end_line": edit.end_line},
                     )
                 )
@@ -1731,8 +1804,7 @@ class Armarius:
         self,
         output: VerificationOutput,
         findings: list[Finding],
-        sources: tuple[SourceFile, ...],
-        pdf_pages: int,
+        anchor_map: EvidenceAnchorMap,
         source_root: Path,
         pdf_path: Path,
         strict_pdf_evidence: bool,
@@ -1764,14 +1836,14 @@ class Armarius:
                     },
                 )
             )
-        source_index = {source.path: source for source in sources}
+        source_index = {source.source_path: source for source in anchor_map.sources}
         for issue_index, verification_issue in enumerate(output.issues):
             for evidence_index, evidence in enumerate(verification_issue.evidence):
                 issues.extend(
                     self._validate_evidence(
                         evidence,
                         source_index,
-                        pdf_pages,
+                        anchor_map,
                         source_root,
                         pdf_path,
                         strict_pdf_evidence,
@@ -1784,8 +1856,8 @@ class Armarius:
     def _validate_evidence(
         self,
         evidence: Any,
-        source_index: dict[str, SourceFile],
-        pdf_pages: int,
+        source_index: dict[str, SourceAnchorRecord],
+        anchor_map: EvidenceAnchorMap,
         source_root: Path,
         pdf_path: Path,
         strict_pdf_evidence: bool,
@@ -1793,6 +1865,7 @@ class Armarius:
         path: str = "",
     ) -> list[ValidationIssue]:
         issues: list[ValidationIssue] = []
+        pdf_pages = anchor_map.compiled_pdf.page_count
         if evidence.page is not None and evidence.page > pdf_pages:
             issues.append(
                 self._issue(
@@ -1804,13 +1877,14 @@ class Armarius:
                 )
             )
         if evidence.start_line is None:
-            if evidence.source_path != "manuscript.pdf":
+            # The bundle digest already identifies manuscript.pdf; evidence must not duplicate it.
+            if evidence.source_path != anchor_map.compiled_pdf.source_path:
                 issues.append(
                     self._issue(
                         "evidence.pdf_path_required",
                         f"{path}/source_path",
                         "Page-only evidence must use source_path manuscript.pdf.",
-                        expected="manuscript.pdf",
+                        expected=anchor_map.compiled_pdf.source_path,
                         actual=evidence.source_path,
                     )
                 )
@@ -1846,7 +1920,8 @@ class Armarius:
                 "native_text_candidate": page_text[:_DIAGNOSTIC_TEXT_LIMIT],
             }
             if raster_page and not page_text:
-                actual["guidance"] = "Re-read pages/page-N.png or use source-line evidence."
+                read_path = anchor_map.compiled_pdf.pages[evidence.page - 1].read_path
+                actual["guidance"] = f"Re-read {read_path} or use source-line evidence."
             # Hidden visual transcription is checked for validity but never copied into reviewer diagnostics.
             issues.append(
                 self._issue(
@@ -1870,25 +1945,37 @@ class Armarius:
                 )
             )
             return issues
-        if evidence.source_digest != source.digest:
+        if not source.text_anchorable:
+            issues.append(
+                self._issue(
+                    "evidence.source_not_anchorable",
+                    f"{path}/source_path",
+                    "Evidence path is not a text-anchorable source.",
+                    expected={"text_anchorable": True},
+                    actual={"source_path": evidence.source_path, "read_path": source.read_path},
+                )
+            )
+            return issues
+        if evidence.source_digest != source.source_digest:
             issues.append(
                 self._issue(
                     "evidence.source_digest_mismatch",
                     f"{path}/source_digest",
                     f"Source digest does not match for {evidence.source_path}.",
-                    expected=source.digest,
+                    expected=source.source_digest,
                     actual=evidence.source_digest,
                 )
             )
         if evidence.start_line is None or evidence.end_line is None:
             return issues
-        if evidence.end_line > source.lines:
+        assert source.line_count is not None
+        if evidence.end_line > source.line_count:
             issues.append(
                 self._issue(
                     "evidence.range_out_of_bounds",
                     path,
                     f"Evidence range is outside {evidence.source_path}.",
-                    expected={"start_line": 1, "end_line": source.lines},
+                    expected={"start_line": 1, "end_line": source.line_count},
                     actual={"start_line": evidence.start_line, "end_line": evidence.end_line},
                 )
             )
@@ -1940,9 +2027,10 @@ class Armarius:
     @staticmethod
     def _source_path_expectation(
         actual_path: str,
-        source_index: dict[str, SourceFile],
+        source_index: dict[str, SourceAnchorRecord],
     ) -> dict[str, Any]:
         paths = sorted(source_index)
+        # Read-path aliases are diagnostic hints only; accepting them would corrupt durable anchors.
         canonical = actual_path[len("sources/") :] if actual_path.startswith("sources/") else None
         ranked = sorted(
             paths,
@@ -1967,6 +2055,9 @@ class Armarius:
         sources: tuple[SourceFile, ...],
         project_config_text: str,
     ) -> dict[str, Any]:
+        anchor_contract = DEFAULT_EVIDENCE_ANCHOR_CONTRACT
+        anchor_content = evidence_anchor_contract_content(anchor_contract)
+        anchor_digest = evidence_anchor_contract_digest(anchor_contract)
         roles = (
             *project.profiles[profile],
             AgentRole.VISUAL_TRANSCRIPTION.value,
@@ -1974,10 +2065,23 @@ class Armarius:
             AgentRole.VERIFICATION.value,
         )
         prompts = {role: self._prompt_record(AgentRole(role)) for role in roles}
-        schemas = {
-            kind: {"digest": digest_json(output_schema(kind)), "content": output_schema(kind)}
-            for kind in ("review", "visual_transcription", "revision", "verification")
+        prompt_templates = {
+            role: self._content_record(self._review_prompt_template(prompts[role]["content"], anchor_contract))
+            for role in project.profiles[profile]
         }
+        prompt_templates[AgentRole.REVISION.value] = self._content_record(
+            self._revision_prompt_template(prompts[AgentRole.REVISION.value]["content"], anchor_contract)
+        )
+        prompt_templates[AgentRole.VERIFICATION.value] = self._content_record(
+            self._verification_prompt_template(
+                prompts[AgentRole.VERIFICATION.value]["content"],
+                anchor_contract,
+            )
+        )
+        schemas = {}
+        for kind in ("review", "visual_transcription", "revision", "verification"):
+            schema = output_schema(kind, anchor_contract)
+            schemas[kind] = {"digest": digest_json(schema), "content": schema}
         frozen_local = self.local_config.frozen_dict()
         for route in frozen_local["routes"].values():
             route["runtime_version"] = RUNTIME_SDK_VERSIONS[route["runtime"]]
@@ -1995,33 +2099,17 @@ class Armarius:
             "prompts": prompts,
             "schemas": schemas,
             "sources": [asdict(source) for source in sources],
+            "evidence_anchor_contract": {
+                "digest": anchor_digest,
+                "content": anchor_content,
+                "prompt_templates": prompt_templates,
+            },
         }
 
     def _review_prompt(self, run: Run, role: AgentRole) -> str:
-        role_prompt = run.frozen_config["prompts"][role.value]["content"]
-        return (
-            f"{role_prompt}\n\n"
-            "Review the frozen manuscript in the workspace: source files are under sources/, "
-            "the rendered PDF is manuscript.pdf, and rendered page images are under pages/. "
-            "Every finding must cite resolvable evidence with the exact anchors required by "
-            "the output schema. For source-file evidence, source_path must be the bare "
-            'relative path from source-map.json (for example "main.tex", never '
-            '"sources/main.tex"), and start_line, end_line, source_digest, and quoted_text '
-            "must be supplied; quoted_text must be copied verbatim from those lines so that "
-            "it appears exactly inside the cited line range, without additions, omissions, "
-            "or ellipses. Prefer source-file line evidence: it is exact and verifiable. "
-            'For rendered-PDF evidence, use source_path "manuscript.pdf", set page to a '
-            "valid 1-based PDF page number, and copy quoted_text verbatim from that page's "
-            "native text layer; use PDF page evidence only when the claim concerns visual "
-            "content that has no corresponding source text. Use start_line/end_line only "
-            "for UTF-8 text sources; never line-anchor .pdf files or other graphics/binary "
-            "assets from source-map.json. Only manuscript.pdf supports page evidence. Do not "
-            "modify files. Return only the ReviewOutput JSON object with no prose before or "
-            "after it."
-        )
+        return self._frozen_prompt_template(run, role)
 
     def _revision_prompt(self, run: Run, findings: list[Finding], feedback: str | None) -> str:
-        role_prompt = run.frozen_config["prompts"][AgentRole.REVISION.value]["content"]
         finding_data = [
             {
                 "id": finding.id,
@@ -2035,41 +2123,102 @@ class Armarius:
             }
             for finding in findings
         ]
-        feedback_text = f"\nHuman rejection feedback:\n{feedback}\n" if feedback else ""
-        return (
-            f"{role_prompt}\n\nConfirmed findings:\n{json.dumps(finding_data, indent=2, ensure_ascii=False)}\n"
-            f"{feedback_text}"
-            "Propose exact, non-overlapping source replacements. For every edit, path must "
-            'be the bare relative path from source-map.json (for example "main.tex", never '
-            '"sources/main.tex"), source_digest must match source-map.json, and before must '
-            "reproduce the exact current text of the cited lines. Do not modify files. "
-            "Return only the RevisionOutput JSON object."
+        return self._render_frozen_template(
+            self._frozen_prompt_template(run, AgentRole.REVISION),
+            {
+                _CONFIRMED_FINDINGS_SLOT: canonical_json(finding_data),
+                _HUMAN_FEEDBACK_SLOT: canonical_json({"reason": feedback}) if feedback else "null",
+            },
         )
 
     def _verification_prompt(self, run: Run, patch: Patch, findings: list[Finding]) -> str:
-        role_prompt = run.frozen_config["prompts"][AgentRole.VERIFICATION.value]["content"]
         finding_data = [
             {"id": finding.id, "title": finding.title, "claim": finding.claim, "evidence": list(finding.evidence)}
             for finding in findings
         ]
         diff = self.artifacts.get_bytes(patch.diff_digest).decode("utf-8")
-        return (
-            f"{role_prompt}\n\nConfirmed findings:\n{json.dumps(finding_data, indent=2, ensure_ascii=False)}\n\n"
-            f"Approved diff:\n{diff}\n\n"
-            "Verify the patched manuscript independently for resolution, factual or numeric changes, "
-            "citation/figure consistency, and regressions. Every issue must cite resolvable evidence "
-            "with the exact anchors required by the output schema. For source-file evidence, "
-            "source_path must be the bare relative path from source-map.json (never "
-            '"sources/..."), and start_line, end_line, source_digest, and quoted_text must be '
-            "supplied; quoted_text must be copied verbatim from those lines so that it appears "
-            "exactly inside the cited line range, without additions, omissions, or ellipses. For "
-            'rendered-PDF evidence, use source_path "manuscript.pdf", set page to a valid 1-based '
-            "PDF page number, and copy quoted_text verbatim from the cited page. Use "
-            "start_line/end_line only for UTF-8 text sources; never line-anchor .pdf files or "
-            "other graphics/binary assets from source-map.json. Only manuscript.pdf supports "
-            "page evidence. Return only the VerificationOutput JSON object with no prose before "
-            "or after it."
+        return self._render_frozen_template(
+            self._frozen_prompt_template(run, AgentRole.VERIFICATION),
+            {
+                _CONFIRMED_FINDINGS_SLOT: canonical_json(finding_data),
+                _APPROVED_DIFF_SLOT: canonical_json({"diff": diff}),
+            },
         )
+
+    @staticmethod
+    def _review_prompt_template(role_prompt: str, contract: EvidenceAnchorContract) -> str:
+        contract_digest = evidence_anchor_contract_digest(contract)
+        return (
+            f"{role_prompt}\n\n"
+            "Review the frozen manuscript in the workspace. Read source files and rendered pages "
+            "only through the exact read_path values in source-map.json. A read_path is a workspace "
+            "location, never a durable evidence source_path.\n\n"
+            f"Frozen evidence anchor contract digest: {contract_digest}\n"
+            f"Frozen evidence anchor contract:\n{canonical_json(evidence_anchor_contract_content(contract))}\n\n"
+            "For source-line evidence, output the bare source_path from source-map.json with the "
+            "complete inclusive line range, source_digest, and a verbatim quoted_text substring. "
+            "Only sources marked text_anchorable may be line-anchored. For compiled-PDF evidence, "
+            'output source_path "manuscript.pdf", a 1-based page, and quoted_text; do not output '
+            "line or source-digest fields. Figure review may inspect the exact page-image read_path "
+            "listed for a page, but that read path is never the output anchor. Prefer source-line "
+            "evidence when the claim has corresponding source text. Do not modify files. Return only "
+            "the ReviewOutput JSON object with no prose before or after it."
+        )
+
+    @staticmethod
+    def _revision_prompt_template(role_prompt: str, contract: EvidenceAnchorContract) -> str:
+        contract_digest = evidence_anchor_contract_digest(contract)
+        return (
+            f"{role_prompt}\n\n"
+            f"Frozen evidence anchor contract digest: {contract_digest}\n"
+            f"Frozen evidence anchor contract:\n{canonical_json(evidence_anchor_contract_content(contract))}\n\n"
+            f"Confirmed findings:\n{_CONFIRMED_FINDINGS_SLOT}\n\n"
+            f"Human rejection feedback:\n{_HUMAN_FEEDBACK_SLOT}\n\n"
+            "Propose exact, non-overlapping source replacements. Each edit path must be a bare "
+            "source_path marked text_anchorable in source-map.json, never its sources/... read_path. "
+            "The source_digest and inclusive line range must match the current bundle. The before text "
+            "must use one of the contract's two allowed final-line-terminator forms. "
+            "Do not modify files. Return only the RevisionOutput JSON object."
+        )
+
+    @staticmethod
+    def _verification_prompt_template(role_prompt: str, contract: EvidenceAnchorContract) -> str:
+        contract_digest = evidence_anchor_contract_digest(contract)
+        return (
+            f"{role_prompt}\n\n"
+            f"Frozen evidence anchor contract digest: {contract_digest}\n"
+            f"Frozen evidence anchor contract:\n{canonical_json(evidence_anchor_contract_content(contract))}\n\n"
+            "Confirmed findings and their evidence are historical context:\n"
+            f"{_CONFIRMED_FINDINGS_SLOT}\n\n"
+            f"Approved diff:\n{_APPROVED_DIFF_SLOT}\n\n"
+            "Verify the patched manuscript independently for resolution, factual or numeric changes, "
+            "citation/figure consistency, and regressions. Any new issue must use the current patched "
+            "workspace source-map.json, source digest, and line range. Read source files and page "
+            "images through exact read_path values, but output only the mutually exclusive durable "
+            "source-line or manuscript.pdf page anchor. Return only the VerificationOutput JSON object "
+            "with no prose before or after it."
+        )
+
+    def _frozen_prompt_template(self, run: Run, role: AgentRole) -> str:
+        # Historical task identity is authoritative; never re-render it from the current defaults.
+        self._evidence_anchor_contract_for_run(run, allow_missing=False)
+        return run.frozen_config["evidence_anchor_contract"]["prompt_templates"][role.value]["content"]
+
+    @staticmethod
+    def _render_frozen_template(template: str, replacements: dict[str, str]) -> str:
+        positions = []
+        for placeholder, value in replacements.items():
+            if template.count(placeholder) != 1:
+                raise InfrastructureError(f"frozen prompt template has invalid placeholder {placeholder}")
+            positions.append((template.index(placeholder), placeholder, value))
+        # Render from the original template so model-authored JSON is data and is never scanned as a later slot.
+        chunks = []
+        cursor = 0
+        for index, placeholder, value in sorted(positions):
+            chunks.extend((template[cursor:index], value))
+            cursor = index + len(placeholder)
+        chunks.append(template[cursor:])
+        return "".join(chunks)
 
     def _route_for_run(
         self,
@@ -2109,31 +2258,144 @@ class Armarius:
     def _max_concurrency(self, run: Run) -> int:
         return int(run.frozen_config["local"]["max_concurrency"])
 
-    def _bundle_for_run(self, run: Run) -> ManuscriptBundle:
-        return self._load_bundle(self._run_dir(run.id) / "bundle")
+    def _bundle_for_run(self, run: Run, *, allow_legacy: bool = False) -> ManuscriptBundle:
+        contract = self._evidence_anchor_contract_for_run(run, allow_missing=allow_legacy)
+        return self._load_bundle(
+            self._run_dir(run.id) / "bundle",
+            contract,
+            allow_legacy=allow_legacy and contract is None,
+        )
+
+    @classmethod
+    def _load_bundle(
+        cls,
+        workspace: Path,
+        contract: EvidenceAnchorContract | None,
+        *,
+        allow_legacy: bool = False,
+    ) -> ManuscriptBundle:
+        if workspace.is_symlink() or not workspace.is_dir():
+            raise InfrastructureError(f"bundle workspace is missing or unsafe: {workspace}")
+        manifest_path = workspace / "manifest.json"
+        source_map_path = workspace / "source-map.json"
+        cls._require_regular_bundle_file(manifest_path)
+        cls._require_regular_bundle_file(source_map_path)
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            source_map_value = json.loads(source_map_path.read_text(encoding="utf-8"))
+            sources = tuple(SourceFile(**source) for source in manifest["sources"])
+            pdf_pages = int(manifest["pdf_pages"])
+            page_records = list(manifest["pages"])
+        except (KeyError, OSError, TypeError, UnicodeDecodeError, ValueError) as exc:
+            raise InfrastructureError(f"bundle metadata is invalid: {workspace}") from exc
+        if pdf_pages < 1 or len(page_records) != pdf_pages:
+            raise InfrastructureError(f"bundle page render is incomplete: {workspace}")
+
+        source_root = workspace / "sources"
+        pages_root = workspace / "pages"
+        if source_root.is_symlink() or pages_root.is_symlink() or not source_root.is_dir() or not pages_root.is_dir():
+            raise InfrastructureError(f"bundle content directories are missing or unsafe: {workspace}")
+        expected_source_files: set[str] = set()
+        source_anchor_records: list[SourceAnchorRecord] = []
+        for source in sources:
+            relative = Path(source.path)
+            if (
+                relative.is_absolute()
+                or relative.as_posix() != source.path
+                or ".." in relative.parts
+                or "." in relative.parts
+            ):
+                raise InfrastructureError(f"bundle source path is unsafe: {source.path}")
+            path = source_root / relative
+            cls._require_regular_bundle_file(path)
+            data = path.read_bytes()
+            if ArtifactStore.digest_bytes(data) != source.digest:
+                raise InfrastructureError(f"bundle source digest does not match: {source.path}")
+            try:
+                text = data.decode("utf-8")
+            except UnicodeDecodeError:
+                text = None
+            text_anchorable = text is not None and relative.suffix.lower() not in NON_TEXT_ANCHOR_EXTENSIONS
+            expected_source_files.add((Path("sources") / relative).as_posix())
+            source_anchor_records.append(
+                SourceAnchorRecord(
+                    source_path=source.path,
+                    read_path=(Path("sources") / relative).as_posix(),
+                    source_digest=source.digest,
+                    line_count=len(text.splitlines()) if text_anchorable else None,
+                    text_anchorable=text_anchorable,
+                )
+            )
+        actual_source_files = {
+            item.relative_to(workspace).as_posix()
+            for item in source_root.rglob("*")
+            if item.is_file() or item.is_symlink()
+        }
+        if actual_source_files != expected_source_files:
+            raise InfrastructureError(f"bundle source set does not match the manifest: {workspace}")
+
+        pdf = workspace / "manuscript.pdf"
+        cls._require_regular_bundle_file(pdf)
+        if ArtifactStore.digest_file(pdf) != manifest.get("pdf_digest"):
+            raise InfrastructureError(f"bundle PDF digest does not match: {workspace}")
+        expected_page_files: set[str] = set()
+        page_anchor_records = []
+        for page_number, page in enumerate(page_records, start=1):
+            expected_path = f"pages/page-{page_number:04d}.png"
+            if page.get("path") != expected_path:
+                raise InfrastructureError(f"bundle page path does not match: {expected_path}")
+            path = workspace / expected_path
+            cls._require_regular_bundle_file(path)
+            if ArtifactStore.digest_file(path) != page.get("digest"):
+                raise InfrastructureError(f"bundle page digest does not match: {expected_path}")
+            expected_page_files.add(expected_path)
+            page_anchor_records.append(
+                {
+                    "page": page_number,
+                    "read_path": expected_path,
+                    "page_digest": page["digest"],
+                }
+            )
+        actual_page_files = {
+            item.relative_to(workspace).as_posix()
+            for item in pages_root.iterdir()
+            if item.is_file() or item.is_symlink()
+        }
+        if actual_page_files != expected_page_files:
+            raise InfrastructureError(f"bundle page set does not match the manifest: {workspace}")
+
+        if contract is None:
+            if not allow_legacy or source_map_value != {"sources": [asdict(source) for source in sources]}:
+                raise InfrastructureError(f"bundle source map has no frozen anchor contract: {workspace}")
+            return ManuscriptBundle(workspace, sources, pdf_pages)
+        try:
+            anchor_map = EvidenceAnchorMap.model_validate(source_map_value)
+            expected_map = EvidenceAnchorMap.model_validate(
+                {
+                    "contract_digest": evidence_anchor_contract_digest(contract),
+                    "sources": [item.model_dump(mode="json") for item in source_anchor_records],
+                    "compiled_pdf": {
+                        "source_path": contract.pdf_page.source_path,
+                        "read_path": contract.pdf_page.source_path,
+                        "page_count": pdf_pages,
+                        "pages": page_anchor_records,
+                    },
+                }
+            )
+        except ValidationError as exc:
+            raise InfrastructureError(f"bundle source map is invalid: {workspace}") from exc
+        if anchor_map != expected_map:
+            raise InfrastructureError(f"bundle source map does not match the frozen bundle: {workspace}")
+        return ManuscriptBundle(workspace, sources, pdf_pages, anchor_map)
 
     @staticmethod
-    def _load_bundle(workspace: Path) -> ManuscriptBundle:
-        manifest = json.loads((workspace / "manifest.json").read_text(encoding="utf-8"))
-        sources = tuple(SourceFile(**source) for source in manifest["sources"])
-        pdf_pages = int(manifest["pdf_pages"])
-        pdf = workspace / "manuscript.pdf"
-        if not pdf.is_file():
-            raise InfrastructureError(f"bundle PDF is missing: {workspace}")
-        if ArtifactStore.digest_file(pdf) != manifest["pdf_digest"]:
-            raise InfrastructureError(f"bundle PDF digest does not match: {workspace}")
-        pages = list((workspace / "pages").glob("page-*.png"))
-        if len(pages) != pdf_pages or len(manifest["pages"]) != pdf_pages:
-            raise InfrastructureError(f"bundle page render is incomplete: {workspace}")
-        for source in sources:
-            path = workspace / "sources" / source.path
-            if not path.is_file() or ArtifactStore.digest_file(path) != source.digest:
-                raise InfrastructureError(f"bundle source digest does not match: {source.path}")
-        for page in manifest["pages"]:
-            path = workspace / page["path"]
-            if not path.is_file() or ArtifactStore.digest_file(path) != page["digest"]:
-                raise InfrastructureError(f"bundle page digest does not match: {page['path']}")
-        return ManuscriptBundle(workspace, sources, pdf_pages)
+    def _require_regular_bundle_file(path: Path) -> None:
+        try:
+            metadata = path.lstat()
+        except OSError as exc:
+            raise InfrastructureError(f"bundle file is missing: {path}") from exc
+        if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
+            raise InfrastructureError(f"bundle file is unsafe: {path}")
 
     def _budget_available(self, run_id: str, route: RouteConfig) -> bool:
         run = self.database.get_run(run_id)
@@ -2222,7 +2484,11 @@ class Armarius:
 
     def _prompt_record(self, role: AgentRole) -> dict[str, str]:
         content = self._load_prompt(role)
-        return {"digest": self.artifacts.digest_bytes(content.encode("utf-8")), "content": content}
+        return self._content_record(content)
+
+    @staticmethod
+    def _content_record(content: str) -> dict[str, str]:
+        return {"digest": ArtifactStore.digest_bytes(content.encode("utf-8")), "content": content}
 
     @staticmethod
     def _load_prompt(role: AgentRole) -> str:

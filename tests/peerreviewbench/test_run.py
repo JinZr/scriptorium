@@ -12,8 +12,10 @@ from egs.peerreviewbench.prepare import BenchmarkError, file_digest, load_lock
 import egs.peerreviewbench.run as benchmark_run
 from egs.peerreviewbench.run import PeerReviewBenchManuscriptManager, create_paper_project, run_benchmark
 from scriptorium.config import MODEL_PLACEHOLDER, load_local_config, load_project_config
-from scriptorium.domain import AgentRole, AttemptStatus, RunStatus, TaskStatus
+from scriptorium.domain import AgentRole, AttemptStatus, RunStatus, TaskStatus, canonical_json
+from scriptorium.errors import InfrastructureError
 from scriptorium.runtime import AgentResult, AgentUsage
+from scriptorium.schemas import DEFAULT_EVIDENCE_ANCHOR_CONTRACT
 from scriptorium.service import ScriptoriumService
 
 ROLES = {
@@ -77,7 +79,6 @@ class FullProfileRuntime:
                             "start_line": 3,
                             "end_line": 3,
                             "source_digest": sha256(source.read_bytes()).hexdigest(),
-                            "page": 1,
                             "quoted_text": "The reported result needs review.",
                         }
                     ],
@@ -297,7 +298,14 @@ def test_markdown_manager_builds_standard_bundle_without_project_sentinel(tmp_pa
     repeated = manager.build(repeat_workspace, load_project_config(snapshot).manuscript)
     assert file_digest(repeated.pdf_path) == file_digest(build.pdf_path)
 
-    bundle = manager.create_bundle(snapshot, tmp_path / "bundle", revision, sources, build.pdf_path)
+    bundle = manager.create_bundle(
+        snapshot,
+        tmp_path / "bundle",
+        revision,
+        sources,
+        build.pdf_path,
+        DEFAULT_EVIDENCE_ANCHOR_CONTRACT,
+    )
 
     assert bundle.pdf_pages == 2
     assert (bundle.workspace / "manuscript.pdf").is_file()
@@ -532,6 +540,49 @@ def test_full_profile_service_persists_findings_artifacts_and_cost(tmp_path: Pat
         bundle_source.unlink()
         with pytest.raises(BenchmarkError, match="bundle"):
             benchmark_run.validate_completed_scriptorium_state(service, valid_entry)
+
+
+def test_completed_bundle_validation_allows_explicit_legacy_source_map_read_only(tmp_path: Path) -> None:
+    prepared = _prepared_paper(
+        tmp_path / "prepared",
+        paper_id=18,
+        dataset_id="test/peerreview-bench",
+        dataset_revision="locked-revision",
+    )
+    project, manager = _project(tmp_path, prepared)
+    runtime = FullProfileRuntime()
+
+    with ScriptoriumService(
+        project,
+        runtime_factory=lambda route: runtime,
+        manuscript_manager=manager,
+    ) as service:
+        run = asyncio.run(service.start_run("prepared", "full", None))["run"]
+        run_dir = service.armarius._run_dir(run.id)
+        bundle_dir = run_dir / "bundle"
+        bundle_manifest = json.loads((bundle_dir / "manifest.json").read_text(encoding="utf-8"))
+        source_map_path = bundle_dir / "source-map.json"
+        source_map_path.write_text(
+            json.dumps({"sources": bundle_manifest["sources"]}, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        run_manifest_path = run_dir / "manifest.json"
+        run_manifest = json.loads(run_manifest_path.read_text(encoding="utf-8"))
+        run_manifest["bundle_digest"] = service.armarius._directory_digest(bundle_dir)
+        run_manifest_path.write_text(
+            json.dumps(run_manifest, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        service.armarius._record_file(source_map_path, "application/json")
+        service.armarius._record_text(canonical_json(run_manifest), "application/json")
+        legacy_config = dict(run.frozen_config)
+        legacy_config.pop("evidence_anchor_contract")
+        legacy_run = replace(run, frozen_config=legacy_config)
+
+        benchmark_run._validate_completed_bundle(service, legacy_run, 18)
+        with pytest.raises(InfrastructureError, match="predates the frozen evidence anchor contract"):
+            service.armarius._bundle_for_run(legacy_run)
+        assert len(runtime.calls) == 5
 
 
 def test_completed_benchmark_paper_is_not_repeated_on_resume(

@@ -29,13 +29,19 @@ The revision is resolved and frozen before review. Uncommitted changes do not en
 
 Once `run start` reserves its run ID, it owns that run through the same kernel lock used by later mutations. `run status`, `run report`, and `run gate` remain available as read-only observations while a mutation is active; they do not take ownership or alter attempts.
 
+### Use evidence anchors
+
+Treat `source-map.json` as the exact path map. For source-line evidence, read `sources/sections/methods.tex` but return `source_path="sections/methods.tex"` together with `start_line`, `end_line`, `source_digest`, and `quoted_text`; do not include `page`. Revision edits use the same bare path and may target only entries marked `text_anchorable=true`.
+
+For compiled-PDF evidence, read the page image at the map's exact path, such as `pages/page-0003.png`, but return `source_path="manuscript.pdf"`, `page=3`, and `quoted_text`; do not include source line or digest fields. Paths such as `sources/main.tex`, `pages/page-0003.png`, or a source graphic such as `sources/Fig5.pdf` are never accepted as output aliases. The Verifier uses the patched workspace's current source map and digests for any new issue; evidence attached to an earlier finding is historical context only.
+
 ### Diagnose structured-output failures
 
 `run status` exposes a nullable `validation_report_artifact_digest` on each attempt. `run report --format json` adds the corresponding full reports in stable attempt order; the Markdown report shows only the issue count, first code and JSON Pointer, and report digest. The short attempt error is intentionally only a one-line index into this durable report.
 
 Scriptorium validates one complete replacement object at a time. The first invalid base turn may receive one automatic same-session correction. If that correction is still invalid, the command stops; each later same-route `run resume` or `run retry` adds exactly one correction attempt using the latest report. Selecting a different named route starts a new session with the full base task and compatible diagnostics. Correction attempts continue to count their actual usage and cost, and a later mutation must pass the ordinary budget gate.
 
-Do not edit or regenerate a validation report. A missing, corrupt, wrongly typed, or provenance-mismatched report is an infrastructure failure and blocks a new attempt. Repair artifact storage rather than manually changing SQLite. Reports may say that a PDF quotation failed both native and visual checks, but hidden visual-transcription text is deliberately not included. Raster-only pages may therefore still require the reviewer to reread `pages/page-N.png` or use source-line evidence; this release does not relax strict PDF evidence rules.
+Do not edit or regenerate a validation report. A missing, corrupt, wrongly typed, or provenance-mismatched report is an infrastructure failure and blocks a new attempt. Repair artifact storage rather than manually changing SQLite. Reports may say that a PDF quotation failed both native and visual checks, but hidden visual-transcription text is deliberately not included. Raster-only pages may therefore still require the reviewer to reread the exact page-image `read_path` from `source-map.json` or use source-line evidence; this release does not relax strict PDF evidence rules or expose the transcription as a suggested quotation.
 
 ## Record finding decisions
 
@@ -104,7 +110,7 @@ If an attempt has a recorded session ID but the corresponding native state is mi
 
 If the budget is exhausted, the run pauses in `waiting_budget`. Inspect the report, then either retry the task with an explicitly selected frozen zero-cost route or start a new run with a new budget. Scriptorium never changes the frozen budget or selects a fallback model.
 
-A historical frozen run without a `visual_transcription` contract keeps its original page-anchor evidence behavior: `manuscript.pdf` paths and page bounds are checked, but newer quotation matching is not applied. Resume does not inject a new model or route into frozen inputs; start a new run to enable raster-page transcription.
+Historical reports may reflect the page-anchor behavior frozen before visual transcription was introduced. Read-only inspection preserves that history; Scriptorium never injects a newer model, route, or anchor rule into frozen inputs.
 
 ## Apply and evaluate the gate
 
@@ -127,6 +133,8 @@ Exit code `3` identifies Git, LaTeX, SQLite, or AgentRuntime infrastructure fail
 Before upgrading Scriptorium, reinstalling it from a different checkout, or switching the code used by a driver, stop every old driver and its child processes and confirm that their kernel locks and provider cleanup barriers have been released. Old and new drivers must never operate on the same `.scriptorium/` state concurrently. Same-inode owner JSON can help identify a process but is not proof that ownership remains or has ended.
 
 After the old processes have stopped, perform recovery through `run resume`, `run retry`, or `run cancel`. That command must acquire the kernel lock before it marks stale attempts as interrupted. Do not make `run status`, `run report`, or `run gate` repair state, and do not edit SQLite, artifacts, session data, or lock files to force an upgrade through.
+
+Runs created before the frozen evidence-anchor contract require an explicit boundary. `run status`, `run report`, and `run gate` remain read-only, existing finding and patch decisions and `patch apply` retain their behavior, and `run cancel` remains available. Terminal-run reads and no-ops are unchanged. For a nonterminal legacy run, however, `run resume` and `run retry` fail before attempt recovery or provider invocation; start a new run instead. Do not backfill the contract or infer it from old prompts or bundles.
 
 ## Live native-harness smoke tests
 

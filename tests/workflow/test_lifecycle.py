@@ -1,4 +1,5 @@
 import asyncio
+from hashlib import sha256
 import json
 
 import pytest
@@ -6,6 +7,7 @@ import pytest
 from scriptorium.domain import AgentRole, PatchStatus, RunStatus, TaskStatus
 from scriptorium.errors import InfrastructureError
 from scriptorium.service import ScriptoriumService
+from scriptorium.workflow import Armarius
 
 from ._support import MANUSCRIPT, FakeAgentRuntime, PdfBuildingManuscriptManager, make_repository
 
@@ -169,7 +171,7 @@ def test_legacy_run_preserves_page_only_evidence_through_resume_and_verification
         assert runtime.run_calls[AgentRole.VERIFICATION] == 1
 
 
-def test_full_workflow_preserves_worktree_until_approved_patch_is_applied(tmp_path):
+def test_full_workflow_preserves_worktree_until_approved_patch_is_applied(tmp_path, monkeypatch):
     repo = make_repository(tmp_path)
     runtime = FakeAgentRuntime()
     manager = PdfBuildingManuscriptManager(repo)
@@ -184,11 +186,11 @@ def test_full_workflow_preserves_worktree_until_approved_patch_is_applied(tmp_pa
 
         assert started["run"].status == RunStatus.AWAITING_DECISION
         review_prompt = runtime.tasks[AgentRole.SUBSTANTIVE_REVIEW]
-        assert "source_path must be the bare relative path from source-map.json" in review_prompt
-        assert "start_line, end_line, source_digest, and quoted_text must be supplied" in review_prompt
-        assert 'use source_path "manuscript.pdf", set page to a valid 1-based PDF page number' in review_prompt
-        assert "copy quoted_text verbatim from that page's native text layer" in review_prompt
-        assert "never line-anchor .pdf files or other graphics/binary assets" in review_prompt
+        assert "Frozen evidence anchor contract digest:" in review_prompt
+        assert "bare source_path from source-map.json" in review_prompt
+        assert 'output source_path "manuscript.pdf", a 1-based page' in review_prompt
+        assert "Only sources marked text_anchorable may be line-anchored" in review_prompt
+        assert "exact page-image read_path" in review_prompt
         assert "ReviewOutput JSON object with no prose before or after it" in review_prompt
         frozen_route = started["run"].frozen_config["local"]["routes"]["primary"]
         assert frozen_route["runtime"] == "codex"
@@ -201,6 +203,25 @@ def test_full_workflow_preserves_worktree_until_approved_patch_is_applied(tmp_pa
         bundle_manifest = json.loads(
             (repo / ".scriptorium" / "runs" / run_id / "bundle" / "manifest.json").read_text(encoding="utf-8")
         )
+        source_map = json.loads(
+            (repo / ".scriptorium" / "runs" / run_id / "bundle" / "source-map.json").read_text(encoding="utf-8")
+        )
+        anchor_record = started["run"].frozen_config["evidence_anchor_contract"]
+        assert source_map["contract_digest"] == anchor_record["digest"]
+        assert all(
+            f"Frozen evidence anchor contract digest: {anchor_record['digest']}" in template["content"]
+            for template in anchor_record["prompt_templates"].values()
+        )
+        monkeypatch.setattr(
+            Armarius,
+            "_revision_prompt_template",
+            staticmethod(lambda role_prompt, contract: "changed current revision renderer"),
+        )
+        monkeypatch.setattr(
+            Armarius,
+            "_verification_prompt_template",
+            staticmethod(lambda role_prompt, contract: "changed current verification renderer"),
+        )
         page_digest = bundle_manifest["pages"][0]["digest"]
         assert service.database.get_artifact(page_digest).digest == page_digest
 
@@ -211,9 +232,9 @@ def test_full_workflow_preserves_worktree_until_approved_patch_is_applied(tmp_pa
         revised = asyncio.run(service.resume_run(run_id))
         assert revised["run"].status == RunStatus.AWAITING_PATCH_APPROVAL
         revision_prompt = runtime.tasks[AgentRole.REVISION]
-        assert "path must be the bare relative path from source-map.json" in revision_prompt
-        assert "source_digest must match source-map.json" in revision_prompt
-        assert "before must reproduce the exact current text of the cited lines" in revision_prompt
+        assert "changed current revision renderer" not in revision_prompt
+        assert "Each edit path must be a bare source_path marked text_anchorable" in revision_prompt
+        assert "two allowed final-line-terminator forms" in revision_prompt
         assert repo.joinpath("main.tex").read_text(encoding="utf-8") == MANUSCRIPT
 
         patch_id = revised["patch_ids"][0]
@@ -225,12 +246,34 @@ def test_full_workflow_preserves_worktree_until_approved_patch_is_applied(tmp_pa
         verified = asyncio.run(service.resume_run(run_id))
         assert verified["run"].status == RunStatus.READY_TO_APPLY
         verification_prompt = runtime.tasks[AgentRole.VERIFICATION]
-        assert "source_path must be the bare relative path from source-map.json" in verification_prompt
-        assert "start_line, end_line, source_digest, and quoted_text must be supplied" in verification_prompt
-        assert 'use source_path "manuscript.pdf", set page to a valid 1-based PDF page number' in verification_prompt
-        assert "copy quoted_text verbatim from the cited page" in verification_prompt
-        assert "never line-anchor .pdf files or other graphics/binary assets" in verification_prompt
+        assert "changed current verification renderer" not in verification_prompt
+        assert "their evidence are historical context" in verification_prompt
+        assert "current patched workspace source-map.json" in verification_prompt
+        assert "mutually exclusive durable" in verification_prompt
         assert "VerificationOutput JSON object with no prose before or after it" in verification_prompt
+        verification_map = json.loads(
+            (
+                repo / ".scriptorium" / "runs" / run_id / "verifications" / patch_id / "bundle" / "source-map.json"
+            ).read_text(encoding="utf-8")
+        )
+        patched_source = next(item for item in verification_map["sources"] if item["source_path"] == "main.tex")
+        assert (
+            patched_source["source_digest"]
+            == sha256(
+                (
+                    repo
+                    / ".scriptorium"
+                    / "runs"
+                    / run_id
+                    / "verifications"
+                    / patch_id
+                    / "bundle"
+                    / "sources"
+                    / "main.tex"
+                ).read_bytes()
+            ).hexdigest()
+        )
+        assert patched_source["source_digest"] != findings[0].evidence[0]["source_digest"]
         assert repo.joinpath("main.tex").read_text(encoding="utf-8") == MANUSCRIPT
         assert service.evaluate_gate(run_id)["passed"] is False
 

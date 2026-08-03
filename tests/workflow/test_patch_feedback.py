@@ -199,7 +199,7 @@ def test_rejected_patch_correction_recovers_context_after_terminal_attempt(tmp_p
             generating_attempt.thread_id,
         ]
         assert all(
-            "Human rejection feedback:\nMake the replacement more precise." in prompt
+            'Human rejection feedback:\n{"reason":"Make the replacement more precise."}' in prompt
             for prompt in revision.revision_resume_prompts
         )
         assert primary.run_calls[AgentRole.REVISION] == 0
@@ -251,7 +251,10 @@ def test_rejected_patch_correction_recovers_context_after_budget_wait(tmp_path):
 
         assert resumed["run"].status == RunStatus.AWAITING_PATCH_APPROVAL
         assert runtime.revision_resume_thread_ids == [generating_attempt.thread_id]
-        assert "Human rejection feedback:\nMake the replacement more precise." in runtime.revision_resume_prompts[0]
+        assert (
+            'Human rejection feedback:\n{"reason":"Make the replacement more precise."}'
+            in runtime.revision_resume_prompts[0]
+        )
 
 
 def test_rejected_patch_correction_reproposes_the_same_diff_with_new_lineage(tmp_path):

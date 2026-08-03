@@ -771,7 +771,7 @@ def _validate_completed_bundle(service: ScriptoriumService, core_run: Any, paper
             raise BenchmarkError(f"paper{paper_id} bundle contains an unsafe symlink: {path}")
 
     try:
-        bundle = service.armarius._bundle_for_run(core_run)
+        bundle = service.armarius._bundle_for_run(core_run, allow_legacy=True)
         run_manifest_path = service.armarius._run_dir(core_run.id) / "manifest.json"
         if run_manifest_path.is_symlink():
             raise BenchmarkError(f"paper{paper_id} core run manifest is unsafe: {run_manifest_path}")

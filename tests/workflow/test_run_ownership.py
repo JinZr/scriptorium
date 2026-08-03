@@ -11,6 +11,7 @@ import time
 
 import pytest
 
+from scriptorium.artifacts import ArtifactStore
 from scriptorium.domain import (
     AgentRole,
     Artifact,
@@ -25,6 +26,11 @@ from scriptorium.domain import (
 )
 from scriptorium.errors import InfrastructureError, NotFoundError, StateError
 from scriptorium.runtime.contained import ContainedAgentRuntime
+from scriptorium.schemas import (
+    DEFAULT_EVIDENCE_ANCHOR_CONTRACT,
+    evidence_anchor_contract_content,
+    evidence_anchor_contract_digest,
+)
 from scriptorium.service import ScriptoriumService
 from scriptorium.storage import Database
 
@@ -248,7 +254,23 @@ def _run_rows(repo, run_id):
         connection.close()
 
 
-def _create_orphaned_run(repo):
+def _create_orphaned_run(repo, *, legacy=False):
+    prompt = "frozen prompt"
+    prompt_record = {
+        "digest": ArtifactStore.digest_bytes(prompt.encode("utf-8")),
+        "content": prompt,
+    }
+    frozen_config = {"profile_roles": [AgentRole.CONSISTENCY.value]}
+    if not legacy:
+        frozen_config["evidence_anchor_contract"] = {
+            "digest": evidence_anchor_contract_digest(DEFAULT_EVIDENCE_ANCHOR_CONTRACT),
+            "content": evidence_anchor_contract_content(DEFAULT_EVIDENCE_ANCHOR_CONTRACT),
+            "prompt_templates": {
+                AgentRole.CONSISTENCY.value: prompt_record,
+                AgentRole.REVISION.value: prompt_record,
+                AgentRole.VERIFICATION.value: prompt_record,
+            },
+        }
     with Database(repo / ".scriptorium" / "state.sqlite3") as database:
         run = database.create_run(
             Run(
@@ -257,7 +279,7 @@ def _create_orphaned_run(repo):
                 tree_sha="b" * 40,
                 profile="quick",
                 config_digest="c" * 64,
-                frozen_config={"profile_roles": [AgentRole.CONSISTENCY.value]},
+                frozen_config=frozen_config,
             )
         )
         database.update_run(run.id, RunStatus.REVIEWING)
@@ -272,6 +294,62 @@ def _create_orphaned_run(repo):
         )
         attempt = database.begin_attempt(task.id)
     return run, task, attempt
+
+
+def test_legacy_run_rejects_resume_and_retry_before_orphan_recovery(tmp_path):
+    repo = make_repository(tmp_path)
+    run, task, attempt = _create_orphaned_run(repo, legacy=True)
+    runtime = FakeAgentRuntime()
+    before = _run_rows(repo, run.id)
+
+    with ScriptoriumService(
+        repo,
+        runtime_factory=lambda route: runtime,
+        manuscript_manager=PdfBuildingManuscriptManager(repo),
+    ) as service:
+        pending = service._publish_cancel_request(run.id, "pending legacy cancel")
+        control_dir = repo / ".scriptorium" / "control" / "cancel"
+        control_before = {path.name: path.read_bytes() for path in control_dir.glob(f"{run.id}.*.json")}
+        artifacts_before = sorted(
+            path.relative_to(service.artifacts.root).as_posix()
+            for path in service.artifacts.root.rglob("*")
+            if path.is_file()
+        )
+        assert service.get_run(run.id)["run"].status == RunStatus.REVIEWING
+        assert service.evaluate_gate(run.id)["passed"] is False
+        assert "reviewing" in service.render_report(run.id, "markdown")
+        for operation in (
+            lambda: asyncio.run(service.resume_run(run.id)),
+            lambda: asyncio.run(service.retry_task(run.id, task.id)),
+        ):
+            with pytest.raises(
+                InfrastructureError,
+                match="predates the frozen evidence anchor contract; start a new run",
+            ):
+                operation()
+            assert _run_rows(repo, run.id) == before
+            assert runtime.run_calls == {}
+            assert runtime.resume_calls == []
+            assert {path.name: path.read_bytes() for path in control_dir.glob(f"{run.id}.*.json")} == control_before
+            assert (
+                sorted(
+                    path.relative_to(service.artifacts.root).as_posix()
+                    for path in service.artifacts.root.rglob("*")
+                    if path.is_file()
+                )
+                == artifacts_before
+            )
+
+        cancelled = service.cancel_run(run.id, "stop legacy run")
+        assert cancelled["run"].status == RunStatus.CANCELLED
+        assert service.database.get_attempt(attempt.id).status == AttemptStatus.INTERRUPTED
+        cancellation = next(
+            event for event in service.database.list_events(run.id) if event.event_type == "run.cancelled"
+        )
+        assert cancellation.payload["request_id"] == pending["request_id"]
+        assert asyncio.run(service.resume_run(run.id))["run"].status == RunStatus.CANCELLED
+        with pytest.raises(StateError, match="review tasks cannot be retried while run is cancelled"):
+            asyncio.run(service.retry_task(run.id, task.id))
 
 
 def test_live_start_owner_rejects_other_work_but_honors_durable_cancel(tmp_path):

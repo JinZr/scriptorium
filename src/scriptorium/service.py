@@ -235,6 +235,9 @@ class ScriptoriumService:
     async def resume_run(self, run_id: str) -> dict[str, Any]:
         run = self._storage(self.database.get_run, run_id)
         with self._run_operation(run.id, "run resume"):
+            current = self._storage(self.database.get_run, run.id)
+            if current.status not in {RunStatus.COMPLETED, RunStatus.CANCELLED}:
+                self.armarius.require_evidence_anchor_contract(current.id)
             self._wait_for_provider_cleanup(run.id)
             request = self._complete_pending_cancel(run.id, provider_cleanup_ready=True)
             if request is not None:
@@ -258,6 +261,9 @@ class ScriptoriumService:
     ) -> dict[str, Any]:
         run = self._storage(self.database.get_run, run_id)
         with self._run_operation(run.id, "run retry"):
+            current = self._storage(self.database.get_run, run.id)
+            if current.status not in {RunStatus.COMPLETED, RunStatus.CANCELLED}:
+                self.armarius.require_evidence_anchor_contract(current.id)
             self._wait_for_provider_cleanup(run.id)
             request = self._complete_pending_cancel(run.id, provider_cleanup_ready=True)
             if request is not None:

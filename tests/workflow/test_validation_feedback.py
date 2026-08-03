@@ -10,15 +10,51 @@ from scriptorium.domain import AgentRole, AttemptStatus, Finding, FindingSeverit
 from scriptorium.errors import InfrastructureError
 from scriptorium.manuscript import ManuscriptBundle, SourceFile
 from scriptorium.schemas import (
+    DEFAULT_EVIDENCE_ANCHOR_CONTRACT,
+    CompiledPdfAnchor,
+    CompiledPdfPageRecord,
+    Evidence,
+    EvidenceAnchorMap,
     ReviewOutput,
     RevisionOutput,
+    SourceAnchorRecord,
     ValidationReport,
     VerificationOutput,
     VisualTranscriptionOutput,
+    evidence_anchor_contract_digest,
 )
 from scriptorium.service import ScriptoriumService
+from scriptorium.workflow import Armarius
 
 from ._support import FakeAgentRuntime, PdfBuildingManuscriptManager, make_repository
+
+
+def _anchor_map(source: SourceFile, pages: int = 1) -> EvidenceAnchorMap:
+    return EvidenceAnchorMap(
+        contract_digest=evidence_anchor_contract_digest(DEFAULT_EVIDENCE_ANCHOR_CONTRACT),
+        sources=[
+            SourceAnchorRecord(
+                source_path=source.path,
+                read_path=f"sources/{source.path}",
+                source_digest=source.digest,
+                line_count=source.lines,
+                text_anchorable=True,
+            )
+        ],
+        compiled_pdf=CompiledPdfAnchor(
+            source_path="manuscript.pdf",
+            read_path="manuscript.pdf",
+            page_count=pages,
+            pages=[
+                CompiledPdfPageRecord(
+                    page=page,
+                    read_path=f"pages/page-{page:04d}.png",
+                    page_digest=f"{page:064x}",
+                )
+                for page in range(1, pages + 1)
+            ],
+        ),
+    )
 
 
 class RepeatedInvalidRuntime(FakeAgentRuntime):
@@ -87,6 +123,20 @@ class CallbackOnlySessionRuntime(RepeatedInvalidRuntime):
         if role == AgentRole.SUBSTANTIVE_REVIEW:
             return replace(result, thread_id=None)
         return result
+
+
+def test_frozen_template_does_not_reinterpret_dynamic_json_as_placeholders():
+    findings_slot = "{{SCRIPTORIUM_CONFIRMED_FINDINGS_JSON}}"
+    feedback_slot = "{{SCRIPTORIUM_HUMAN_FEEDBACK_JSON}}"
+    rendered = Armarius._render_frozen_template(
+        f"findings={findings_slot}\nfeedback={feedback_slot}",
+        {
+            findings_slot: feedback_slot,
+            feedback_slot: "null",
+        },
+    )
+
+    assert rendered == f"findings={feedback_slot}\nfeedback=null"
 
 
 def _service(tmp_path):
@@ -231,8 +281,7 @@ def test_review_semantic_validation_reports_all_independent_anchor_failures(tmp_
     with service:
         issues = service.armarius._validate_review_output(
             output,
-            (source,),
-            1,
+            _anchor_map(source),
             repo,
             pdf_path,
             True,
@@ -248,6 +297,274 @@ def test_review_semantic_validation_reports_all_independent_anchor_failures(tmp_
     ]
     assert issues[0].expected["canonical_path"] == "main.tex"
     assert issues[4].expected["cited_line_excerpt"] == "The result is teh clear.\n"
+
+
+def test_deepseek_anchor_regressions_have_consistent_schema_and_semantic_feedback(tmp_path):
+    repo, service = _service(tmp_path)
+    source = SourceFile("main.tex", sha256((repo / "main.tex").read_bytes()).hexdigest(), 4)
+    anchor_map = _anchor_map(source)
+
+    def payload(evidence):
+        return json.dumps(
+            {
+                "summary": "Anchor regression",
+                "findings": [
+                    {
+                        "category": "clarity",
+                        "severity": "major",
+                        "title": "Title",
+                        "claim": "Claim",
+                        "evidence": [evidence],
+                        "explanation": "Explanation",
+                        "suggested_action": "Fix",
+                        "confidence": 0.9,
+                    }
+                ],
+            }
+        )
+
+    values = (
+        (
+            {
+                "source_path": "sources/main.tex",
+                "start_line": 3,
+                "end_line": 3,
+                "source_digest": source.digest,
+                "quoted_text": "The result is teh clear.",
+            },
+            "evidence.source_path_unknown",
+        ),
+        (
+            {
+                "source_path": "pages/page-0014.png",
+                "page": 1,
+                "quoted_text": "Rendered text",
+            },
+            "evidence.pdf_path_required",
+        ),
+        (
+            {
+                "source_path": "manuscript.pdf",
+                "page": 1,
+                "source_digest": source.digest,
+                "quoted_text": "Rendered text",
+            },
+            "schema.cross_field",
+        ),
+    )
+    with service:
+        reports = []
+        for evidence, expected_code in values:
+            _, issues = service.armarius._parse_and_validate_output(
+                "review",
+                payload(evidence),
+                lambda output: service.armarius._validate_review_output(
+                    output,
+                    anchor_map,
+                    repo,
+                    tmp_path / "unused.pdf",
+                    False,
+                ),
+            )
+            assert issues[0].code == expected_code
+            reports.append(issues)
+
+    assert reports[0][0].expected["canonical_path"] == "main.tex"
+    assert reports[1][0].expected == "manuscript.pdf"
+
+
+def test_non_text_source_paths_are_diagnostic_reads_not_durable_anchors(tmp_path):
+    repo, service = _service(tmp_path)
+    main = SourceFile("main.tex", sha256((repo / "main.tex").read_bytes()).hexdigest(), 4)
+    figure_digest = sha256(b"%PDF-figure").hexdigest()
+    base_map = _anchor_map(main)
+    anchor_map = EvidenceAnchorMap(
+        contract_digest=base_map.contract_digest,
+        sources=[
+            *base_map.sources,
+            SourceAnchorRecord(
+                source_path="Fig5.pdf",
+                read_path="sources/Fig5.pdf",
+                source_digest=figure_digest,
+                line_count=None,
+                text_anchorable=False,
+            ),
+        ],
+        compiled_pdf=base_map.compiled_pdf,
+    )
+    review = ReviewOutput.model_validate_json(
+        json.dumps(
+            {
+                "summary": "Invalid figure anchors",
+                "findings": [
+                    {
+                        "category": "figure",
+                        "severity": "major",
+                        "title": "Figure",
+                        "claim": "Claim",
+                        "evidence": [
+                            {
+                                "source_path": "Fig5.pdf",
+                                "start_line": 1,
+                                "end_line": 1,
+                                "source_digest": figure_digest,
+                                "quoted_text": "figure",
+                            },
+                            {
+                                "source_path": "sources/Fig5.pdf",
+                                "start_line": 1,
+                                "end_line": 1,
+                                "source_digest": figure_digest,
+                                "quoted_text": "figure",
+                            },
+                        ],
+                        "explanation": "Explanation",
+                        "suggested_action": "Fix",
+                        "confidence": 0.9,
+                    }
+                ],
+            }
+        )
+    )
+    revision = RevisionOutput.model_validate(
+        {
+            "summary": "Invalid figure edit",
+            "edits": [
+                {
+                    "finding_ids": ["finding_1"],
+                    "path": "Fig5.pdf",
+                    "source_digest": figure_digest,
+                    "start_line": 1,
+                    "end_line": 1,
+                    "before": "old",
+                    "after": "new",
+                    "rationale": "Reason",
+                }
+            ],
+        }
+    )
+    with service:
+        review_issues = service.armarius._validate_review_output(
+            review,
+            anchor_map,
+            repo,
+            tmp_path / "unused.pdf",
+            False,
+        )
+        revision_issues = service.armarius._validate_revision_output(
+            revision,
+            [_finding("finding_1")],
+            anchor_map,
+            repo,
+        )
+
+    assert [issue.code for issue in review_issues] == [
+        "evidence.source_not_anchorable",
+        "evidence.source_path_unknown",
+    ]
+    assert review_issues[1].expected["canonical_path"] == "Fig5.pdf"
+    assert [issue.code for issue in revision_issues] == ["revision.edit_path_not_editable"]
+
+
+def test_verification_evidence_uses_the_patched_source_map_digest(tmp_path):
+    repo, service = _service(tmp_path)
+    patched_source = SourceFile(
+        "main.tex",
+        sha256((repo / "main.tex").read_bytes()).hexdigest(),
+        4,
+    )
+    verification = VerificationOutput.model_validate(
+        {
+            "verdict": "fail",
+            "summary": "New issue",
+            "resolved_finding_ids": ["finding_1"],
+            "issues": [
+                {
+                    "title": "Issue",
+                    "explanation": "Explanation",
+                    "evidence": [
+                        {
+                            "source_path": "main.tex",
+                            "start_line": 3,
+                            "end_line": 3,
+                            "source_digest": "0" * 64,
+                            "quoted_text": "The result is teh clear.",
+                        }
+                    ],
+                }
+            ],
+        }
+    )
+
+    with service:
+        issues = service.armarius._validate_verification_output(
+            verification,
+            [_finding("finding_1")],
+            _anchor_map(patched_source),
+            repo,
+            tmp_path / "unused.pdf",
+            False,
+        )
+
+    assert [issue.code for issue in issues] == ["evidence.source_digest_mismatch"]
+    assert issues[0].expected == patched_source.digest
+
+
+def test_pdf_mismatch_guidance_uses_the_exact_third_page_read_path(tmp_path):
+    repo, service = _service(tmp_path)
+    source = SourceFile("main.tex", sha256((repo / "main.tex").read_bytes()).hexdigest(), 4)
+    anchor_map = _anchor_map(source, pages=3)
+    pdf_path = tmp_path / "three-pages.pdf"
+    image_document = fitz.open()
+    try:
+        image_page = image_document.new_page(width=200, height=80)
+        image_page.insert_text((20, 45), "Hidden visual transcription text")
+        pixmap = image_page.get_pixmap(alpha=False)
+    finally:
+        image_document.close()
+    document = fitz.open()
+    try:
+        document.new_page()
+        document.new_page()
+        third = document.new_page()
+        third.insert_image(fitz.Rect(20, 20, 220, 100), pixmap=pixmap)
+        document.save(pdf_path)
+    finally:
+        document.close()
+    transcription = VisualTranscriptionOutput.model_validate(
+        {
+            "pdf_digest": "a" * 64,
+            "pages": [
+                {
+                    "page": 3,
+                    "page_digest": f"{3:064x}",
+                    "text": "Hidden visual transcription text",
+                }
+            ],
+        }
+    )
+    evidence = Evidence.model_validate(
+        {
+            "source_path": "manuscript.pdf",
+            "page": 3,
+            "quoted_text": "Different submitted quote",
+        }
+    )
+
+    with service:
+        issues = service.armarius._validate_evidence(
+            evidence,
+            {item.source_path: item for item in anchor_map.sources},
+            anchor_map,
+            repo,
+            pdf_path,
+            True,
+            transcription,
+            "/findings/0/evidence/0",
+        )
+
+    assert issues[0].actual["guidance"] == "Re-read pages/page-0003.png or use source-line evidence."
+    assert "Hidden visual transcription text" not in json.dumps(issues[0].model_dump(mode="json"))
 
 
 def test_revision_verification_and_visual_validators_accumulate_issues(tmp_path):
@@ -315,14 +632,13 @@ def test_revision_verification_and_visual_validators_accumulate_issues(tmp_path)
         revision_issues = service.armarius._validate_revision_output(
             revision,
             [_finding("finding_1"), _finding("finding_2")],
-            (source,),
+            _anchor_map(source),
             repo,
         )
         verification_issues = service.armarius._validate_verification_output(
             verification,
             [_finding("finding_1"), _finding("finding_2")],
-            (source,),
-            1,
+            _anchor_map(source),
             repo,
             tmp_path / "unused.pdf",
             False,

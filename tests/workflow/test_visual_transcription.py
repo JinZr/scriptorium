@@ -113,7 +113,7 @@ class VisualRuntime(FakeAgentRuntime):
     def _verification_output(self, task):
         if not self.verification_issue:
             return super()._verification_output(task)
-        finding_ids = re.findall(r'"id": "(finding_[^"]+)"', task)
+        finding_ids = re.findall(r'"id"\s*:\s*"(finding_[^"]+)"', task)
         return {
             "verdict": "fail",
             "summary": "The changed raster wording needs human review.",
@@ -238,6 +238,13 @@ def test_raster_pdf_quote_absent_from_valid_transcription_is_rejected(tmp_path):
             "first evidence.pdf_quote_mismatch at /findings/0/evidence/0/quoted_text" in (attempt.error or "")
             for attempt in substantive_task["attempts"]
         )
+        report = json.loads(
+            service.artifacts.get_bytes(substantive_task["attempts"][0].validation_report_artifact_digest).decode(
+                "utf-8"
+            )
+        )
+        assert report["issues"][0]["actual"]["guidance"] == ("Re-read pages/page-0001.png or use source-line evidence.")
+        assert "Different visible text." not in json.dumps(report)
         assert "Different visible text." not in runtime.tasks[AgentRole.SUBSTANTIVE_REVIEW]
 
 

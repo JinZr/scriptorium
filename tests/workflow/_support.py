@@ -121,7 +121,6 @@ class FakeAgentRuntime:
                             "start_line": 3,
                             "end_line": 3,
                             "source_digest": sha256(source.read_bytes()).hexdigest(),
-                            "page": 1,
                             "quoted_text": "The result is teh clear.",
                         }
                     ],
@@ -134,10 +133,12 @@ class FakeAgentRuntime:
 
     @staticmethod
     def _revision_output(task, workspace):
-        finding_ids = re.findall(r'"id": "(finding_[^"]+)"', task)
+        finding_ids = re.findall(r'"id"\s*:\s*"(finding_[^"]+)"', task)
         source = workspace / "sources" / "main.tex"
         replacement = (
-            "The result is clear and precise." if "Human rejection feedback:" in task else "The result is clear."
+            "The result is clear and precise."
+            if "Human rejection feedback:\nnull" not in task
+            else "The result is clear."
         )
         return {
             "summary": "Correct the result sentence.",
@@ -157,7 +158,7 @@ class FakeAgentRuntime:
 
     @staticmethod
     def _verification_output(task):
-        finding_ids = re.findall(r'"id": "(finding_[^"]+)"', task)
+        finding_ids = re.findall(r'"id"\s*:\s*"(finding_[^"]+)"', task)
         return {
             "verdict": "pass",
             "summary": "The approved edit resolves the finding without regression.",

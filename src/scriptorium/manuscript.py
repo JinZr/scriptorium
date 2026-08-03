@@ -16,13 +16,37 @@ import fitz
 
 from .config import ManuscriptConfig
 from .errors import InfrastructureError, StateError
-from .schemas import ExactEdit
+from .schemas import (
+    CompiledPdfAnchor,
+    CompiledPdfPageRecord,
+    EvidenceAnchorContract,
+    EvidenceAnchorMap,
+    ExactEdit,
+    SourceAnchorRecord,
+    evidence_anchor_contract_digest,
+)
 
 INPUT_PATTERN = re.compile(r"\\(?:input|include)\s*\{([^}]+)\}")
 BIB_PATTERN = re.compile(r"\\bibliography\s*\{([^}]+)\}")
 ADDBIB_PATTERN = re.compile(r"\\addbibresource(?:\[[^\]]*\])?\s*\{([^}]+)\}")
 GRAPHICS_PATTERN = re.compile(r"\\includegraphics(?:\[[^\]]*\])?\s*\{([^}]+)\}")
 GRAPHICS_EXTENSIONS = ("", ".pdf", ".png", ".jpg", ".jpeg", ".eps")
+NON_TEXT_ANCHOR_EXTENSIONS = frozenset(
+    {
+        ".bmp",
+        ".eps",
+        ".gif",
+        ".jpeg",
+        ".jpg",
+        ".pdf",
+        ".png",
+        ".ps",
+        ".svg",
+        ".tif",
+        ".tiff",
+        ".webp",
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -49,6 +73,7 @@ class ManuscriptBundle:
     workspace: Path
     sources: tuple[SourceFile, ...]
     pdf_pages: int
+    anchor_map: EvidenceAnchorMap | None = None
 
 
 class ManuscriptManager:
@@ -181,6 +206,7 @@ class ManuscriptManager:
         revision: FrozenRevision,
         sources: tuple[SourceFile, ...],
         pdf_path: Path,
+        anchor_contract: EvidenceAnchorContract,
     ) -> ManuscriptBundle:
         if destination.exists():
             shutil.rmtree(destination)
@@ -217,14 +243,49 @@ class ManuscriptManager:
                 for page_path in sorted(pages_root.glob("page-*.png"))
             ],
         }
+        anchor_sources = []
+        for source in sources:
+            data = (snapshot / source.path).read_bytes()
+            try:
+                text = data.decode("utf-8")
+            except UnicodeDecodeError:
+                text = None
+            text_anchorable = text is not None and Path(source.path).suffix.lower() not in NON_TEXT_ANCHOR_EXTENSIONS
+            anchor_sources.append(
+                SourceAnchorRecord(
+                    source_path=source.path,
+                    # Workspace paths are read locations; persisted anchors stay relative to the frozen source map.
+                    read_path=(Path("sources") / source.path).as_posix(),
+                    source_digest=source.digest,
+                    line_count=len(text.splitlines()) if text_anchorable else None,
+                    text_anchorable=text_anchorable,
+                )
+            )
+        anchor_map = EvidenceAnchorMap(
+            contract_digest=evidence_anchor_contract_digest(anchor_contract),
+            sources=anchor_sources,
+            compiled_pdf=CompiledPdfAnchor(
+                source_path=anchor_contract.pdf_page.source_path,
+                read_path=anchor_contract.pdf_page.source_path,
+                page_count=page_count,
+                pages=[
+                    CompiledPdfPageRecord(
+                        page=index,
+                        read_path=page["path"],
+                        page_digest=page["digest"],
+                    )
+                    for index, page in enumerate(manifest["pages"], start=1)
+                ],
+            ),
+        )
         (destination / "manifest.json").write_text(
             json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8"
         )
         (destination / "source-map.json").write_text(
-            json.dumps({"sources": [asdict(source) for source in sources]}, indent=2, sort_keys=True) + "\n",
+            json.dumps(anchor_map.model_dump(mode="json"), indent=2, sort_keys=True) + "\n",
             encoding="utf-8",
         )
-        return ManuscriptBundle(destination, sources, page_count)
+        return ManuscriptBundle(destination, sources, page_count, anchor_map)
 
     def apply_edits(self, snapshot: Path, patched: Path, edits: Iterable[ExactEdit]) -> tuple[str, tuple[str, ...]]:
         if patched.exists():
