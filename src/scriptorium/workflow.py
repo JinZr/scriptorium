@@ -362,7 +362,16 @@ class Armarius:
             async with semaphore:
                 return await self._run_review_role(run, role)
 
-        await asyncio.gather(*(execute(role) for role in roles))
+        tasks = [asyncio.create_task(execute(role)) for role in roles]
+        try:
+            await asyncio.gather(*tasks)
+        except BaseException:
+            # gather propagates the first error without cancelling siblings, so drain them before releasing
+            # run ownership.
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            raise
         await self._advance_review_if_complete(run)
 
     async def _run_review_role(
