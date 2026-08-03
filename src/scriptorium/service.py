@@ -2,20 +2,34 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from dataclasses import asdict, is_dataclass
+from datetime import datetime, timezone
 from enum import Enum
 import fcntl
 from hashlib import sha256
 from importlib import metadata
+import json
 import os
 from pathlib import Path
 import shutil
+import socket
 import sqlite3
+import stat
 import subprocess
 from typing import Any, Iterator
 
 from .artifacts import ArtifactStore
 from .config import find_repo, load_local_config, load_project_config, validate_ready
-from .domain import FindingSeverity, FindingStatus, Patch, PatchStatus, RunStatus, TaskStatus, VerificationResult
+from .domain import (
+    FindingSeverity,
+    FindingStatus,
+    Patch,
+    PatchStatus,
+    RunStatus,
+    TaskStatus,
+    VerificationResult,
+    new_id,
+    utc_now,
+)
 from .errors import ConfigurationError, InfrastructureError, NotFoundError, StateError
 from .manuscript import ManuscriptManager
 from .runtime import RUNTIME_SDK_VERSIONS
@@ -179,8 +193,10 @@ class ScriptoriumService:
         profile: str,
         budget_usd: float | None,
     ) -> dict[str, Any]:
-        run = await self.armarius.start_run(revision, profile, budget_usd)
-        return self.get_run(run.id)
+        run_id = new_id("run")
+        with self._run_operation(run_id, "run start"):
+            await self.armarius.start_run(revision, profile, budget_usd, run_id=run_id)
+            return self.get_run(run_id)
 
     def get_run(self, run_id: str) -> dict[str, Any]:
         run = self._storage(self.database.get_run, run_id)
@@ -201,9 +217,10 @@ class ScriptoriumService:
         }
 
     async def resume_run(self, run_id: str) -> dict[str, Any]:
-        with self._run_lock(run_id):
-            await self.armarius.resume_run(run_id)
-        return self.get_run(run_id)
+        run = self._storage(self.database.get_run, run_id)
+        with self._run_operation(run.id, "run resume"):
+            await self.armarius.resume_run(run.id)
+            return self.get_run(run.id)
 
     async def retry_task(
         self,
@@ -211,14 +228,16 @@ class ScriptoriumService:
         task_id: str,
         route: str | None = None,
     ) -> dict[str, Any]:
-        with self._run_lock(run_id):
-            await self.armarius.retry_task(run_id, task_id, route)
-        return self.get_run(run_id)
+        run = self._storage(self.database.get_run, run_id)
+        with self._run_operation(run.id, "run retry"):
+            await self.armarius.retry_task(run.id, task_id, route)
+            return self.get_run(run.id)
 
     def cancel_run(self, run_id: str, reason: str) -> dict[str, Any]:
-        with self._run_lock(run_id):
-            self._storage(self.armarius.cancel_run, run_id, reason)
-        return self.get_run(run_id)
+        run = self._storage(self.database.get_run, run_id)
+        with self._run_operation(run.id, "run cancel"):
+            self._storage(self.armarius.cancel_run, run.id, reason)
+            return self.get_run(run.id)
 
     def list_findings(self, run_id: str):
         self._storage(self.database.get_run, run_id)
@@ -236,7 +255,7 @@ class ScriptoriumService:
         reason: str,
     ) -> dict[str, Any]:
         initial = self._storage(self.database.get_finding, finding_id)
-        with self._run_lock(initial.run_id):
+        with self._run_operation(initial.run_id, "finding decide"):
             finding = self._storage(self.database.get_finding, finding_id)
             run = self._storage(self.database.get_run, finding.run_id)
             if run.status in {RunStatus.COMPLETED, RunStatus.FAILED, RunStatus.CANCELLED}:
@@ -266,7 +285,7 @@ class ScriptoriumService:
         reason: str,
     ) -> dict[str, Any]:
         initial = self._storage(self.database.get_patch, patch_id)
-        with self._run_lock(initial.run_id):
+        with self._run_operation(initial.run_id, "patch decide"):
             patch = self._storage(self.database.get_patch, patch_id)
             run = self._storage(self.database.get_run, patch.run_id)
             if run.status != RunStatus.AWAITING_PATCH_APPROVAL:
@@ -280,7 +299,7 @@ class ScriptoriumService:
 
     def apply_patch(self, patch_id: str):
         initial = self._storage(self.database.get_patch, patch_id)
-        with self._run_lock(initial.run_id):
+        with self._run_operation(initial.run_id, "patch apply"):
             patch = self._storage(self.database.get_patch, patch_id)
             run = self._storage(self.database.get_run, patch.run_id)
             if run.status != RunStatus.READY_TO_APPLY:
@@ -386,19 +405,87 @@ class ScriptoriumService:
         }
 
     @contextmanager
-    def _run_lock(self, run_id: str) -> Iterator[None]:
+    def _run_operation(self, run_id: str, operation: str) -> Iterator[None]:
         locks = self.state_dir / "locks"
         locks.mkdir(parents=True, exist_ok=True)
         path = locks / f"{run_id}.lock"
-        with path.open("a+b") as handle:
+        directory_descriptor = -1
+        descriptor = -1
+        try:
+            directory_descriptor = os.open(locks, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+            descriptor = os.open(
+                path.name,
+                os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW,
+                0o600,
+                dir_fd=directory_descriptor,
+            )
+            file_stat = os.fstat(descriptor)
+            if not stat.S_ISREG(file_stat.st_mode) or file_stat.st_nlink != 1:
+                raise InfrastructureError(f"unsafe run lock file: {path}")
+            handle = os.fdopen(descriptor, "r+b")
+            descriptor = -1
+        except OSError as exc:
+            raise InfrastructureError(f"cannot open run lock file {path}: {exc}") from exc
+        finally:
+            if descriptor >= 0:
+                os.close(descriptor)
+            if directory_descriptor >= 0:
+                os.close(directory_descriptor)
+        with handle:
             try:
                 fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
             except BlockingIOError as exc:
-                raise StateError(f"run {run_id} is already being changed") from exc
+                owner = self._lock_owner(handle)
+                if owner is None:
+                    message = f"run {run_id} is already being changed (owner details unavailable)"
+                else:
+                    message = (
+                        f"run {run_id} is already being changed by {owner['operation']} "
+                        f"(pid {owner['pid']}, host {owner['hostname']}, "
+                        f"acquired_at {owner['acquired_at']}, age {owner['age_seconds']}s)"
+                    )
+                raise StateError(message) from exc
             try:
+                owner = {
+                    "operation": operation,
+                    "pid": os.getpid(),
+                    "hostname": socket.gethostname(),
+                    "acquired_at": utc_now(),
+                }
+                handle.seek(0)
+                handle.truncate()
+                handle.write((json.dumps(owner, sort_keys=True) + "\n").encode("utf-8"))
+                handle.flush()
+                os.fsync(handle.fileno())
                 yield
             finally:
                 fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+    @staticmethod
+    def _lock_owner(handle) -> dict[str, Any] | None:
+        try:
+            handle.seek(0)
+            owner = json.loads(handle.read().decode("utf-8"))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+            return None
+        if not isinstance(owner, dict):
+            return None
+        if not isinstance(owner.get("operation"), str):
+            return None
+        if not isinstance(owner.get("pid"), int):
+            return None
+        if not isinstance(owner.get("hostname"), str):
+            return None
+        if not isinstance(owner.get("acquired_at"), str):
+            return None
+        try:
+            acquired_at = datetime.fromisoformat(owner["acquired_at"])
+        except ValueError:
+            return None
+        if acquired_at.tzinfo is None:
+            return None
+        owner["age_seconds"] = max(0, int((datetime.now(timezone.utc) - acquired_at).total_seconds()))
+        return owner
 
     @staticmethod
     def _storage(function, *args, **kwargs):

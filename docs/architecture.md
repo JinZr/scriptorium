@@ -27,7 +27,15 @@ State lives under the manuscript repository:
   locks/
 ```
 
-`scriptorium init` adds `.scriptorium/` to `.gitignore`. SQLite uses WAL, foreign keys, a busy timeout, numbered SQL migrations, and short transactions. Git, LaTeX, and model calls happen outside transactions. A mutating command holds a per-run OS file lock; read-only status and reporting commands do not.
+`scriptorium init` adds `.scriptorium/` to `.gitignore`. SQLite uses WAL, foreign keys, a busy timeout, numbered SQL migrations, and short transactions. Git, LaTeX, and model calls happen outside transactions.
+
+### Run mutation ownership
+
+A per-run kernel `flock` is the sole authority for whether a live process owns a run. The lock file may also contain same-inode JSON describing the apparent owner and operation, but that content is diagnostic only: it may be stale or incomplete and must never be used to override, break, or infer the absence of the kernel lock. Replacing or renaming the lock file would create a different inode and is not a valid ownership update.
+
+The protected run mutations are `run start` after its run ID is reserved, `run resume`, `run retry`, `run cancel`, `finding decide`, `patch decide`, and `patch apply`. Each holds the same per-run lock across its state-changing operation. If another live owner holds the lock, the mutation rejects without changing SQLite, artifacts, or the author worktree. In particular, `run cancel` is safe-rejecting; it does not signal, kill, or modify a run owned by another process.
+
+Recovery of leftover `running` attempts happens only after `run resume`, `run retry`, or `run cancel` acquires the per-run lock. `run status`, `run report`, and `run gate` remain read-only, do not acquire mutation ownership, and never recover or rewrite state. After a driver exits unexpectedly, stale attempts therefore remain visible until one of those recovery-capable lifecycle commands safely acquires ownership and records their interruption.
 
 Runtime-native session state stays under the stable run session directory, outside disposable task workspaces. Antigravity keeps separate `save/` and `app/` children there. Rebuilding a task bundle therefore cannot erase resumable native state.
 

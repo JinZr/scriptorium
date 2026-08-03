@@ -27,6 +27,8 @@ scriptorium --json run report RUN_ID --format json
 
 The revision is resolved and frozen before review. Uncommitted changes do not enter the snapshot or agent bundle. If the PDF contains raster images, one separately routed `visual_transcription` task transcribes every affected rendered page before any reviewer starts. A patched PDF is checked independently before the Verifier starts. These tasks use the configured model budget and provenance machinery; text-only PDFs skip them entirely. No local OCR or Tesseract installation is used. Independent review tasks then run concurrently up to `max_concurrency`; every stage result is persisted before scheduling the next stage.
 
+Once `run start` reserves its run ID, it owns that run through the same kernel lock used by later mutations. `run status`, `run report`, and `run gate` remain available as read-only observations while a mutation is active; they do not take ownership or alter attempts.
+
 ## Record finding decisions
 
 Every finding requires one decision and a non-empty human reason:
@@ -76,7 +78,11 @@ scriptorium --json run retry RUN_ID --task TASK_ID --route ROUTE
 scriptorium --json run cancel RUN_ID --reason "TEXT"
 ```
 
-Resume marks leftover `running` attempts as `interrupted`. A completed task with an unchanged input digest is not repeated. Failed or interrupted tasks append a new attempt ordinal.
+The per-run kernel `flock`, not PID data or lock-file contents, determines whether a live owner exists. Owner JSON stored on the same lock-file inode is only a diagnostic aid and may be stale after a crash. Never edit it, delete it, replace the lock file, or use it as permission to recover a run.
+
+If a live owner holds the lock, every protected mutation rejects safely. This includes `run resume`, `run retry`, `run cancel`, `finding decide`, `patch decide`, and `patch apply`; `run start` joins the same ownership contract after reserving its run ID. A rejected `run cancel` does not send a signal or change durable state. To stop active work, interrupt the owning driver and its process tree first, then wait for the kernel lock to be released before issuing `run cancel` or another mutation.
+
+Only a command that has acquired the kernel lock may recover leftover `running` attempts. The next `run resume`, `run retry`, or `run cancel` marks stale attempts as `interrupted` before continuing. A completed task with an unchanged input digest is not repeated, and failed or interrupted tasks append a new attempt ordinal. Read-only `run status`, `run report`, and `run gate` never perform this recovery, so observing a stale attempt is not itself a state change.
 
 The database field named `thread_id` stores an opaque native session or conversation ID. Scriptorium resumes it only when the semantic task and the frozen runtime, exact SDK version, provider, and model all match. A same-route retry, including an explicit override naming that same frozen route, may continue the native session. When `--route` changes the task to a different named route, Scriptorium always starts a new session, even if that route selects the same model. Runtime-native state lives in a stable run directory rather than the disposable task workspace; Antigravity keeps separate `save/` and `app/` directories.
 
@@ -101,6 +107,12 @@ Patch application modifies only the approved files. It does not switch branches,
 ## Infrastructure failures
 
 Exit code `3` identifies Git, LaTeX, SQLite, or AgentRuntime infrastructure failure. Preserve `.scriptorium/` and inspect the JSON error plus run report. Do not manually edit the database, artifacts, snapshots, bundles, or patches. Repair the external prerequisite, then use `run resume` or an explicit task retry.
+
+## Upgrading with existing runs
+
+Before upgrading Scriptorium, reinstalling it from a different checkout, or switching the code used by a driver, stop every old driver and its child processes and confirm that their kernel locks have been released. Old and new drivers must never operate on the same `.scriptorium/` state concurrently. Same-inode owner JSON can help identify a process but is not proof that ownership remains or has ended.
+
+After the old processes have stopped, perform recovery through `run resume`, `run retry`, or `run cancel`. That command must acquire the kernel lock before it marks stale attempts as interrupted. Do not make `run status`, `run report`, or `run gate` repair state, and do not edit SQLite, artifacts, session data, or lock files to force an upgrade through.
 
 ## Live native-harness smoke tests
 

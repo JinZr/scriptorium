@@ -32,7 +32,6 @@ from .domain import (
     VerificationResult,
     canonical_json,
     digest_json,
-    new_id,
 )
 from .errors import InfrastructureError, StateError
 from .manuscript import BuildResult, FrozenRevision, ManuscriptBundle, ManuscriptManager, SourceFile
@@ -83,11 +82,12 @@ class Armarius:
         revision_name: str,
         profile: str,
         budget_usd: float | None,
+        *,
+        run_id: str,
     ) -> Run:
         if budget_usd is not None and (not math.isfinite(budget_usd) or budget_usd < 0):
             raise StateError("budget_usd must be a finite non-negative number")
         revision = self.manuscript.resolve_revision(revision_name)
-        run_id = new_id("run")
         run_dir = self._run_dir(run_id)
         snapshot = run_dir / "snapshot"
         self.manuscript.create_snapshot(revision, snapshot)
@@ -119,10 +119,10 @@ class Armarius:
         return self.database.get_run(run.id)
 
     async def resume_run(self, run_id: str) -> Run:
-        self.database.interrupt_running_attempts(run_id)
         run = self.database.get_run(run_id)
         if run.status in {RunStatus.COMPLETED, RunStatus.CANCELLED}:
             return run
+        self.database.recover_orphaned_attempts(run_id)
         if run.status == RunStatus.READY_TO_APPLY:
             if not self.database.list_findings(run.id, [FindingStatus.CONFIRMED]):
                 return self.database.update_run(run.id, RunStatus.COMPLETED)
@@ -153,13 +153,14 @@ class Armarius:
         return self.database.get_run(run_id)
 
     async def retry_task(self, run_id: str, task_id: str, route_override: str | None = None) -> Run:
-        self.database.interrupt_running_attempts(run_id)
         run = self.database.get_run(run_id)
         task = self.database.get_task(task_id)
         if task.run_id != run_id:
             raise StateError(f"task {task_id} does not belong to run {run_id}")
         if task.status == TaskStatus.COMPLETED:
             raise StateError(f"task {task_id} is already completed")
+        self.database.recover_orphaned_attempts(run_id)
+        task = self.database.get_task(task_id)
         if run.status == RunStatus.FAILED:
             target = {
                 "review_transcription": RunStatus.REVIEWING,
@@ -240,7 +241,7 @@ class Armarius:
         run = self.database.get_run(run_id)
         if run.status in {RunStatus.COMPLETED, RunStatus.FAILED, RunStatus.CANCELLED}:
             raise StateError(f"run cannot be cancelled while {run.status.value}")
-        self.database.interrupt_running_attempts(run_id)
+        self.database.recover_orphaned_attempts(run_id)
         self.database.cancel_incomplete_tasks(run_id)
         cancelled = self.database.update_run(run_id, RunStatus.CANCELLED)
         self.database.append_event(

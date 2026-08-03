@@ -1,7 +1,7 @@
 import json
 
 from scriptorium import cli
-from scriptorium.errors import ConfigurationError
+from scriptorium.errors import ConfigurationError, StateError
 
 from ._fake_service import FakeService, install_fake_service
 
@@ -70,4 +70,21 @@ def test_known_and_unexpected_errors_map_to_exit_codes(monkeypatch, capsys) -> N
     assert unexpected == {
         "ok": False,
         "error": {"code": "infrastructure_error", "message": "database unavailable"},
+    }
+
+
+def test_owner_conflict_keeps_the_stable_json_error_envelope(monkeypatch, capsys) -> None:
+    service = FakeService()
+    install_fake_service(monkeypatch, service)
+    message = (
+        "run run_1 is already being changed by run start "
+        "(pid 123, host test-host, acquired_at 2026-08-03T00:00:00+00:00, age 4s)"
+    )
+    service.error = StateError(message)
+
+    assert cli.main(["--json", "run", "resume", "run_1"]) == 1
+    output = json.loads(capsys.readouterr().out)
+    assert output == {
+        "ok": False,
+        "error": {"code": "invalid_state", "message": message},
     }

@@ -48,7 +48,15 @@ def test_attempt_retry_is_append_only(tmp_path) -> None:
             )
         )
         first = database.begin_attempt(task.id)
-        assert database.interrupt_running_attempts(run.id) == 1
+        assert database.recover_orphaned_attempts(run.id) == 1
+        assert database.get_task(task.id).status == TaskStatus.INTERRUPTED
+        interrupted = database.list_events(run.id)[-1]
+        assert interrupted.event_type == "attempt.interrupted"
+        assert interrupted.entity_id == first.id
+        assert interrupted.payload == {"task_id": task.id, "ordinal": 1}
+        events = database.list_events(run.id)
+        assert database.recover_orphaned_attempts(run.id) == 0
+        assert database.list_events(run.id) == events
         second = database.begin_attempt(task.id)
 
         assert first.ordinal == 1

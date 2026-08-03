@@ -651,7 +651,7 @@ class Database:
     ) -> Attempt:
         return self.finish_attempt(attempt_id, status, **result)
 
-    def interrupt_running_attempts(self, run_id: str) -> int:
+    def recover_orphaned_attempts(self, run_id: str) -> int:
         with self.transaction() as connection:
             rows = connection.execute(
                 """
