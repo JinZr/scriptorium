@@ -175,6 +175,16 @@ def test_unexpected_worker_exit_is_an_infrastructure_error(tmp_path):
     wait_for_provider_cleanup(repo, "run_exit", timeout=0.1)
 
 
+def test_worker_error_is_reported_as_an_infrastructure_error(tmp_path):
+    repo, session_dir = _layout(tmp_path, "run_error")
+    runtime = _runtime(repo, "error")
+
+    with pytest.raises(InfrastructureError, match="runtime worker failed: authentication failed"):
+        asyncio.run(runtime.run_agent("task", AgentRole.COPYEDIT, repo / "workspace", {}, session_dir))
+
+    wait_for_provider_cleanup(repo, "run_error", timeout=0.1)
+
+
 def test_owner_sigkill_is_observed_as_control_eof(tmp_path):
     repo, session_dir = _layout(tmp_path, "run_owner")
     owner = subprocess.Popen(

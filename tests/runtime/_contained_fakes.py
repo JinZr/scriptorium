@@ -41,6 +41,8 @@ class ContainmentFakeRuntime:
         _write_json(session_dir / "worker-state.json", state)
         if self.mode == "complete":
             return _result(self.route, role, "completed", json.dumps(state))
+        if self.mode == "error":
+            raise RuntimeError("authentication failed")
         if self.mode == "exit":
             os._exit(17)
         if self.mode in {"hang", "hang_auth", "leak"}:

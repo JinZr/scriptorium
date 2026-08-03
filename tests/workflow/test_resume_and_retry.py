@@ -1,6 +1,7 @@
 import asyncio
 from collections import Counter
 import json
+from pathlib import Path
 
 import pytest
 
@@ -30,6 +31,13 @@ class CancellingRuntime(FakeAgentRuntime):
         raise AgentCancelled(result)
 
 
+class InfrastructureFailingRuntime(FakeAgentRuntime):
+    async def run_agent(self, task, role, workspace, schema, session_dir, on_session_started=None):
+        if role == AgentRole.COPYEDIT:
+            raise InfrastructureError("runtime worker failed: authentication failed")
+        return await super().run_agent(task, role, workspace, schema, session_dir, on_session_started)
+
+
 def test_runtime_cancellation_durably_interrupts_the_attempt(tmp_path):
     repo = make_repository(tmp_path)
     runtime = CancellingRuntime()
@@ -51,6 +59,83 @@ def test_runtime_cancellation_durably_interrupts_the_attempt(tmp_path):
         assert attempt.status == AttemptStatus.INTERRUPTED
         assert attempt.thread_id == "thread-copyedit-1"
         assert attempt.validation_report_artifact_digest is None
+
+
+def test_runtime_infrastructure_failure_durably_fails_the_attempt(tmp_path):
+    repo = make_repository(tmp_path)
+    runtime = InfrastructureFailingRuntime()
+
+    with ScriptoriumService(
+        repo,
+        runtime_factory=lambda route: runtime,
+        manuscript_manager=PdfBuildingManuscriptManager(repo),
+    ) as service:
+        with pytest.raises(InfrastructureError, match="authentication failed"):
+            asyncio.run(service.start_run("HEAD", "quick", None))
+
+        run = service.database.list_runs()[0]
+        copyedit = next(task for task in service.database.list_tasks(run.id) if task.role == AgentRole.COPYEDIT)
+        attempt = service.database.list_attempts(copyedit.id)[0]
+
+        assert run.status == RunStatus.FAILED
+        assert copyedit.status == TaskStatus.FAILED
+        assert attempt.status == AttemptStatus.FAILED
+        assert attempt.error == "runtime worker failed: authentication failed"
+        assert attempt.completed_at is not None
+        assert attempt.estimated_cost_usd == 0
+        assert attempt.trace_artifact_digest is not None
+        assert attempt.validation_report_artifact_digest is None
+        events = [
+            event
+            for event in service.database.list_events(run.id)
+            if event.event_type == "attempt.finished" and event.entity_id == attempt.id
+        ]
+        assert len(events) == 1
+        assert events[0].payload["status"] == AttemptStatus.FAILED.value
+
+
+def test_resume_rebuilds_verification_bundle_after_materialization_failure(tmp_path, monkeypatch):
+    repo = make_repository(tmp_path)
+    runtime = FakeAgentRuntime()
+    manager = PdfBuildingManuscriptManager(repo)
+
+    with ScriptoriumService(
+        repo,
+        runtime_factory=lambda route: runtime,
+        manuscript_manager=manager,
+    ) as service:
+        started = asyncio.run(service.start_run("HEAD", "quick", None))
+        run_id = started["run"].id
+        service.decide_finding(
+            service.list_findings(run_id)[0].id,
+            "confirm",
+            "The typo should be corrected.",
+        )
+        revised = asyncio.run(service.resume_run(run_id))
+        patch_id = revised["patch_ids"][0]
+        service.decide_patch(patch_id, "approve", "Verify this exact edit.")
+        verification_workspace = repo / ".scriptorium" / "runs" / run_id / "verifications" / patch_id / "bundle"
+        original_write_text = Path.write_text
+
+        def fail_source_map_write(path, data, *args, **kwargs):
+            if "verifications" in path.parts and path.name in {"source-map.json", ".source-map.json.tmp"}:
+                original_write_text(path, "{", *args, **kwargs)
+                raise InfrastructureError("simulated bundle metadata write failure")
+            return original_write_text(path, data, *args, **kwargs)
+
+        with monkeypatch.context() as patch:
+            patch.setattr(Path, "write_text", fail_source_map_write)
+            with pytest.raises(InfrastructureError, match="simulated bundle metadata write failure"):
+                asyncio.run(service.resume_run(run_id))
+
+        assert service.database.get_run(run_id).status == RunStatus.FAILED
+        assert (verification_workspace / "manifest.json").is_file()
+        assert not (verification_workspace / "source-map.json").exists()
+
+        resumed = asyncio.run(service.resume_run(run_id))
+
+        assert resumed["run"].status == RunStatus.READY_TO_APPLY
+        assert runtime.run_calls[AgentRole.VERIFICATION] == 1
 
 
 def test_resume_reuses_completed_review_and_appends_attempt_for_interrupted_lane(tmp_path, monkeypatch):

@@ -151,7 +151,7 @@ def test_completed_result_fails_after_session_mirror_error(tmp_path: Path) -> No
     assert result.usage.input_tokens == 18
 
 
-def test_cancellation_closes_native_query_and_propagates(tmp_path: Path) -> None:
+def test_cancellation_closes_native_query_and_preserves_interrupted_result(tmp_path: Path) -> None:
     stream = CancellingStream()
     native_config_dirs: list[Path] = []
 
@@ -161,7 +161,7 @@ def test_cancellation_closes_native_query_and_propagates(tmp_path: Path) -> None
 
     runtime = _runtime(query)
 
-    with pytest.raises(asyncio.CancelledError):
+    with pytest.raises(AgentCancelled) as caught:
         asyncio.run(
             runtime.run_agent(
                 "Review",
@@ -172,6 +172,7 @@ def test_cancellation_closes_native_query_and_propagates(tmp_path: Path) -> None
             )
         )
 
+    assert caught.value.result.status == "interrupted"
     assert stream.closed is True
     assert len(native_config_dirs) == 1
     assert not native_config_dirs[0].exists()

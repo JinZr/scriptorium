@@ -286,13 +286,18 @@ class ManuscriptManager:
                 ],
             ),
         )
-        (destination / "manifest.json").write_text(
-            json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8"
-        )
-        (destination / "source-map.json").write_text(
+        manifest_path = destination / "manifest.json"
+        manifest_temporary = destination / ".manifest.json.tmp"
+        manifest_temporary.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        manifest_temporary.replace(manifest_path)
+        source_map_path = destination / "source-map.json"
+        source_map_temporary = destination / ".source-map.json.tmp"
+        source_map_temporary.write_text(
             json.dumps(anchor_map.model_dump(mode="json"), indent=2, sort_keys=True) + "\n",
             encoding="utf-8",
         )
+        # This final rename is the completion marker consumed by verification resume.
+        source_map_temporary.replace(source_map_path)
         return ManuscriptBundle(destination, sources, page_count, anchor_map)
 
     def apply_edits(self, snapshot: Path, patched: Path, edits: Iterable[ExactEdit]) -> tuple[str, tuple[str, ...]]:

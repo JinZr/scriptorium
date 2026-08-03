@@ -260,7 +260,8 @@ class AntigravityAgentRuntime:
         except Exception as exc:
             if interrupted is not None:
                 context_cleanup_error = str(exc) or type(exc).__name__
-            elif asyncio.current_task() is not None and asyncio.current_task().cancelling():
+            # Python 3.10 has no Task.cancelling(); cleanup failures retain the injected cancellation as context.
+            elif isinstance(exc.__context__, asyncio.CancelledError):
                 cleanup_error = await _cancel_active(agent)
                 if agent is not None:
                     steps = agent.conversation.history[history_start:]

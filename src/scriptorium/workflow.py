@@ -641,7 +641,15 @@ class Armarius:
         patched = self._run_dir(run.id) / "patched" / patch.id
         verification_workspace = self._run_dir(run.id) / "verifications" / patch.id / "bundle"
         anchor_contract = self.require_evidence_anchor_contract(run.id)
-        if verification_workspace.exists():
+        metadata_paths = (
+            verification_workspace / "manifest.json",
+            verification_workspace / "source-map.json",
+        )
+        unsafe_metadata = any(
+            path.is_symlink() or (path.exists() and (not path.is_file() or path.stat().st_nlink != 1))
+            for path in metadata_paths
+        )
+        if verification_workspace.exists() and (unsafe_metadata or all(path.is_file() for path in metadata_paths)):
             verification_bundle = self._load_bundle(verification_workspace, anchor_contract)
         else:
             build = self._build_copy(
@@ -1150,7 +1158,8 @@ class Armarius:
             def record_session(session_id: str) -> None:
                 self.database.record_attempt_session(attempt.id, session_id)
 
-            cancellation: asyncio.CancelledError | None = None
+            cancellation: AgentCancelled | asyncio.CancelledError | None = None
+            runtime_infrastructure_error: InfrastructureError | None = None
             try:
                 if thread_id is None:
                     result = await runtime.run_agent(
@@ -1189,6 +1198,22 @@ class Armarius:
                     model_provider=route.model_provider,
                     duration_ms=None,
                     error="operation interrupted",
+                )
+            except InfrastructureError as exc:
+                runtime_infrastructure_error = exc
+                recorded = self.database.get_attempt(attempt.id)
+                result = AgentResult(
+                    thread_id=recorded.thread_id,
+                    status="failed",
+                    final_response=None,
+                    usage=AgentUsage(),
+                    trace_jsonl=json.dumps({"status": "failed", "error": str(exc), "kind": "infrastructure"}) + "\n",
+                    runtime_name=route.runtime,
+                    runtime_version=route.runtime_version,
+                    model=route.model,
+                    model_provider=route.model_provider,
+                    duration_ms=None,
+                    error=str(exc),
                 )
             output_artifact = (
                 self._record_text(result.final_response, "application/json")
@@ -1270,7 +1295,11 @@ class Armarius:
                 error=error,
             )
             if cancellation is not None:
+                if isinstance(cancellation, AgentCancelled):
+                    raise asyncio.CancelledError(str(cancellation)) from cancellation
                 raise cancellation
+            if runtime_infrastructure_error is not None:
+                raise runtime_infrastructure_error
             if validation_infrastructure_error is not None:
                 raise validation_infrastructure_error
             if parsed is not None:

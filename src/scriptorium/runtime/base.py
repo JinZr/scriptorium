@@ -50,7 +50,7 @@ class AgentResult:
 SessionStartedCallback = Callable[[str], Awaitable[None] | None]
 
 
-class AgentCancelled(asyncio.CancelledError):
+class AgentCancelled(Exception):
     def __init__(self, result: AgentResult) -> None:
         super().__init__(result.error or "Agent runtime was cancelled.")
         self.result = result
