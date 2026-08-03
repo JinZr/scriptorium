@@ -834,7 +834,11 @@ def test_cancelled_operation_cleanup_error_does_not_override_interrupted_semanti
         with pytest.raises(asyncio.CancelledError) as caught:
             asyncio.run(exercise())
 
-        assert isinstance(caught.value.__cause__, RuntimeError)
+        cleanup_error = caught.value
+        while cleanup_error is not None and not isinstance(cleanup_error, RuntimeError):
+            cleanup_error = cleanup_error.__cause__ or cleanup_error.__context__
+        assert isinstance(cleanup_error, RuntimeError)
+        assert str(cleanup_error) == "operation cleanup failed"
         assert service.database.get_run(run.id).status == RunStatus.CANCELLED
         cancellations = [event for event in service.database.list_events(run.id) if event.event_type == "run.cancelled"]
         assert len(cancellations) == 1

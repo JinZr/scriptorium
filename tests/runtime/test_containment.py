@@ -556,6 +556,8 @@ def _wait_for_process_group_exit(process_group: int, timeout: float = 3.0) -> No
             if not _process_group_has_live_members(process_group):
                 return
             raise
+        if not _process_group_has_live_members(process_group):
+            return
         if time.monotonic() >= deadline:
             raise AssertionError(f"process group {process_group} is still alive")
         time.sleep(0.02)
