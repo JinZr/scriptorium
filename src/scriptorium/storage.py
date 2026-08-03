@@ -652,6 +652,7 @@ class Database:
         return self.finish_attempt(attempt_id, status, **result)
 
     def recover_orphaned_attempts(self, run_id: str) -> int:
+        # Callers must already own the run's exclusive flock; SQLite alone cannot prove an owner is dead.
         with self.transaction() as connection:
             rows = connection.execute(
                 """

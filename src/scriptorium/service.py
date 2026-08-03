@@ -193,6 +193,7 @@ class ScriptoriumService:
         profile: str,
         budget_usd: float | None,
     ) -> dict[str, Any]:
+        # Reserve the trusted ID before any run files or database rows exist so ownership starts first.
         run_id = new_id("run")
         with self._run_operation(run_id, "run start"):
             await self.armarius.start_run(revision, profile, budget_usd, run_id=run_id)
@@ -413,6 +414,7 @@ class ScriptoriumService:
         descriptor = -1
         try:
             directory_descriptor = os.open(locks, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+            # Reject link-based aliases so every contender locks the one canonical inode.
             descriptor = os.open(
                 path.name,
                 os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW,
@@ -452,6 +454,7 @@ class ScriptoriumService:
                     "hostname": socket.gethostname(),
                     "acquired_at": utc_now(),
                 }
+                # Rewrite diagnostics in place: replacing the file would split flock ownership across inodes.
                 handle.seek(0)
                 handle.truncate()
                 handle.write((json.dumps(owner, sort_keys=True) + "\n").encode("utf-8"))
