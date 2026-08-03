@@ -14,7 +14,7 @@ Initialization creates the project-local `.scriptorium/` state directory and ign
 scriptorium --json doctor --profile full --budget-usd 10
 ```
 
-Doctor checks the repository, manuscript, LaTeX tools, SQLite, selected profile, routes, and budget pricing prerequisites. It includes the visual-transcription, revision, and verification routes, then requires each referenced native SDK at the exact pinned version that a new run will freeze. Antigravity also requires `GEMINI_API_KEY`. Claude Code login or API authentication is intentionally left to an explicit live smoke test.
+Doctor checks the repository, manuscript, LaTeX tools, SQLite, selected profile, routes, and budget pricing prerequisites. It includes the selected review roles plus revision and verification, then requires each referenced native SDK at the exact pinned version that a new run will freeze. Antigravity also requires `GEMINI_API_KEY`. Claude Code login or API authentication is intentionally left to an explicit live smoke test.
 
 ## Start and inspect a run
 
@@ -25,7 +25,7 @@ scriptorium --json finding list RUN_ID
 scriptorium --json run report RUN_ID --format json
 ```
 
-The revision is resolved and frozen before review. Uncommitted changes do not enter the snapshot or agent bundle. If the PDF contains raster images, one separately routed `visual_transcription` task transcribes every affected rendered page before any reviewer starts. A patched PDF is checked independently before the Verifier starts. These tasks use the configured model budget and provenance machinery; text-only PDFs skip them entirely. No local OCR or Tesseract installation is used. Independent review tasks then run concurrently up to `max_concurrency`; every stage result is persisted before scheduling the next stage.
+The revision is resolved and frozen before review. Uncommitted changes do not enter the snapshot or agent bundle. Independent review tasks run concurrently up to `max_concurrency`; every stage result is persisted before scheduling the next stage. The Verifier later receives a separately built patched bundle. Neither path schedules OCR or visual-transcription work.
 
 Once `run start` reserves its run ID, it owns that run through the same kernel lock used by later mutations. `run status`, `run report`, and `run gate` remain available as read-only observations while a mutation is active; they do not take ownership or alter attempts.
 
@@ -33,7 +33,24 @@ Once `run start` reserves its run ID, it owns that run through the same kernel l
 
 Treat `source-map.json` as the exact path map. For source-line evidence, read `sources/sections/methods.tex` but return `source_path="sections/methods.tex"` together with `start_line`, `end_line`, `source_digest`, and `quoted_text`; do not include `page`. Revision edits use the same bare path and may target only entries marked `text_anchorable=true`.
 
-For compiled-PDF evidence, read the page image at the map's exact path, such as `pages/page-0003.png`, but return `source_path="manuscript.pdf"`, `page=3`, and `quoted_text`; do not include source line or digest fields. Paths such as `sources/main.tex`, `pages/page-0003.png`, or a source graphic such as `sources/Fig5.pdf` are never accepted as output aliases. The Verifier uses the patched workspace's current source map and digests for any new issue; evidence attached to an earlier finding is historical context only.
+```json
+{
+  "source_path": "sections/methods.tex",
+  "start_line": 41,
+  "end_line": 43,
+  "source_digest": "<sha256 from source-map.json>",
+  "quoted_text": "<verbatim substring from the cited lines>"
+}
+```
+
+For compiled-PDF evidence, read the page image at the map's exact path, such as `pages/page-0003.png`, but return only `source_path="manuscript.pdf"` and `page=3`. Do not include `quoted_text`, source lines, or digest fields. This anchor identifies the frozen rendered page; it does not prove a textual quotation or the finding's visual interpretation. Paths such as `sources/main.tex`, `pages/page-0003.png`, or a source graphic such as `sources/Fig5.pdf` are never accepted as output aliases. The Verifier uses the patched workspace's current source map and page identity for any new issue; evidence attached to an earlier finding is historical context only.
+
+```json
+{
+  "source_path": "manuscript.pdf",
+  "page": 3
+}
+```
 
 ### Diagnose structured-output failures
 
@@ -41,7 +58,7 @@ For compiled-PDF evidence, read the page image at the map's exact path, such as 
 
 Scriptorium validates one complete replacement object at a time. The first invalid base turn may receive one automatic same-session correction. If that correction is still invalid, the command stops; each later same-route `run resume` or `run retry` adds exactly one correction attempt using the latest report. Selecting a different named route starts a new session with the full base task and compatible diagnostics. Correction attempts continue to count their actual usage and cost, and a later mutation must pass the ordinary budget gate.
 
-Do not edit or regenerate a validation report. A missing, corrupt, wrongly typed, or provenance-mismatched report is an infrastructure failure and blocks a new attempt. Repair artifact storage rather than manually changing SQLite. Reports may say that a PDF quotation failed both native and visual checks, but hidden visual-transcription text is deliberately not included. Raster-only pages may therefore still require the reviewer to reread the exact page-image `read_path` from `source-map.json` or use source-line evidence; this release does not relax strict PDF evidence rules or expose the transcription as a suggested quotation.
+Do not edit or regenerate a validation report. A missing, corrupt, wrongly typed, or provenance-mismatched report is an infrastructure failure and blocks a new attempt. Repair artifact storage rather than manually changing SQLite. New runs do not validate PDF quotations: a PDF evidence object containing `quoted_text`, even `null`, receives a `schema.cross_field` diagnostic and must be replaced with a page-only anchor. Use source-line evidence when a finding depends on exact manuscript text. OCR, native extraction, and model-generated transcription are never suggested as authoritative quotations.
 
 ## Record finding decisions
 
@@ -110,7 +127,7 @@ If an attempt has a recorded session ID but the corresponding native state is mi
 
 If the budget is exhausted, the run pauses in `waiting_budget`. Inspect the report, then either retry the task with an explicitly selected frozen zero-cost route or start a new run with a new budget. Scriptorium never changes the frozen budget or selects a fallback model.
 
-Historical reports may reflect the page-anchor behavior frozen before visual transcription was introduced. Read-only inspection preserves that history; Scriptorium never injects a newer model, route, or anchor rule into frozen inputs.
+Historical reports and tasks may contain PDF quotations and visual-transcription output. Read-only inspection preserves that history; Scriptorium never translates those anchors or injects the current rule into frozen inputs.
 
 ## Apply and evaluate the gate
 
@@ -134,7 +151,7 @@ Before upgrading Scriptorium, reinstalling it from a different checkout, or swit
 
 After the old processes have stopped, perform recovery through `run resume`, `run retry`, or `run cancel`. That command must acquire the kernel lock before it marks stale attempts as interrupted. Do not make `run status`, `run report`, or `run gate` repair state, and do not edit SQLite, artifacts, session data, or lock files to force an upgrade through.
 
-Runs created before the frozen evidence-anchor contract require an explicit boundary. `run status`, `run report`, and `run gate` remain read-only, existing finding and patch decisions and `patch apply` retain their behavior, and `run cancel` remains available. Terminal-run reads and no-ops are unchanged. For a nonterminal legacy run, however, `run resume` and `run retry` fail before attempt recovery or provider invocation; start a new run instead. Do not backfill the contract or infer it from old prompts or bundles.
+Runs created before the frozen evidence-anchor contract, and runs whose frozen PDF contract requires a quotation, require an explicit boundary. `run status`, `run report`, and `run gate` remain read-only, existing finding and patch decisions and `patch apply` retain their behavior, and `run cancel` remains available. Terminal `completed` or `cancelled` reads and no-ops are unchanged. For any other such run, `run resume` and `run retry` fail before provider-barrier waiting, attempt recovery, artifact publication, or provider invocation; start a new run instead. Do not backfill the contract, translate old Evidence, or infer current anchors from old prompts, transcription artifacts, or bundles.
 
 ## Live native-harness smoke tests
 

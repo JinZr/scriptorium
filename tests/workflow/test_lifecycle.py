@@ -22,29 +22,26 @@ class FailingPatchedBuildManager(PdfBuildingManuscriptManager):
 class PdfEvidenceRuntime(FakeAgentRuntime):
     def __init__(
         self,
-        quoted_text: str,
         *,
+        include_quote: bool = False,
         interrupt_copyedit_once: bool = False,
-        verification_quoted_text: str | None = None,
+        verification_page_issue: bool = False,
     ) -> None:
         super().__init__(interrupt_copyedit_once=interrupt_copyedit_once)
-        self.quoted_text = quoted_text
-        self.verification_quoted_text = verification_quoted_text
+        self.include_quote = include_quote
+        self.verification_page_issue = verification_page_issue
 
     def _review_output(self, role, workspace):
         output = super()._review_output(role, workspace)
         if role == AgentRole.SUBSTANTIVE_REVIEW:
-            output["findings"][0]["evidence"] = [
-                {
-                    "source_path": "manuscript.pdf",
-                    "page": 1,
-                    "quoted_text": self.quoted_text,
-                }
-            ]
+            evidence = {"source_path": "manuscript.pdf", "page": 1}
+            if self.include_quote:
+                evidence["quoted_text"] = "This text must not be accepted as a page quote."
+            output["findings"][0]["evidence"] = [evidence]
         return output
 
     def _verification_output(self, task):
-        if self.verification_quoted_text is None:
+        if not self.verification_page_issue:
             return super()._verification_output(task)
         return {
             "verdict": "fail",
@@ -58,7 +55,6 @@ class PdfEvidenceRuntime(FakeAgentRuntime):
                         {
                             "source_path": "manuscript.pdf",
                             "page": 1,
-                            "quoted_text": self.verification_quoted_text,
                         }
                     ],
                 }
@@ -66,9 +62,9 @@ class PdfEvidenceRuntime(FakeAgentRuntime):
         }
 
 
-def test_pdf_evidence_quote_matches_text_on_the_cited_page(tmp_path):
+def test_pdf_page_evidence_anchors_the_cited_rendered_page(tmp_path):
     repo = make_repository(tmp_path)
-    runtime = PdfEvidenceRuntime("The result\nis clear.")
+    runtime = PdfEvidenceRuntime()
 
     with ScriptoriumService(
         repo,
@@ -78,12 +74,45 @@ def test_pdf_evidence_quote_matches_text_on_the_cited_page(tmp_path):
         started = asyncio.run(service.start_run("HEAD", "quick", None))
 
         assert started["run"].status == RunStatus.AWAITING_DECISION
-        assert service.list_findings(started["run"].id)[0].evidence[0]["quoted_text"] == "The result\nis clear."
+        assert service.list_findings(started["run"].id)[0].evidence[0] == {
+            "source_path": "manuscript.pdf",
+            "page": 1,
+        }
 
 
-def test_fabricated_pdf_evidence_quote_is_rejected(tmp_path):
+def test_new_run_does_not_freeze_an_unused_visual_transcription_route(tmp_path):
     repo = make_repository(tmp_path)
-    runtime = PdfEvidenceRuntime("This text does not appear on the page.")
+    local_path = repo / ".scriptorium" / "config.toml"
+    local_path.write_text(
+        local_path.read_text(encoding="utf-8").replace(
+            'visual_transcription = "primary"',
+            'visual_transcription = "visual"',
+        )
+        + (
+            "\n[routes.visual]\n"
+            'model_provider = "ollama"\n'
+            'model = "unused-visual-model"\n'
+            "input_usd_per_million = 0\n"
+            "output_usd_per_million = 0\n"
+        ),
+        encoding="utf-8",
+    )
+
+    with ScriptoriumService(
+        repo,
+        runtime_factory=lambda route: FakeAgentRuntime(),
+        manuscript_manager=PdfBuildingManuscriptManager(repo),
+    ) as service:
+        run = asyncio.run(service.start_run("HEAD", "quick", None))["run"]
+
+    assert "visual_transcription" not in run.frozen_config["local"]["roles"]
+    assert "visual" not in run.frozen_config["local"]["routes"]
+    assert "visual_transcription" not in run.frozen_config["schemas"]
+
+
+def test_pdf_page_evidence_with_quoted_text_is_rejected(tmp_path):
+    repo = make_repository(tmp_path)
+    runtime = PdfEvidenceRuntime(include_quote=True)
 
     with ScriptoriumService(
         repo,
@@ -100,19 +129,16 @@ def test_fabricated_pdf_evidence_quote_is_rejected(tmp_path):
         attempts = service.database.list_attempts(task.id)
         assert len(attempts) == 2
         assert all(
-            attempt.error == "invalid structured output: 1 issues; first evidence.pdf_quote_mismatch at "
-            "/findings/0/evidence/0/quoted_text"
-            for attempt in attempts
+            "first schema.cross_field at /findings/0/evidence/0" in (attempt.error or "") for attempt in attempts
         )
         assert all(attempt.validation_report_artifact_digest for attempt in attempts)
 
 
-def test_legacy_run_preserves_page_only_evidence_through_resume_and_verification(tmp_path, monkeypatch):
+def test_page_only_evidence_survives_resume_and_patched_verification(tmp_path):
     repo = make_repository(tmp_path)
     runtime = PdfEvidenceRuntime(
-        "This text does not appear on the page.",
         interrupt_copyedit_once=True,
-        verification_quoted_text="This text does not appear on the patched page.",
+        verification_page_issue=True,
     )
     manager = PdfBuildingManuscriptManager(repo)
 
@@ -121,17 +147,6 @@ def test_legacy_run_preserves_page_only_evidence_through_resume_and_verification
         runtime_factory=lambda route: runtime,
         manuscript_manager=manager,
     ) as service:
-        freeze_config = service.armarius._freeze_config
-
-        def freeze_legacy_config(project, profile, sources, project_config_text):
-            frozen = freeze_config(project, profile, sources, project_config_text)
-            frozen["local"]["roles"].pop(AgentRole.VISUAL_TRANSCRIPTION.value)
-            frozen["role_routes"].pop(AgentRole.VISUAL_TRANSCRIPTION.value)
-            frozen["prompts"].pop(AgentRole.VISUAL_TRANSCRIPTION.value)
-            frozen["schemas"].pop("visual_transcription")
-            return frozen
-
-        monkeypatch.setattr(service.armarius, "_freeze_config", freeze_legacy_config)
         started = asyncio.run(service.start_run("HEAD", "quick", None))
         run_id = started["run"].id
         tasks = {item["task"].role: item["task"] for item in started["tasks"]}
@@ -152,7 +167,7 @@ def test_legacy_run_preserves_page_only_evidence_through_resume_and_verification
         assert runtime.run_calls[AgentRole.SUBSTANTIVE_REVIEW] == 1
         assert runtime.resume_calls == [AgentRole.COPYEDIT]
         evidence = service.list_findings(run_id)[0].evidence[0]
-        assert evidence["quoted_text"] == "This text does not appear on the page."
+        assert evidence == {"source_path": "manuscript.pdf", "page": 1}
 
         service.decide_finding(
             service.list_findings(run_id)[0].id,
@@ -188,7 +203,7 @@ def test_full_workflow_preserves_worktree_until_approved_patch_is_applied(tmp_pa
         review_prompt = runtime.tasks[AgentRole.SUBSTANTIVE_REVIEW]
         assert "Frozen evidence anchor contract digest:" in review_prompt
         assert "bare source_path from source-map.json" in review_prompt
-        assert 'output source_path "manuscript.pdf", a 1-based page' in review_prompt
+        assert 'output only source_path "manuscript.pdf" and a 1-based page' in review_prompt
         assert "Only sources marked text_anchorable may be line-anchored" in review_prompt
         assert "exact page-image read_path" in review_prompt
         assert "ReviewOutput JSON object with no prose before or after it" in review_prompt
@@ -249,7 +264,7 @@ def test_full_workflow_preserves_worktree_until_approved_patch_is_applied(tmp_pa
         assert "changed current verification renderer" not in verification_prompt
         assert "their evidence are historical context" in verification_prompt
         assert "current patched workspace source-map.json" in verification_prompt
-        assert "mutually exclusive durable" in verification_prompt
+        assert "visual-only issues" in verification_prompt
         assert "VerificationOutput JSON object with no prose before or after it" in verification_prompt
         verification_map = json.loads(
             (

@@ -78,7 +78,7 @@ def test_doctor_checks_only_selected_native_runtime(
     assert next(item for item in result["checks"] if item["name"] == "runtime_claude_code_sdk")["ok"]
 
 
-def test_doctor_checks_visual_transcription_runtime(
+def test_doctor_ignores_unused_visual_transcription_runtime(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -112,7 +112,7 @@ def test_doctor_checks_visual_transcription_runtime(
         result = service.doctor(profile="quick")
 
     assert result["ok"] is True
-    assert requested_packages == ["claude-agent-sdk", "openai-codex"]
+    assert requested_packages == ["openai-codex"]
 
 
 def test_doctor_requires_gemini_api_key_for_antigravity(

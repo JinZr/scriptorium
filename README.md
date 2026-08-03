@@ -7,14 +7,13 @@ Scriptorium is a lab-local, single-user, Git-native research tool for reviewing,
 The workflow is:
 
 ```text
-prepare → raster-page transcription when needed → review → human decision
-→ revision proposal → patch approval → patched-page transcription when needed
+prepare → review → human decision → revision proposal → patch approval
 → verification → patch apply → completed
 ```
 
 Codex is the outer, user-facing harness: it starts and operates Scriptorium as part of the laboratory workflow. Inside Scriptorium, `Armarius` is deterministic Python orchestration, not a model agent. It dispatches each frozen role/route to one of three sibling native runtimes: `codex`, `claude_code`, or `antigravity`. The workers do not choose routes, create secondary subagents, or fall back to another runtime or model.
 
-When a manuscript PDF contains raster images, Armarius first sends the affected rendered pages to the separately routed `visual_transcription` role. PDF quotations are checked against the native text layer and then that frozen transcription. The same step runs independently for a patched PDF before verification. This uses a vision-capable model and adds model cost; Scriptorium does not use local OCR or require Tesseract.
+Text evidence uses exact source paths, digests, line ranges, and verbatim quotations. Visual evidence instead anchors a finding to an immutable rendered PDF page; it does not claim machine-verified page text. Reviewers inspect the page image, and the existing human decision gate remains responsible for accepting or rejecting the visual interpretation. Scriptorium does not treat OCR, native PDF text extraction, or model-generated transcription as evidence authority.
 
 Scriptorium intentionally has no LangGraph layer, HTTP service, or background queue.
 

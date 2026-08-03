@@ -23,7 +23,7 @@ roles = [
 ]
 ```
 
-Stable role keys are `visual_transcription`, `substantive_review`, `copyedit`, `consistency`, `figure_review`, `revision`, and `verification`. `workflow` identifies deterministic Armarius activity and is not a model role. Classical role names are display labels only; configuration, storage, APIs, and logs use the stable keys.
+Stable role keys for new runs are `substantive_review`, `copyedit`, `consistency`, `figure_review`, `revision`, and `verification`. `workflow` identifies deterministic Armarius activity and is not a model role. Classical role names are display labels only; configuration, storage, APIs, and logs use the stable keys. Historical state may still contain the retired `visual_transcription` role, but new runs never select it.
 
 ## Local routing
 
@@ -37,7 +37,6 @@ substantive_review = "primary"
 copyedit = "primary"
 consistency = "primary"
 figure_review = "primary"
-visual_transcription = "visual"
 revision = "primary"
 verification = "primary"
 
@@ -48,18 +47,10 @@ model = "USER_CONFIGURED_MODEL"
 input_usd_per_million = 0
 output_usd_per_million = 0
 reasoning_effort = "high"
-
-[routes.visual]
-runtime = "codex"
-model_provider = "openai"
-model = "USER_CONFIGURED_MODEL"
-input_usd_per_million = 0
-output_usd_per_million = 0
-reasoning_effort = "high"
 ```
 
 Replace every model placeholder before a paid run. Scriptorium does not choose a concrete model or silently fall back to another route. Use `run retry --route ROUTE` when an operator explicitly wants a different route after failure.
-`visual_transcription` must map explicitly to a route whose model can read the rendered page images. It is a separate task from the reviewers and Verifier; Scriptorium never falls back to a reviewer route. Additional named routes can be added when figure review or verification should use a different model.
+An older local file may still contain a `visual_transcription` mapping or an otherwise unused visual route. It remains ordinary parseable configuration but is not frozen, checked, invoked, or billed by a new run. Additional named routes can be added when figure review or verification should use a different model.
 
 `runtime` defaults to `codex` so existing Codex-only local configurations remain valid. Native routes are explicit:
 
@@ -105,7 +96,7 @@ Run:
 scriptorium doctor
 ```
 
-before starting work. Doctor resolves the selected profile plus its visual-transcription, revision, and verification routes, then checks only the runtimes those routes actually reference. Each required SDK must be installed at the exact pinned version. Doctor also checks `GEMINI_API_KEY` for Antigravity; Claude Code authentication is exercised only by the explicitly enabled live smoke test.
+before starting work. Doctor resolves the selected profile plus its revision and verification routes, then checks only the runtimes those routes actually reference. Each required SDK must be installed at the exact pinned version. Doctor also checks `GEMINI_API_KEY` for Antigravity; Claude Code authentication is exercised only by the explicitly enabled live smoke test.
 
 Doctor rejects unresolved model placeholders. When a dollar budget is requested, missing route prices are also a configuration error. An explicitly configured zero price is accepted for an OSS or laboratory-gateway route; Scriptorium does not infer billing from the provider name.
 
@@ -119,7 +110,5 @@ Token usage comes from the selected native runtime. Scriptorium normalizes it be
 Input and output totals are priced once. Cached input and reasoning output remain separately auditable subdivisions and are not added to those totals again. Native usage and cost details stay in the NDJSON trace.
 
 Scriptorium checks recorded estimated cost before starting each new task. A task already in progress can make the estimate slightly exceed the requested budget, after which the run enters `waiting_budget`.
-
-Visual transcription uses the same frozen route pricing and budget accounting as every other model task. PDFs without raster pages do not create a transcription task or incur its cost.
 
 This is a local scheduling gate and audit estimate, not a provider-level billing cap.

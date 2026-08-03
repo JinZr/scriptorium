@@ -23,6 +23,7 @@ from scriptorium.domain import (
     RunStatus,
     Task,
     TaskStatus,
+    digest_json,
 )
 from scriptorium.errors import InfrastructureError, NotFoundError, StateError
 from scriptorium.runtime.contained import ContainedAgentRuntime
@@ -254,7 +255,7 @@ def _run_rows(repo, run_id):
         connection.close()
 
 
-def _create_orphaned_run(repo, *, legacy=False):
+def _create_orphaned_run(repo, *, legacy=False, quote_required_pdf=False):
     prompt = "frozen prompt"
     prompt_record = {
         "digest": ArtifactStore.digest_bytes(prompt.encode("utf-8")),
@@ -262,9 +263,21 @@ def _create_orphaned_run(repo, *, legacy=False):
     }
     frozen_config = {"profile_roles": [AgentRole.CONSISTENCY.value]}
     if not legacy:
+        contract_content = evidence_anchor_contract_content(DEFAULT_EVIDENCE_ANCHOR_CONTRACT)
+        if quote_required_pdf:
+            contract_content["pdf_page"]["required_fields"] = ["source_path", "page", "quoted_text"]
+            contract_content["pdf_page"]["forbidden_fields"] = [
+                "start_line",
+                "end_line",
+                "source_digest",
+            ]
         frozen_config["evidence_anchor_contract"] = {
-            "digest": evidence_anchor_contract_digest(DEFAULT_EVIDENCE_ANCHOR_CONTRACT),
-            "content": evidence_anchor_contract_content(DEFAULT_EVIDENCE_ANCHOR_CONTRACT),
+            "digest": (
+                digest_json(contract_content)
+                if quote_required_pdf
+                else evidence_anchor_contract_digest(DEFAULT_EVIDENCE_ANCHOR_CONTRACT)
+            ),
+            "content": contract_content,
             "prompt_templates": {
                 AgentRole.CONSISTENCY.value: prompt_record,
                 AgentRole.REVISION.value: prompt_record,
@@ -294,6 +307,33 @@ def _create_orphaned_run(repo, *, legacy=False):
         )
         attempt = database.begin_attempt(task.id)
     return run, task, attempt
+
+
+def test_quote_required_pdf_contract_rejects_resume_and_retry_without_mutation(tmp_path):
+    repo = make_repository(tmp_path)
+    run, task, _ = _create_orphaned_run(repo, quote_required_pdf=True)
+    runtime = FakeAgentRuntime()
+    before = _run_rows(repo, run.id)
+
+    with ScriptoriumService(
+        repo,
+        runtime_factory=lambda route: runtime,
+        manuscript_manager=PdfBuildingManuscriptManager(repo),
+    ) as service:
+        artifacts_before = sorted(path for path in service.artifacts.root.rglob("*") if path.is_file())
+        for operation in (
+            lambda: asyncio.run(service.resume_run(run.id)),
+            lambda: asyncio.run(service.retry_task(run.id, task.id)),
+        ):
+            with pytest.raises(
+                InfrastructureError,
+                match="predates page-level PDF evidence anchors; start a new run",
+            ):
+                operation()
+            assert _run_rows(repo, run.id) == before
+            assert sorted(path for path in service.artifacts.root.rglob("*") if path.is_file()) == artifacts_before
+            assert runtime.run_calls == {}
+            assert runtime.resume_calls == []
 
 
 def test_legacy_run_rejects_resume_and_retry_before_orphan_recovery(tmp_path):

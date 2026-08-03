@@ -45,8 +45,8 @@ class EvidenceAnchorContract(StrictModel):
         ):
             raise ValueError("source-line evidence fields do not match the local parser")
         if (
-            self.pdf_page.required_fields != ("source_path", "page", "quoted_text")
-            or self.pdf_page.forbidden_fields != ("start_line", "end_line", "source_digest")
+            self.pdf_page.required_fields != ("source_path", "page")
+            or self.pdf_page.forbidden_fields != ("start_line", "end_line", "source_digest", "quoted_text")
             or self.pdf_page.source_path != "manuscript.pdf"
         ):
             raise ValueError("PDF-page evidence fields do not match the local parser")
@@ -80,10 +80,10 @@ DEFAULT_EVIDENCE_ANCHOR_CONTRACT = EvidenceAnchorContract(
         matching_rule="quoted_text is a verbatim substring of the inclusive UTF-8 source line range",
     ),
     pdf_page=_EvidenceRule(
-        required_fields=("source_path", "page", "quoted_text"),
-        forbidden_fields=("start_line", "end_line", "source_digest"),
+        required_fields=("source_path", "page"),
+        forbidden_fields=("start_line", "end_line", "source_digest", "quoted_text"),
         source_path_rule="compiled PDF path",
-        matching_rule="whitespace-normalized exact substring of an allowed PDF page layer",
+        matching_rule="page identifies rendered content bound by the frozen bundle and page digest",
         source_path="manuscript.pdf",
     ),
     revision_edit=_EvidenceRule(
@@ -190,15 +190,16 @@ class Evidence(StrictModel):
     end_line: int | None = Field(default=None, ge=1)
     source_digest: str | None = Field(default=None, pattern="^[0-9a-f]{64}$")
     page: int | None = Field(default=None, ge=1)
-    quoted_text: str = Field(min_length=1)
+    quoted_text: str | None = Field(default=None, min_length=1)
 
     @model_validator(mode="before")
     @classmethod
     def validate_forbidden_fields(cls, value: Any) -> Any:
         if isinstance(value, dict) and "page" in value:
-            source_fields = {"start_line", "end_line", "source_digest"}
-            if source_fields.intersection(value):
-                raise ValueError("evidence cannot mix PDF page and source line fields")
+            # Key presence matters so explicit null cannot bypass the frozen mutually exclusive shape.
+            forbidden = {"start_line", "end_line", "source_digest", "quoted_text"}
+            if forbidden.intersection(value):
+                raise ValueError("PDF page evidence cannot include source line or quoted-text fields")
         return value
 
     @model_validator(mode="after")
@@ -206,8 +207,8 @@ class Evidence(StrictModel):
         source_fields = (self.start_line, self.end_line, self.source_digest)
         if self.page is not None and any(value is not None for value in source_fields):
             raise ValueError("PDF page evidence cannot include source line fields")
-        if self.page is None and any(value is None for value in source_fields):
-            raise ValueError("source evidence requires line range and source_digest")
+        if self.page is None and (any(value is None for value in source_fields) or self.quoted_text is None):
+            raise ValueError("source evidence requires line range, source_digest, and quoted_text")
         if self.start_line is not None and self.end_line is not None and self.end_line < self.start_line:
             raise ValueError("end_line cannot precede start_line")
         return self
@@ -229,6 +230,7 @@ class ReviewOutput(StrictModel):
     findings: list[FindingCandidate]
 
 
+# Historical runs still deserialize these persisted outputs, but new runs never schedule this role.
 class VisualTranscriptionPage(StrictModel):
     page: int = Field(ge=1)
     page_digest: str = Field(pattern="^[0-9a-f]{64}$")
@@ -328,9 +330,7 @@ def output_schema(
             f"Source-line evidence uses a {contract.source_line.source_path_rule}; "
             f"PDF-page evidence uses {contract.pdf_page.source_path}."
         )
-        evidence["properties"]["quoted_text"]["description"] = (
-            f"Source line: {contract.source_line.matching_rule}. " f"PDF page: {contract.pdf_page.matching_rule}."
-        )
+        evidence["properties"]["quoted_text"]["description"] = contract.source_line.matching_rule
         evidence["oneOf"] = _evidence_anchor_schema(contract)
     elif kind == "revision":
         properties = schema["$defs"]["ExactEdit"]["properties"]
@@ -345,17 +345,18 @@ def _evidence_anchor_schema(contract: EvidenceAnchorContract) -> list[dict[str, 
     return [
         {
             "title": "Source line evidence",
-            "required": [field for field in source_line.required_fields if field not in {"source_path", "quoted_text"}],
+            "required": [field for field in source_line.required_fields if field != "source_path"],
             "not": {"anyOf": [{"required": [field]} for field in source_line.forbidden_fields]},
             "properties": {
                 "start_line": {"type": "integer", "minimum": 1},
                 "end_line": {"type": "integer", "minimum": 1},
                 "source_digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+                "quoted_text": {"type": "string", "minLength": 1},
             },
         },
         {
             "title": "Compiled PDF page evidence",
-            "required": [field for field in pdf_page.required_fields if field not in {"source_path", "quoted_text"}],
+            "required": [field for field in pdf_page.required_fields if field != "source_path"],
             "not": {"anyOf": [{"required": [field]} for field in pdf_page.forbidden_fields]},
             "properties": {
                 "source_path": {"const": pdf_page.source_path},

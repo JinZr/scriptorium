@@ -31,7 +31,7 @@ def test_evidence_requires_exactly_one_anchor_shape() -> None:
         source_digest=digest,
         quoted_text="claim",
     )
-    page = Evidence(source_path="manuscript.pdf", page=2, quoted_text="claim")
+    page = Evidence(source_path="manuscript.pdf", page=2)
 
     assert source.page is None
     assert page.start_line is None
@@ -42,7 +42,6 @@ def test_evidence_requires_exactly_one_anchor_shape() -> None:
             end_line=2,
             source_digest=digest,
             page=2,
-            quoted_text="claim",
         )
     with pytest.raises(ValidationError):
         Evidence(
@@ -63,7 +62,7 @@ def test_evidence_requires_exactly_one_anchor_shape() -> None:
 
 
 def test_pdf_shape_leaves_path_for_semantic_validation() -> None:
-    evidence = Evidence(source_path="pages/page-0001.png", page=1, quoted_text="claim")
+    evidence = Evidence(source_path="pages/page-0001.png", page=1)
 
     assert evidence.source_path == "pages/page-0001.png"
 
@@ -84,9 +83,9 @@ def test_evidence_schema_exposes_mutually_exclusive_contract_shapes() -> None:
         evidence_schema = output_schema(kind)["$defs"]["Evidence"]
 
         assert evidence_schema["additionalProperties"] is False
-        assert evidence_schema["required"] == ["source_path", "quoted_text"]
+        assert evidence_schema["required"] == ["source_path"]
         source_line, pdf_page = evidence_schema["oneOf"]
-        assert source_line["required"] == ["start_line", "end_line", "source_digest"]
+        assert source_line["required"] == ["start_line", "end_line", "source_digest", "quoted_text"]
         assert source_line["not"] == {"anyOf": [{"required": ["page"]}]}
         assert pdf_page["required"] == ["page"]
         assert pdf_page["properties"]["source_path"] == {"const": "manuscript.pdf"}
@@ -95,6 +94,7 @@ def test_evidence_schema_exposes_mutually_exclusive_contract_shapes() -> None:
                 {"required": ["start_line"]},
                 {"required": ["end_line"]},
                 {"required": ["source_digest"]},
+                {"required": ["quoted_text"]},
             ]
         }
 

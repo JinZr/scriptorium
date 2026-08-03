@@ -133,7 +133,6 @@ class ScriptoriumService:
         try:
             role_keys = (
                 *self.project_config.profiles[selected_profile],
-                "visual_transcription",
                 "revision",
                 "verification",
             )

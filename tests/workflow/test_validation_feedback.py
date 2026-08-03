@@ -3,12 +3,11 @@ from dataclasses import replace
 from hashlib import sha256
 import json
 
-import fitz
 import pytest
 
 from scriptorium.domain import AgentRole, AttemptStatus, Finding, FindingSeverity
 from scriptorium.errors import InfrastructureError
-from scriptorium.manuscript import ManuscriptBundle, SourceFile
+from scriptorium.manuscript import SourceFile
 from scriptorium.schemas import (
     DEFAULT_EVIDENCE_ANCHOR_CONTRACT,
     CompiledPdfAnchor,
@@ -20,7 +19,6 @@ from scriptorium.schemas import (
     SourceAnchorRecord,
     ValidationReport,
     VerificationOutput,
-    VisualTranscriptionOutput,
     evidence_anchor_contract_digest,
 )
 from scriptorium.service import ScriptoriumService
@@ -227,12 +225,6 @@ def test_invalid_json_and_schema_errors_are_normalized_without_pydantic_noise(tm
 
 def test_review_semantic_validation_reports_all_independent_anchor_failures(tmp_path):
     repo, service = _service(tmp_path)
-    pdf_path = tmp_path / "paper.pdf"
-    document = fitz.open()
-    page = document.new_page()
-    page.insert_text((72, 72), "Native PDF text.")
-    document.save(pdf_path)
-    document.close()
     source = SourceFile("main.tex", sha256((repo / "main.tex").read_bytes()).hexdigest(), 4)
     output = ReviewOutput.model_validate(
         {
@@ -268,7 +260,6 @@ def test_review_semantic_validation_reports_all_independent_anchor_failures(tmp_
                         {
                             "source_path": "manuscript.pdf",
                             "page": 3,
-                            "quoted_text": "wrong",
                         },
                     ],
                     "explanation": "Explanation",
@@ -283,8 +274,6 @@ def test_review_semantic_validation_reports_all_independent_anchor_failures(tmp_
             output,
             _anchor_map(source),
             repo,
-            pdf_path,
-            True,
         )
 
     assert [issue.code for issue in issues] == [
@@ -338,7 +327,6 @@ def test_deepseek_anchor_regressions_have_consistent_schema_and_semantic_feedbac
             {
                 "source_path": "pages/page-0014.png",
                 "page": 1,
-                "quoted_text": "Rendered text",
             },
             "evidence.pdf_path_required",
         ),
@@ -348,6 +336,14 @@ def test_deepseek_anchor_regressions_have_consistent_schema_and_semantic_feedbac
                 "page": 1,
                 "source_digest": source.digest,
                 "quoted_text": "Rendered text",
+            },
+            "schema.cross_field",
+        ),
+        (
+            {
+                "source_path": "manuscript.pdf",
+                "page": 1,
+                "quoted_text": None,
             },
             "schema.cross_field",
         ),
@@ -362,8 +358,6 @@ def test_deepseek_anchor_regressions_have_consistent_schema_and_semantic_feedbac
                     output,
                     anchor_map,
                     repo,
-                    tmp_path / "unused.pdf",
-                    False,
                 ),
             )
             assert issues[0].code == expected_code
@@ -448,8 +442,6 @@ def test_non_text_source_paths_are_diagnostic_reads_not_durable_anchors(tmp_path
             review,
             anchor_map,
             repo,
-            tmp_path / "unused.pdf",
-            False,
         )
         revision_issues = service.armarius._validate_revision_output(
             revision,
@@ -502,54 +494,17 @@ def test_verification_evidence_uses_the_patched_source_map_digest(tmp_path):
             [_finding("finding_1")],
             _anchor_map(patched_source),
             repo,
-            tmp_path / "unused.pdf",
-            False,
         )
 
     assert [issue.code for issue in issues] == ["evidence.source_digest_mismatch"]
     assert issues[0].expected == patched_source.digest
 
 
-def test_pdf_mismatch_guidance_uses_the_exact_third_page_read_path(tmp_path):
+def test_pdf_page_anchor_does_not_depend_on_pdf_text_extraction(tmp_path):
     repo, service = _service(tmp_path)
     source = SourceFile("main.tex", sha256((repo / "main.tex").read_bytes()).hexdigest(), 4)
     anchor_map = _anchor_map(source, pages=3)
-    pdf_path = tmp_path / "three-pages.pdf"
-    image_document = fitz.open()
-    try:
-        image_page = image_document.new_page(width=200, height=80)
-        image_page.insert_text((20, 45), "Hidden visual transcription text")
-        pixmap = image_page.get_pixmap(alpha=False)
-    finally:
-        image_document.close()
-    document = fitz.open()
-    try:
-        document.new_page()
-        document.new_page()
-        third = document.new_page()
-        third.insert_image(fitz.Rect(20, 20, 220, 100), pixmap=pixmap)
-        document.save(pdf_path)
-    finally:
-        document.close()
-    transcription = VisualTranscriptionOutput.model_validate(
-        {
-            "pdf_digest": "a" * 64,
-            "pages": [
-                {
-                    "page": 3,
-                    "page_digest": f"{3:064x}",
-                    "text": "Hidden visual transcription text",
-                }
-            ],
-        }
-    )
-    evidence = Evidence.model_validate(
-        {
-            "source_path": "manuscript.pdf",
-            "page": 3,
-            "quoted_text": "Different submitted quote",
-        }
-    )
+    evidence = Evidence.model_validate({"source_path": "manuscript.pdf", "page": 3})
 
     with service:
         issues = service.armarius._validate_evidence(
@@ -557,17 +512,13 @@ def test_pdf_mismatch_guidance_uses_the_exact_third_page_read_path(tmp_path):
             {item.source_path: item for item in anchor_map.sources},
             anchor_map,
             repo,
-            pdf_path,
-            True,
-            transcription,
             "/findings/0/evidence/0",
         )
 
-    assert issues[0].actual["guidance"] == "Re-read pages/page-0003.png or use source-line evidence."
-    assert "Hidden visual transcription text" not in json.dumps(issues[0].model_dump(mode="json"))
+    assert issues == []
 
 
-def test_revision_verification_and_visual_validators_accumulate_issues(tmp_path):
+def test_revision_and_verification_validators_accumulate_issues(tmp_path):
     repo, service = _service(tmp_path)
     source = SourceFile("main.tex", sha256((repo / "main.tex").read_bytes()).hexdigest(), 4)
     revision = RevisionOutput.model_validate(
@@ -615,19 +566,6 @@ def test_revision_verification_and_visual_validators_accumulate_issues(tmp_path)
             "issues": [],
         }
     )
-    bundle_dir = tmp_path / "bundle"
-    bundle_dir.mkdir()
-    (bundle_dir / "manifest.json").write_text(json.dumps({"pdf_digest": "a" * 64}), encoding="utf-8")
-    visual = VisualTranscriptionOutput.model_validate(
-        {
-            "pdf_digest": "b" * 64,
-            "pages": [
-                {"page": 1, "page_digest": "c" * 64, "text": "one"},
-                {"page": 1, "page_digest": "d" * 64, "text": "duplicate"},
-                {"page": 3, "page_digest": "e" * 64, "text": "extra"},
-            ],
-        }
-    )
     with service:
         revision_issues = service.armarius._validate_revision_output(
             revision,
@@ -640,13 +578,6 @@ def test_revision_verification_and_visual_validators_accumulate_issues(tmp_path)
             [_finding("finding_1"), _finding("finding_2")],
             _anchor_map(source),
             repo,
-            tmp_path / "unused.pdf",
-            False,
-        )
-        visual_issues = service.armarius._validate_visual_transcription(
-            visual,
-            ManuscriptBundle(bundle_dir, (), 2),
-            [{"page": 1, "page_digest": "f" * 64}, {"page": 2, "page_digest": "1" * 64}],
         )
 
     revision_codes = [issue.code for issue in revision_issues]
@@ -659,13 +590,6 @@ def test_revision_verification_and_visual_validators_accumulate_issues(tmp_path)
     assert [issue.code for issue in verification_issues] == [
         "verification.unknown_finding_ids",
         "verification.pass_incomplete",
-    ]
-    assert [issue.code for issue in visual_issues] == [
-        "visual.pdf_digest_mismatch",
-        "visual.duplicate_page",
-        "visual.page_set_mismatch",
-        "visual.page_digest_mismatch",
-        "visual.page_digest_mismatch",
     ]
 
 

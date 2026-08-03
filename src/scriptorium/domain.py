@@ -113,7 +113,7 @@ ROLE_CATALOG: Mapping[AgentRole, RoleSpec] = {
     AgentRole.VISUAL_TRANSCRIPTION: RoleSpec(
         key=AgentRole.VISUAL_TRANSCRIPTION,
         display_name="Visual Transcriber",
-        description="Verbatim transcription of text visible in raster manuscript content",
+        description="Historical visual-transcription task retained for persisted run decoding",
     ),
     AgentRole.SUBSTANTIVE_REVIEW: RoleSpec(
         key=AgentRole.SUBSTANTIVE_REVIEW,

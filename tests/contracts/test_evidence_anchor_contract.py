@@ -60,7 +60,6 @@ def test_provider_and_local_evidence_shapes_are_mutually_exclusive() -> None:
     pdf = {
         "source_path": "manuscript.pdf",
         "page": 2,
-        "quoted_text": "claim",
     }
 
     assert Evidence.model_validate(source).page is None
@@ -71,7 +70,10 @@ def test_provider_and_local_evidence_shapes_are_mutually_exclusive() -> None:
         {**source, "page": None},
         {**pdf, "start_line": None},
         {**pdf, "source_digest": None},
+        {**pdf, "quoted_text": "claim"},
+        {**pdf, "quoted_text": None},
         {key: value for key, value in source.items() if key != "source_digest"},
+        {key: value for key, value in source.items() if key != "quoted_text"},
     )
     for payload in invalid:
         with pytest.raises(ValidationError):
@@ -81,7 +83,7 @@ def test_provider_and_local_evidence_shapes_are_mutually_exclusive() -> None:
         schema = output_schema(kind)["$defs"]["Evidence"]
         source_branch, pdf_branch = schema["oneOf"]
 
-        assert source_branch["required"] == ["start_line", "end_line", "source_digest"]
+        assert source_branch["required"] == ["start_line", "end_line", "source_digest", "quoted_text"]
         assert source_branch["not"] == {"anyOf": [{"required": ["page"]}]}
         assert pdf_branch["required"] == ["page"]
         assert pdf_branch["properties"]["source_path"] == {"const": "manuscript.pdf"}
@@ -90,6 +92,7 @@ def test_provider_and_local_evidence_shapes_are_mutually_exclusive() -> None:
                 {"required": ["start_line"]},
                 {"required": ["end_line"]},
                 {"required": ["source_digest"]},
+                {"required": ["quoted_text"]},
             ]
         }
 
@@ -113,6 +116,7 @@ def test_provider_schema_uses_the_supplied_contract_content() -> None:
     revision = output_schema("revision", contract)["$defs"]["ExactEdit"]
 
     assert review["oneOf"][1]["properties"]["source_path"] == {"const": "manuscript.pdf"}
-    assert "frozen PDF matching rule" in review["properties"]["quoted_text"]["description"]
+    assert "frozen PDF matching rule" not in review["properties"]["quoted_text"]["description"]
+    assert review["oneOf"][1]["not"]["anyOf"][-1] == {"required": ["quoted_text"]}
     assert revision["properties"]["path"]["description"] == "frozen editable paths"
     assert DEFAULT_EVIDENCE_ANCHOR_CONTRACT.pdf_page.source_path == "manuscript.pdf"

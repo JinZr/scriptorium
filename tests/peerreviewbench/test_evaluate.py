@@ -389,7 +389,6 @@ def test_export_findings_maps_byoj_fields_without_suggested_action() -> None:
                 {
                     "source_path": "manuscript.pdf",
                     "page": 3,
-                    "quoted_text": "figure evidence",
                 },
             ),
         ),
@@ -403,7 +402,7 @@ def test_export_findings_maps_byoj_fields_without_suggested_action() -> None:
     assert items[0]["claim_full"] == f"{findings[0].claim}\n\n{findings[0].explanation}"
     assert items[0]["evidence_full"] == "[preprint/preprint.md:4] quote 4"
     assert items[0]["text"] == f"{items[0]['claim_full']}\n\n{items[0]['evidence_full']}"
-    assert items[1]["evidence_full"] == "[manuscript.pdf page 3] figure evidence"
+    assert items[1]["evidence_full"] == "[manuscript.pdf page 3]"
     assert items[1]["scriptorium"]["finding_id"] == findings[1].id
     assert items[1]["scriptorium"]["role"] == AgentRole.FIGURE_REVIEW.value
     assert "private suggested action" not in json.dumps(items)
