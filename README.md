@@ -58,13 +58,13 @@ scriptorium init . --main main.tex --engine pdflatex
 Commit `scriptorium.toml`, then configure local role routing in the ignored `.scriptorium/config.toml`. Start a run from an explicit Git revision:
 
 ```bash
-scriptorium doctor --profile full --budget-usd 10
-scriptorium run start --revision HEAD --profile full --budget-usd 10
+scriptorium doctor --revision COMMIT --profile full --budget-usd 10
+scriptorium run start --revision COMMIT --profile full --budget-usd 10
 scriptorium run status RUN_ID
 scriptorium finding list RUN_ID
 ```
 
-The run reads a persistent snapshot of the resolved commit. Uncommitted work is excluded. Review each finding and record `confirm`, `reject`, or `waive` with a reason. Scriptorium generates and compiles a patched snapshot without modifying the author's worktree. Only an approved, independently verified patch becomes eligible for explicit application.
+Doctor first scans and compiles a disposable snapshot of the same commit without creating a run. The run then reads a persistent snapshot of that resolved commit. Uncommitted work is excluded from both operations. Review each finding and record `confirm`, `reject`, or `waive` with a reason. Scriptorium generates and compiles a patched snapshot without modifying the author's worktree. Only an approved, independently verified patch becomes eligible for explicit application.
 
 Use top-level `--json` for machine-readable output:
 

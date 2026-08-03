@@ -16,6 +16,7 @@ import socket
 import sqlite3
 import stat
 import subprocess
+import tempfile
 import time
 from typing import Any, Awaitable, Callable, Iterator
 
@@ -57,7 +58,6 @@ class ScriptoriumService:
     ) -> None:
         self.repo = find_repo(repo)
         self.state_dir = self.repo / ".scriptorium"
-        self.project_config = load_project_config(self.repo)
         self.local_config = load_local_config(self.repo)
         try:
             self.database = Database(self.state_dir / "state.sqlite3")
@@ -87,19 +87,25 @@ class ScriptoriumService:
         self,
         profile: str | None = None,
         budget_usd: float | None = None,
+        revision: str = "HEAD",
     ) -> dict[str, Any]:
-        selected_profile = profile or (
-            "full" if "full" in self.project_config.profiles else next(iter(self.project_config.profiles))
-        )
+        selected_profile = profile or "full"
         checks: list[dict[str, Any]] = []
+        configuration_failed = False
+        infrastructure_failed = False
 
-        def check(name: str, ok: bool, message: str) -> None:
+        def check(name: str, ok: bool, message: str, failure_kind: str | None = None) -> None:
+            nonlocal configuration_failed, infrastructure_failed
             checks.append({"name": name, "ok": ok, "message": message})
+            if not ok and failure_kind == "configuration":
+                configuration_failed = True
+            elif not ok and failure_kind == "infrastructure":
+                infrastructure_failed = True
 
         git_path = shutil.which("git")
         if git_path is None:
-            check("git_repository", False, "git was not found")
-            tracked_config = None
+            git_ok = False
+            check("git_repository", False, "git was not found", "infrastructure")
         else:
             git = subprocess.run(
                 [git_path, "-C", str(self.repo), "rev-parse", "--is-inside-work-tree"],
@@ -107,59 +113,204 @@ class ScriptoriumService:
                 text=True,
                 check=False,
             )
-            check("git_repository", git.returncode == 0, git.stderr.strip() or git.stdout.strip())
-            tracked_config = subprocess.run(
-                [git_path, "-C", str(self.repo), "ls-files", "--error-unmatch", "scriptorium.toml"],
-                capture_output=True,
-                text=True,
-                check=False,
+            git_ok = git.returncode == 0
+            check(
+                "git_repository",
+                git_ok,
+                git.stderr.strip() or git.stdout.strip(),
+                "infrastructure",
             )
-        config_tracked = tracked_config is not None and tracked_config.returncode == 0
-        check(
-            "tracked_project_config",
-            config_tracked,
-            "scriptorium.toml is tracked" if config_tracked else "scriptorium.toml is not tracked",
-        )
-        main_path = self.repo / self.project_config.manuscript.main
-        check("manuscript_main", main_path.is_file(), str(main_path))
-        latexmk = shutil.which("latexmk")
-        check("latexmk", latexmk is not None, latexmk or "latexmk was not found")
-        engine = shutil.which(self.project_config.manuscript.engine)
-        check(
-            "latex_engine",
-            engine is not None,
-            engine or f"{self.project_config.manuscript.engine} was not found",
-        )
-        try:
-            role_keys = (
-                *self.project_config.profiles[selected_profile],
-                "revision",
-                "verification",
+
+        project = None
+        frozen_revision = None
+        with tempfile.TemporaryDirectory(prefix="scriptorium-doctor-") as temporary:
+            temporary_root = Path(temporary)
+            snapshot = temporary_root / "snapshot"
+            if git_ok:
+                try:
+                    resolved_revision = self.manuscript.resolve_revision(revision)
+                    self.manuscript.create_snapshot(resolved_revision, snapshot)
+                except (InfrastructureError, OSError) as exc:
+                    check("frozen_revision", False, str(exc), "infrastructure")
+                else:
+                    frozen_revision = resolved_revision
+                    check(
+                        "frozen_revision",
+                        True,
+                        f"{revision} -> {frozen_revision.commit_sha}",
+                    )
+            else:
+                check("frozen_revision", False, "not run because git_repository failed")
+
+            if frozen_revision is None:
+                check(
+                    "tracked_project_config",
+                    False,
+                    "not run because frozen_revision failed",
+                )
+            else:
+                config_path = snapshot / "scriptorium.toml"
+                if not config_path.is_file():
+                    check(
+                        "tracked_project_config",
+                        False,
+                        "scriptorium.toml is not present in frozen revision",
+                        "configuration",
+                    )
+                else:
+                    try:
+                        # Project settings must come from the frozen commit, never the dirty worktree.
+                        project = load_project_config(snapshot)
+                    except ConfigurationError as exc:
+                        check("tracked_project_config", False, str(exc), "configuration")
+                    else:
+                        check(
+                            "tracked_project_config",
+                            True,
+                            "scriptorium.toml is present in frozen revision",
+                        )
+                        selected_profile = profile or (
+                            "full" if "full" in project.profiles else next(iter(project.profiles))
+                        )
+
+            if project is None:
+                main_ok = False
+                check(
+                    "manuscript_main",
+                    False,
+                    "not run because tracked_project_config failed",
+                )
+            else:
+                main_ok = (snapshot / project.manuscript.main).is_file()
+                check(
+                    "manuscript_main",
+                    main_ok,
+                    (
+                        f"{project.manuscript.main} in {frozen_revision.commit_sha}"
+                        if main_ok
+                        else f"{project.manuscript.main} is missing from frozen revision"
+                    ),
+                    "infrastructure",
+                )
+
+            latexmk = shutil.which("latexmk")
+            latexmk_ok = latexmk is not None
+            check(
+                "latexmk",
+                latexmk_ok,
+                latexmk or "latexmk was not found",
+                "infrastructure",
             )
-        except KeyError:
+            if project is None:
+                engine_ok = False
+                check(
+                    "latex_engine",
+                    False,
+                    "not run because tracked_project_config failed",
+                )
+            else:
+                engine = shutil.which(project.manuscript.engine)
+                engine_ok = engine is not None
+                check(
+                    "latex_engine",
+                    engine_ok,
+                    engine or f"{project.manuscript.engine} was not found",
+                    "infrastructure",
+                )
+
+            sources = None
+            if project is None:
+                check(
+                    "manuscript_sources",
+                    False,
+                    "not run because tracked_project_config failed",
+                )
+            elif not main_ok:
+                check(
+                    "manuscript_sources",
+                    False,
+                    "not run because manuscript_main failed",
+                )
+            else:
+                try:
+                    sources = self.manuscript.scan_sources(snapshot, project.manuscript.main)
+                except (InfrastructureError, OSError, UnicodeError) as exc:
+                    check("manuscript_sources", False, str(exc), "infrastructure")
+                else:
+                    check(
+                        "manuscript_sources",
+                        True,
+                        f"resolved {len(sources)} source files from {project.manuscript.main}",
+                    )
+
+            compile_dependency = None
+            if sources is None:
+                compile_dependency = "manuscript_sources"
+            elif not latexmk_ok:
+                compile_dependency = "latexmk"
+            elif not engine_ok:
+                compile_dependency = "latex_engine"
+            if compile_dependency is not None:
+                check(
+                    "manuscript_compile",
+                    False,
+                    f"not run because {compile_dependency} failed",
+                )
+            else:
+                build_workspace = temporary_root / "build"
+                try:
+                    # Compile a copy so generated LaTeX files cannot mutate the frozen snapshot.
+                    shutil.copytree(snapshot, build_workspace)
+                    build = self.manuscript.build(build_workspace, project.manuscript)
+                    if not build.pdf_path.is_file():
+                        raise InfrastructureError(f"LaTeX build did not create {build.pdf_path.name}")
+                except (InfrastructureError, OSError) as exc:
+                    check("manuscript_compile", False, str(exc), "infrastructure")
+                else:
+                    check(
+                        "manuscript_compile",
+                        True,
+                        f"compiled {project.manuscript.main} from {frozen_revision.commit_sha}",
+                    )
+
+        if project is None:
             role_keys = ()
+        else:
+            try:
+                role_keys = (
+                    *project.profiles[selected_profile],
+                    "revision",
+                    "verification",
+                )
+            except KeyError:
+                role_keys = ()
         selected_runtimes: set[str] = set()
         for role_key in role_keys:
             try:
                 selected_runtimes.add(self.local_config.route_for_role(role_key).runtime)
             except ConfigurationError:
                 continue
-        try:
-            validate_ready(self.project_config, self.local_config, selected_profile, budget_usd)
-        except ConfigurationError as exc:
-            check("model_routes", False, str(exc))
+        if project is None:
+            check(
+                "model_routes",
+                False,
+                "not run because tracked_project_config failed",
+            )
         else:
-            check("model_routes", True, f"profile {selected_profile}")
+            try:
+                validate_ready(project, self.local_config, selected_profile, budget_usd)
+            except ConfigurationError as exc:
+                check("model_routes", False, str(exc), "configuration")
+            else:
+                check("model_routes", True, f"profile {selected_profile}")
         package_names = {
             "codex": "openai-codex",
             "claude_code": "claude-agent-sdk",
             "antigravity": "google-antigravity",
         }
-        runtime_check_names: set[str] = set()
         for runtime_name in sorted(selected_runtimes):
             package_name = package_names[runtime_name]
             check_name = "codex_sdk" if runtime_name == "codex" else f"runtime_{runtime_name}_sdk"
-            runtime_check_names.add(check_name)
             try:
                 version = metadata.version(package_name)
                 expected = RUNTIME_SDK_VERSIONS[runtime_name]
@@ -168,26 +319,19 @@ class ScriptoriumService:
             except metadata.PackageNotFoundError:
                 ok = False
                 message = f"{package_name} is not installed"
-            check(check_name, ok, message)
+            check(check_name, ok, message, "infrastructure")
         if "antigravity" in selected_runtimes:
             antigravity_auth_ok = bool(os.environ.get("GEMINI_API_KEY", "").strip())
             check(
                 "antigravity_auth",
                 antigravity_auth_ok,
                 "GEMINI_API_KEY is set" if antigravity_auth_ok else "GEMINI_API_KEY is not set",
+                "infrastructure",
             )
-            runtime_check_names.add("antigravity_auth")
         check("sqlite", True, str(self.state_dir / "state.sqlite3"))
 
         failed = [item for item in checks if not item["ok"]]
-        infrastructure_names = {
-            "git_repository",
-            "manuscript_main",
-            "latexmk",
-            "latex_engine",
-            "sqlite",
-        } | runtime_check_names
-        exit_code = 3 if any(item["name"] in infrastructure_names for item in failed) else 2 if failed else 0
+        exit_code = 3 if infrastructure_failed else 2 if configuration_failed or failed else 0
         return {
             "ok": not failed,
             "exit_code": exit_code,

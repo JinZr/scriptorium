@@ -93,10 +93,10 @@ Secrets belong in native user configuration or environment variables, never in `
 Run:
 
 ```bash
-scriptorium doctor
+scriptorium doctor --revision COMMIT
 ```
 
-before starting work. Doctor resolves the selected profile plus its revision and verification routes, then checks only the runtimes those routes actually reference. Each required SDK must be installed at the exact pinned version. Doctor also checks `GEMINI_API_KEY` for Antigravity; Claude Code authentication is exercised only by the explicitly enabled live smoke test.
+before starting work. Doctor reads `scriptorium.toml`, the selected profile, and manuscript inputs from a snapshot of that revision, so uncommitted project changes do not affect the result. The ignored `.scriptorium/config.toml` remains machine-local and is read from the current repository. Doctor checks only the runtimes referenced by the selected review, revision, and verification routes. Each required SDK must be installed at the exact pinned version. Doctor also checks `GEMINI_API_KEY` for Antigravity; Claude Code authentication is exercised only by the explicitly enabled live smoke test.
 
 Doctor rejects unresolved model placeholders. When a dollar budget is requested, missing route prices are also a configuration error. An explicitly configured zero price is accepted for an OSS or laboratory-gateway route; Scriptorium does not infer billing from the provider name.
 

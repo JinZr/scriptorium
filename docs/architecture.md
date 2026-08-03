@@ -61,7 +61,7 @@ Runtime-native session state stays under the stable run session directory, outsi
 - `service`: application methods shared by the CLI and any future interface.
 - `cli`: argument parsing plus text or JSON rendering; no business rules.
 
-The public service surface is `start_run`, `get_run`, `resume_run`, `retry_task`, `cancel_run`, `list_findings`, `get_finding`, `decide_finding`, `get_patch`, `decide_patch`, `apply_patch`, `render_report`, and `evaluate_gate`.
+The public service surface is `doctor`, `start_run`, `get_run`, `resume_run`, `retry_task`, `cancel_run`, `list_findings`, `get_finding`, `decide_finding`, `get_patch`, `decide_patch`, `apply_patch`, `render_report`, and `evaluate_gate`.
 
 ## Runtime boundary
 
@@ -102,6 +102,12 @@ Each adapter is bound to one exact native harness version:
 The optional SDKs are imported only inside their adapters and only when selected. Claude Code accepts `structured_output` and persists SDK messages as NDJSON. Antigravity accepts structured output and persists the current turn's incremental steps as NDJSON. Cancellation first requests native session cancellation; adapters then normalize completion, failure, or interruption.
 
 A session can be resumed only when runtime name, exact runtime version, provider, and model match the recorded attempt. A retry that changes to a different named route always creates a new native session; naming the same frozen route may resume a compatible failed or interrupted attempt. If a recorded native session ID exists but its state has disappeared, recovery reports failure instead of creating an unrelated session.
+
+## Doctor preflight
+
+`scriptorium doctor` resolves its requested revision to a commit before loading project configuration. It creates a disposable Git snapshot, scans the same manuscript dependency closure used by run preparation, and compiles a separate copy with the shared `ManuscriptManager.build()` implementation. The ignored local runtime configuration still comes from the current repository because it describes this machine, while `scriptorium.toml` and manuscript inputs come only from the frozen snapshot.
+
+Doctor is a foreground preflight, not a durable workflow stage. It does not create a run, workflow records, artifacts, bundles, rendered pages, or provider work, and it recompiles on every invocation so a previously successful commit does not hide changes in the local LaTeX environment. Its temporary snapshot and generated build files are removed when the command returns or is interrupted normally.
 
 ## Frozen manuscript and agent bundle
 

@@ -11,15 +11,24 @@ scriptorium init . --main main.tex --engine pdflatex
 Initialization creates the project-local `.scriptorium/` state directory and ignores it in Git. After tracking `scriptorium.toml` and configuring local routes, run:
 
 ```bash
-scriptorium --json doctor --profile full --budget-usd 10
+scriptorium --json doctor --revision COMMIT --profile full --budget-usd 10
 ```
 
-Doctor checks the repository, manuscript, LaTeX tools, SQLite, selected profile, routes, and budget pricing prerequisites. It includes the selected review roles plus revision and verification, then requires each referenced native SDK at the exact pinned version that a new run will freeze. Antigravity also requires `GEMINI_API_KEY`. Claude Code login or API authentication is intentionally left to an explicit live smoke test.
+Doctor resolves the revision to a commit, creates a disposable snapshot, scans its recursive LaTeX dependencies, and compiles a separate snapshot copy with the same build implementation used by a run. Dirty worktree files do not enter the check. Doctor does not create a run, artifact, review bundle, rendered page, or provider invocation, and it recompiles on every call. Temporary snapshot and build files are removed after normal completion, ordinary failure, or interruption; an operating-system cleanup may be needed after `SIGKILL`.
+
+The compile preflight has the same trust boundary as a run: LaTeX executes the selected committed manuscript with the configured engine. It is not a TeX sandbox. Doctor also checks SQLite, the selected profile, routes, budget pricing, and each referenced native SDK at its pinned version. Antigravity requires `GEMINI_API_KEY`; Claude Code login or API authentication remains the responsibility of an explicitly enabled live smoke test.
+
+`--revision` defaults to `HEAD`, but HEAD can move between doctor and `run start`. Pass the same explicit commit to both commands when exact equivalence matters:
+
+```bash
+scriptorium --json doctor --revision COMMIT --profile full --budget-usd 10
+scriptorium --json run start --revision COMMIT --profile full --budget-usd 10
+```
 
 ## Start and inspect a run
 
 ```bash
-scriptorium --json run start --revision HEAD --profile full --budget-usd 10
+scriptorium --json run start --revision COMMIT --profile full --budget-usd 10
 scriptorium --json run status RUN_ID
 scriptorium --json finding list RUN_ID
 scriptorium --json run report RUN_ID --format json
