@@ -98,9 +98,11 @@ def test_fabricated_pdf_evidence_quote_is_rejected(tmp_path):
         attempts = service.database.list_attempts(task.id)
         assert len(attempts) == 2
         assert all(
-            attempt.error == "invalid structured output: quoted PDF evidence does not match manuscript.pdf page 1"
+            attempt.error == "invalid structured output: 1 issues; first evidence.pdf_quote_mismatch at "
+            "/findings/0/evidence/0/quoted_text"
             for attempt in attempts
         )
+        assert all(attempt.validation_report_artifact_digest for attempt in attempts)
 
 
 def test_legacy_run_preserves_page_only_evidence_through_resume_and_verification(tmp_path, monkeypatch):

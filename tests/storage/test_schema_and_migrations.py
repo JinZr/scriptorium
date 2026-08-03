@@ -1,6 +1,6 @@
 import sqlite3
 
-from scriptorium.storage import _MIGRATION_1, Database
+from scriptorium.storage import _MIGRATION_1, _MIGRATION_2, Database
 
 
 def test_schema_and_pragmas(tmp_path) -> None:
@@ -24,7 +24,9 @@ def test_schema_and_pragmas(tmp_path) -> None:
         }
         patch_columns = {row["name"] for row in database.connection.execute("PRAGMA table_info(patches)").fetchall()}
         assert "attempt_id" in patch_columns
-        assert database.connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0] == 2
+        attempt_columns = {row["name"] for row in database.connection.execute("PRAGMA table_info(attempts)").fetchall()}
+        assert "validation_report_artifact_digest" in attempt_columns
+        assert database.connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0] == 3
         assert database.connection.execute("PRAGMA foreign_keys").fetchone()[0] == 1
         assert database.connection.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
         assert database.connection.execute("PRAGMA busy_timeout").fetchone()[0] == 5000
@@ -98,4 +100,45 @@ def test_existing_database_is_upgraded_without_rewriting_old_patch(tmp_path) -> 
         patch = database.get_patch("patch_old")
 
         assert patch.attempt_id is None
-        assert database.connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0] == 2
+        assert database.connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0] == 3
+
+
+def test_version_two_database_adds_nullable_validation_report_pointer(tmp_path) -> None:
+    path = tmp_path / "state.sqlite3"
+    connection = sqlite3.connect(path, isolation_level=None)
+    connection.execute("CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)")
+    connection.executescript(_MIGRATION_1)
+    connection.executescript(_MIGRATION_2)
+    connection.execute(
+        """
+        INSERT INTO runs (
+            id, repository, commit_sha, tree_sha, profile, status, config_digest,
+            frozen_config_json, budget_usd, estimated_cost_usd, created_at, updated_at, error
+        ) VALUES ('run_old', '/tmp/paper', ?, ?, 'full', 'reviewing', ?, '{}', NULL, 0, ?, ?, NULL)
+        """,
+        ("a" * 40, "b" * 40, "c" * 64, "2026-01-01T00:00:00+00:00", "2026-01-01T00:00:00+00:00"),
+    )
+    connection.execute(
+        """
+        INSERT INTO tasks (
+            id, run_id, stage, role, route, input_digest, status, created_at, updated_at
+        ) VALUES ('task_old', 'run_old', 'review', 'copyedit', 'primary', ?, 'failed', ?, ?)
+        """,
+        ("d" * 64, "2026-01-01T00:00:00+00:00", "2026-01-01T00:00:00+00:00"),
+    )
+    connection.execute(
+        """
+        INSERT INTO attempts (
+            id, task_id, ordinal, status, created_at, completed_at, error
+        ) VALUES ('attempt_old', 'task_old', 1, 'failed', ?, ?, 'legacy validation failure')
+        """,
+        ("2026-01-01T00:00:00+00:00", "2026-01-01T00:01:00+00:00"),
+    )
+    connection.close()
+
+    with Database(path) as database:
+        attempt = database.get_attempt("attempt_old")
+
+        assert attempt.validation_report_artifact_digest is None
+        assert attempt.error == "legacy validation failure"
+        assert database.connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0] == 3

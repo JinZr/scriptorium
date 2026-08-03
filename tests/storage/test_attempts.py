@@ -2,7 +2,7 @@ import sqlite3
 
 import pytest
 
-from scriptorium.domain import AgentRole, AttemptStatus, RunStatus, Task, TaskStatus
+from scriptorium.domain import AgentRole, Artifact, AttemptStatus, RunStatus, Task, TaskStatus
 from scriptorium.storage import ConflictError, Database
 
 from ._factories import create_completed_attempt, make_run
@@ -123,6 +123,59 @@ def test_finish_attempt_rejects_a_different_recorded_session(tmp_path) -> None:
             )
 
         assert database.get_attempt(attempt.id).status == AttemptStatus.RUNNING
+
+
+def test_validation_report_pointer_is_atomic_and_persists(tmp_path) -> None:
+    path = tmp_path / "state.sqlite3"
+    digest = "f" * 64
+    with Database(path) as database:
+        run = database.create_run(make_run())
+        task = database.create_task(
+            Task(
+                run_id=run.id,
+                stage="review",
+                role=AgentRole.CONSISTENCY,
+                route="primary",
+                input_digest="d" * 64,
+            )
+        )
+        attempt = database.begin_attempt(task.id)
+        events_before = database.list_events(run.id)
+
+        with pytest.raises(sqlite3.IntegrityError, match="FOREIGN KEY"):
+            database.finish_attempt(
+                attempt.id,
+                AttemptStatus.FAILED,
+                validation_report_artifact_digest=digest,
+                estimated_cost_usd=0.25,
+            )
+
+        assert database.get_attempt(attempt.id).status == AttemptStatus.RUNNING
+        assert database.get_run(run.id).estimated_cost_usd == 0
+        assert database.list_events(run.id) == events_before
+
+        database.record_artifact(
+            Artifact(
+                digest=digest,
+                relative_path=f"sha256/{digest[:2]}/{digest[2:]}",
+                size=2,
+                media_type="application/vnd.scriptorium.validation-report+json",
+            )
+        )
+        finished = database.finish_attempt(
+            attempt.id,
+            AttemptStatus.FAILED,
+            validation_report_artifact_digest=digest,
+        )
+        assert finished.validation_report_artifact_digest == digest
+
+    with Database(path) as reopened:
+        assert reopened.get_attempt(attempt.id).validation_report_artifact_digest == digest
+        with pytest.raises(sqlite3.IntegrityError, match="terminal attempts are immutable"):
+            reopened.connection.execute(
+                "UPDATE attempts SET validation_report_artifact_digest = NULL WHERE id = ?",
+                (attempt.id,),
+            )
 
 
 def test_cancel_incomplete_tasks_preserves_completed_history(tmp_path) -> None:

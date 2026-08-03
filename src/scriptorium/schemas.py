@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from enum import Enum
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -106,6 +106,23 @@ class VerificationOutput(StrictModel):
         if self.verdict == "pass" and self.issues:
             raise ValueError("passing verification cannot contain issues")
         return self
+
+
+class ValidationIssue(StrictModel):
+    code: str
+    path: str
+    message: str
+    expected: Any = None
+    actual: Any = None
+    diff: str | None = None
+
+
+class ValidationReport(StrictModel):
+    schema_kind: Literal["review", "visual_transcription", "revision", "verification"]
+    schema_digest: str = Field(pattern="^[0-9a-f]{64}$")
+    bundle_digest: str = Field(pattern="^[0-9a-f]{64}$")
+    output_artifact_digest: str | None = Field(default=None, pattern="^[0-9a-f]{64}$")
+    issues: list[ValidationIssue] = Field(min_length=1)
 
 
 SCHEMA_MODELS: dict[str, type[StrictModel]] = {

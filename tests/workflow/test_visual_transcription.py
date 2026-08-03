@@ -235,9 +235,10 @@ def test_raster_pdf_quote_absent_from_valid_transcription_is_rejected(tmp_path):
             AttemptStatus.FAILED,
         ]
         assert all(
-            "quoted PDF evidence does not match manuscript.pdf page 1" in (attempt.error or "")
+            "first evidence.pdf_quote_mismatch at /findings/0/evidence/0/quoted_text" in (attempt.error or "")
             for attempt in substantive_task["attempts"]
         )
+        assert "Different visible text." not in runtime.tasks[AgentRole.SUBSTANTIVE_REVIEW]
 
 
 def test_native_pdf_text_still_validates_when_raster_transcription_is_empty(tmp_path):

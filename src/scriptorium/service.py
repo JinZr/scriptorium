@@ -416,6 +416,39 @@ class ScriptoriumService:
         run_view = self.get_run(run_id)
         findings = self._storage(self.database.list_findings, run_id)
         patches = self._storage(self.database.list_patches, run_id)
+        validation_reports = []
+        for item in run_view["tasks"]:
+            task = item["task"]
+            schema_kind = {
+                "review": "review",
+                "review_transcription": "visual_transcription",
+                "revision": "revision",
+                "verification": "verification",
+                "verification_transcription": "visual_transcription",
+            }.get(task.stage)
+            for attempt in item["attempts"]:
+                digest = attempt.validation_report_artifact_digest
+                if digest is None:
+                    continue
+                if schema_kind is None or attempt.schema_digest is None or attempt.bundle_digest is None:
+                    raise InfrastructureError(f"attempt {attempt.id} has incomplete validation provenance")
+                report = self.armarius._load_validation_report(
+                    attempt,
+                    schema_kind,
+                    attempt.schema_digest,
+                    attempt.bundle_digest,
+                )
+                validation_reports.append(
+                    {
+                        "attempt_id": attempt.id,
+                        "artifact_digest": digest,
+                        "report": report.model_dump(mode="json"),
+                        "created_at": attempt.created_at,
+                    }
+                )
+        validation_reports.sort(key=lambda item: (item["created_at"], item["attempt_id"]))
+        for item in validation_reports:
+            item.pop("created_at")
         payload = {
             **run_view,
             "findings": [
@@ -434,6 +467,7 @@ class ScriptoriumService:
                 for patch in patches
             ],
             "events": self._storage(self.database.list_events, run_id),
+            "validation_reports": validation_reports,
             "gate": self.evaluate_gate(run_id),
         }
         if format == "json":
@@ -906,6 +940,18 @@ class ScriptoriumService:
                 f"- `{task['id']}` — {task['stage']} / {task['role']} / {task['status']} "
                 f"({len(item['attempts'])} attempts)"
             )
+        lines.extend(["", "## Validation failures", ""])
+        if plain["validation_reports"]:
+            for item in plain["validation_reports"]:
+                report = item["report"]
+                first = report["issues"][0]
+                lines.append(
+                    f"- `{item['attempt_id']}` — {len(report['issues'])} issues; "
+                    f"first `{first['code']}` at `{first['path'] or '(root)'}`; "
+                    f"report `{item['artifact_digest']}`"
+                )
+        else:
+            lines.append("- None")
         lines.extend(["", "## Findings", ""])
         if plain["findings"]:
             for item in plain["findings"]:

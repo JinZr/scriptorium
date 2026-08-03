@@ -259,6 +259,7 @@ class Attempt:
     estimated_cost_usd: float = 0.0
     trace_artifact_digest: str | None = None
     output_artifact_digest: str | None = None
+    validation_report_artifact_digest: str | None = None
     duration_ms: int | None = None
     error: str | None = None
     created_at: str = field(default_factory=utc_now)

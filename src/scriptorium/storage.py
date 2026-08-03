@@ -31,7 +31,7 @@ from scriptorium.domain import (
     validate_task_transition,
 )
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 
 _MIGRATION_1 = """
@@ -229,6 +229,16 @@ COMMIT;
 """
 
 
+_MIGRATION_3 = """
+BEGIN IMMEDIATE;
+ALTER TABLE attempts
+ADD COLUMN validation_report_artifact_digest TEXT
+REFERENCES artifacts(digest) ON DELETE RESTRICT;
+INSERT INTO schema_migrations (version, applied_at) VALUES (3, CURRENT_TIMESTAMP);
+COMMIT;
+"""
+
+
 class StorageError(RuntimeError):
     pass
 
@@ -273,6 +283,9 @@ class Database:
                 version = 1
             if version == 1:
                 self.connection.executescript(_MIGRATION_2)
+                version = 2
+            if version == 2:
+                self.connection.executescript(_MIGRATION_3)
 
     @contextmanager
     def transaction(self) -> Iterator[sqlite3.Connection]:
@@ -510,8 +523,9 @@ class Database:
                     id, task_id, ordinal, status, thread_id, runtime_name, runtime_version, model,
                     model_provider, prompt_digest, schema_digest, bundle_digest, input_tokens,
                     cached_input_tokens, output_tokens, reasoning_tokens, estimated_cost_usd,
-                    trace_artifact_digest, output_artifact_digest, duration_ms, error, created_at, completed_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    trace_artifact_digest, output_artifact_digest, validation_report_artifact_digest,
+                    duration_ms, error, created_at, completed_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 self._attempt_values(attempt),
             )
@@ -587,6 +601,7 @@ class Database:
         estimated_cost_usd: float = 0.0,
         trace_artifact_digest: str | None = None,
         output_artifact_digest: str | None = None,
+        validation_report_artifact_digest: str | None = None,
         duration_ms: int | None = None,
         error: str | None = None,
     ) -> Attempt:
@@ -618,7 +633,8 @@ class Database:
                     model_provider = COALESCE(?, model_provider),
                     input_tokens = ?, cached_input_tokens = ?, output_tokens = ?,
                     reasoning_tokens = ?, estimated_cost_usd = ?, trace_artifact_digest = ?,
-                    output_artifact_digest = ?, duration_ms = ?, error = ?, completed_at = ?
+                    output_artifact_digest = ?, validation_report_artifact_digest = ?,
+                    duration_ms = ?, error = ?, completed_at = ?
                 WHERE id = ?
                 """,
                 (
@@ -635,6 +651,7 @@ class Database:
                     estimated_cost_usd,
                     trace_artifact_digest,
                     output_artifact_digest,
+                    validation_report_artifact_digest,
                     duration_ms,
                     error,
                     completed_at,
@@ -1468,6 +1485,7 @@ class Database:
             attempt.estimated_cost_usd,
             attempt.trace_artifact_digest,
             attempt.output_artifact_digest,
+            attempt.validation_report_artifact_digest,
             attempt.duration_ms,
             attempt.error,
             attempt.created_at,
@@ -1496,6 +1514,7 @@ class Database:
             estimated_cost_usd=row["estimated_cost_usd"],
             trace_artifact_digest=row["trace_artifact_digest"],
             output_artifact_digest=row["output_artifact_digest"],
+            validation_report_artifact_digest=row["validation_report_artifact_digest"],
             duration_ms=row["duration_ms"],
             error=row["error"],
             created_at=row["created_at"],

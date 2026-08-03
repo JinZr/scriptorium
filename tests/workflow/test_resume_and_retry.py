@@ -47,6 +47,7 @@ def test_runtime_cancellation_durably_interrupts_the_attempt(tmp_path):
         assert copyedit.status == TaskStatus.INTERRUPTED
         assert attempt.status == AttemptStatus.INTERRUPTED
         assert attempt.thread_id == "thread-copyedit-1"
+        assert attempt.validation_report_artifact_digest is None
 
 
 def test_resume_reuses_completed_review_and_appends_attempt_for_interrupted_lane(tmp_path):

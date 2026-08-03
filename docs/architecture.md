@@ -30,7 +30,7 @@ State lives under the manuscript repository:
   control/cancel/
 ```
 
-`scriptorium init` adds `.scriptorium/` to `.gitignore`. SQLite uses WAL, foreign keys, a busy timeout, numbered SQL migrations, and short transactions. Git, LaTeX, and model calls happen outside transactions.
+`scriptorium init` adds `.scriptorium/` to `.gitignore`. SQLite uses WAL, foreign keys, a busy timeout, numbered SQL migrations, and short transactions. Git, LaTeX, and model calls happen outside transactions. An invalid structured response is preserved as a raw output artifact and accompanied by an immutable validation-report artifact; the terminal attempt transaction records both digests atomically.
 
 ### Run mutation ownership
 
@@ -133,7 +133,13 @@ preparing
 → completed
 ```
 
-`waiting_budget`, `failed`, and `cancelled` are pause or terminal states. A task is the stable logical unit keyed by run, stage, role, route, and input digest. Every new or resumed model turn creates an immutable attempt. A resume attempt records its known session ID when it begins; a new session is filled exactly once with compare-and-set semantics and cannot be replaced at completion. Completed tasks with the same input digest are reused; failed or interrupted work appends a new attempt. Ctrl+C finishes active attempts as `interrupted` while leaving the run at its resumable workflow stage; it does not imply durable run cancellation.
+`waiting_budget`, `failed`, and `cancelled` are pause or terminal states. A task is the stable logical unit keyed by run, stage, role, route, and base-input digest. Correction diagnostics change only the attempt prompt digest, not task identity. Every new or resumed model turn creates an immutable attempt. A resume attempt records its known session ID when it begins; a new session is filled exactly once with compare-and-set semantics and cannot be replaced at completion. Completed tasks with the same input digest are reused; failed or interrupted work appends a new attempt. Ctrl+C finishes active attempts as `interrupted` while leaving the run at its resumable workflow stage; it does not imply durable run cancellation.
+
+Structured outputs are accepted atomically. JSON syntax is checked first, then all Pydantic schema errors are normalized, and semantic anchor or workflow validation runs only after the schema is complete. Semantic validation accumulates every independently decidable issue while skipping checks whose prerequisites are absent. Any issue rejects the whole output, so no finding, patch, verification, or visual transcription is partially materialized. Runtime provenance, artifact access, PDF I/O, SQLite, and internal state failures remain infrastructure errors rather than model-correctable diagnostics.
+
+Each validation report binds the output artifact, frozen schema digest, and attempt bundle digest. Reports contain stable error codes, RFC 6901 JSON Pointers, bounded expected and actual values, and bounded diffs where an exact target exists. They contain no attempt-specific timestamp or random field, so identical invalid output under the same bindings has the same artifact digest. Hidden visual-transcription text may be used to check a PDF quote but is never copied into reviewer diagnostics.
+
+An initial base turn may receive one automatic same-session correction. If that correction also fails, the mutation stops. A later same-route resume or retry loads the latest durable report and adds exactly one correction attempt without replaying the base prompt. An interrupted correction reuses its exact recorded prompt artifact. A different named route creates a new task and session with the full base prompt plus the compatible prior report. Reports are never recomputed during recovery; missing, corrupt, wrongly typed, or mismatched report artifacts are infrastructure failures.
 
 Review aggregation performs schema and anchor validation, exact-fingerprint deduplication, provenance preservation, and severity ordering only. It does not ask a consensus model or perform semantic clustering. The visual transcriber supplies page text but cannot submit findings or validate its own output. Confirmed findings are passed to the read-only Scribe, whose exact, non-overlapping edits are applied to a separate snapshot and compiled. An independent Verifier checks resolution and regression. A failed verification returns to patch approval and never starts an automatic infinite loop.
 

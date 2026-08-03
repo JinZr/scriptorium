@@ -579,6 +579,11 @@ def test_completed_benchmark_paper_is_not_repeated_on_resume(
     assert {
         (attempt["model"], attempt["model_provider"]) for task in paper_summary["tasks"] for attempt in task["attempts"]
     } == {("fake-model", "test")}
+    assert all(
+        "validation_report_artifact_digest" not in attempt
+        for task in paper_summary["tasks"]
+        for attempt in task["attempts"]
+    )
     assert len(runtime.calls) == 5
     manifest_bytes = (run_dir / "run_manifest.json").read_bytes()
 

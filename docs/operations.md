@@ -29,6 +29,14 @@ The revision is resolved and frozen before review. Uncommitted changes do not en
 
 Once `run start` reserves its run ID, it owns that run through the same kernel lock used by later mutations. `run status`, `run report`, and `run gate` remain available as read-only observations while a mutation is active; they do not take ownership or alter attempts.
 
+### Diagnose structured-output failures
+
+`run status` exposes a nullable `validation_report_artifact_digest` on each attempt. `run report --format json` adds the corresponding full reports in stable attempt order; the Markdown report shows only the issue count, first code and JSON Pointer, and report digest. The short attempt error is intentionally only a one-line index into this durable report.
+
+Scriptorium validates one complete replacement object at a time. The first invalid base turn may receive one automatic same-session correction. If that correction is still invalid, the command stops; each later same-route `run resume` or `run retry` adds exactly one correction attempt using the latest report. Selecting a different named route starts a new session with the full base task and compatible diagnostics. Correction attempts continue to count their actual usage and cost, and a later mutation must pass the ordinary budget gate.
+
+Do not edit or regenerate a validation report. A missing, corrupt, wrongly typed, or provenance-mismatched report is an infrastructure failure and blocks a new attempt. Repair artifact storage rather than manually changing SQLite. Reports may say that a PDF quotation failed both native and visual checks, but hidden visual-transcription text is deliberately not included. Raster-only pages may therefore still require the reviewer to reread `pages/page-N.png` or use source-line evidence; this release does not relax strict PDF evidence rules.
+
 ## Record finding decisions
 
 Every finding requires one decision and a non-empty human reason:

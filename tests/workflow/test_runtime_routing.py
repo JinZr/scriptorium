@@ -44,6 +44,7 @@ def test_runtime_provenance_mismatch_is_not_accepted_as_a_completed_attempt(tmp_
         assert attempts
         assert all(attempt.status == AttemptStatus.FAILED for attempt in attempts)
         assert all(attempt.error.startswith("runtime provenance mismatch:") for attempt in attempts)
+        assert all(attempt.validation_report_artifact_digest is None for attempt in attempts)
 
 
 def test_mixed_native_routes_freeze_and_record_per_route_runtime(tmp_path):
