@@ -81,6 +81,12 @@ class CompilerInput:
 
 
 @dataclass(frozen=True)
+class TexmfRoot:
+    path: Path
+    distribution: bool
+
+
+@dataclass(frozen=True)
 class BuildDerivation:
     path: str
     digest: str
@@ -279,28 +285,34 @@ class ManuscriptManager:
         return BuildResult(pdf_path=pdf_path, log=log, compiler_inputs=compiler_inputs)
 
     @staticmethod
-    def _texmf_roots() -> tuple[Path, ...]:
-        try:
-            result = subprocess.run(
-                ["kpsewhich", "--expand-path={$TEXMF,$TEXMFCNF,$TEXMFCACHE}"],
-                capture_output=True,
-                text=True,
-                check=False,
+    def _texmf_roots() -> tuple[TexmfRoot, ...]:
+        roots = []
+        for expression, distribution in (
+            ("{$TEXMFDIST,$TEXMFMAIN}", True),
+            ("{$TEXMF,$TEXMFCNF,$TEXMFCACHE}", False),
+        ):
+            try:
+                result = subprocess.run(
+                    ["kpsewhich", f"--expand-path={expression}"],
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+            except OSError as exc:
+                raise InfrastructureError("kpsewhich is required to identify external TeX installation inputs") from exc
+            paths = tuple(
+                Path(value).resolve()
+                for raw in result.stdout.strip().split(os.pathsep)
+                if (value := raw.removeprefix("!!")) and Path(value).is_absolute()
             )
-        except OSError as exc:
-            raise InfrastructureError("kpsewhich is required to identify external TeX installation inputs") from exc
-        roots = tuple(
-            Path(value).resolve()
-            for value in result.stdout.strip().split(os.pathsep)
-            if value and Path(value).is_absolute()
-        )
-        if result.returncode or not roots or Path("/") in roots:
-            raise InfrastructureError("Cannot identify external TeX installation roots")
-        return roots
+            if result.returncode or not paths or Path("/") in paths:
+                raise InfrastructureError("Cannot identify external TeX installation roots")
+            roots.extend(TexmfRoot(path, distribution) for path in paths)
+        return tuple(roots)
 
     @classmethod
     def _read_recorder(
-        cls, workspace: Path, main: Path, texmf_roots: tuple[Path, ...] = ()
+        cls, workspace: Path, main: Path, texmf_roots: tuple[TexmfRoot, ...] = ()
     ) -> tuple[set[Path], set[Path]]:
         recorder = workspace / main.with_suffix(".fls")
         try:
@@ -326,13 +338,20 @@ class ManuscriptManager:
         return records["INPUT"], records["OUTPUT"]
 
     @classmethod
-    def _recorded_path(cls, workspace: Path, path: Path, texmf_roots: tuple[Path, ...], kind: str) -> Path | None:
+    def _recorded_path(cls, workspace: Path, path: Path, texmf_roots: tuple[TexmfRoot, ...], kind: str) -> Path | None:
         if ".codex" in path.parts or path.name == "AGENTS.md":
             raise InfrastructureError(f"Manuscript dependency is not allowed in an agent bundle: {path}")
         try:
             relative = path.relative_to(workspace)
         except ValueError:
-            system_file = any(path.resolve().is_relative_to(root) for root in texmf_roots)
+            resource = (
+                path.suffix.lower() in BUILD_INPUT_EXTENSIONS | {".lua", ".luc", ".fmt", ".cnf"}
+                or path.name.lower().endswith((".lua.gz", ".luc.gz"))
+                or (kind == "OUTPUT" and path.name == "m_t_x_t_e_s_t.tmp")
+            )
+            system_file = any(
+                path.resolve().is_relative_to(root.path) and (root.distribution or resource) for root in texmf_roots
+            )
             external_font = kind == "INPUT" and path.suffix.lower() in FONT_INPUT_EXTENSIONS
             if not (system_file or external_font):
                 raise InfrastructureError(f"LaTeX recorder file is outside the snapshot and TeX installation: {path}")
@@ -401,7 +420,7 @@ class ManuscriptManager:
         cls,
         workspace: Path,
         main: Path,
-        texmf_roots: tuple[Path, ...],
+        texmf_roots: tuple[TexmfRoot, ...],
         compiler_inputs: set[Path],
         originals: dict[str, str],
     ) -> tuple[set[Path], tuple[BuildDerivation, ...]]:

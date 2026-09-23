@@ -154,10 +154,15 @@ links. It removes copied recorder/PDF state and standard auxiliary files before 
 input, and engine output (PDF, or XDV for XeLaTeX followed by PDF conversion).
 Missing or malformed recorder evidence is an infrastructure failure even when the compiler exits successfully. Paths are normalized against
 the recorded working directory, with the existing snapshot and forbidden-path
-checks still enforced. External installation inputs are recognized through
-`kpsewhich`'s expanded `TEXMF`/`TEXMFCNF`/`TEXMFCACHE` paths (including
-installation cache outputs); external font files are build
-resources. Other external content inputs are rejected.
+checks still enforced. `kpsewhich` identifies trusted distribution resources
+through `TEXMFDIST`/`TEXMFMAIN`. The broader `TEXMF`/`TEXMFCNF`/`TEXMFCACHE`
+search paths authorize only build-resource types and native cache/configuration
+files (`.lua`, `.luc`, their gzip variants, `.fmt`, `.cnf`) and LuaTeX's
+cache write probe, not manuscript text, bibliography, data,
+or graphics. Kpathsea's `!!` database-only marker is removed before validating
+absolute roots. External fonts remain build resources. Other external inputs
+are rejected, including review content or unknown file types in user TEXMF trees
+and writable caches. This distinction also applies to bibliography helper inputs.
 
 Actual snapshot inputs are classified before a model can start:
 

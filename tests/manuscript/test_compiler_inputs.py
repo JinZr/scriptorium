@@ -8,7 +8,7 @@ import pytest
 
 from scriptorium.config import ManuscriptConfig
 from scriptorium.errors import InfrastructureError
-from scriptorium.manuscript import BuildResult, CompilerInput, ManuscriptManager, SourceFile
+from scriptorium.manuscript import BuildResult, CompilerInput, ManuscriptManager, SourceFile, TexmfRoot
 
 
 def test_compiler_coverage_compares_exact_frozen_paths_and_digests(tmp_path):
@@ -46,7 +46,9 @@ def test_recorder_normalizes_paths_and_ignores_external_tex_inputs(tmp_path):
         f"PWD {tmp_path}\nINPUT ./main.tex\nINPUT {tmp_path}/main.tex\n"
         "INPUT /usr/share/texmf/article.cls\nOUTPUT main.pdf\n"
     )
-    assert ManuscriptManager._read_recorder(tmp_path, Path("main.tex"), (Path("/usr/share/texmf"),)) == (
+    assert ManuscriptManager._read_recorder(
+        tmp_path, Path("main.tex"), (TexmfRoot(Path("/usr/share/texmf"), True),)
+    ) == (
         {Path("main.tex")},
         {Path("main.pdf")},
     )
@@ -201,3 +203,84 @@ def test_native_recorder_supports_each_configured_engine(tmp_path, monkeypatch, 
     sources = manager.scan_sources(tmp_path, "main.tex")
     build = manager.build(tmp_path, ManuscriptConfig(main="main.tex", engine=engine))
     manager.validate_build_sources(build, sources)
+
+
+def test_texmf_roots_strip_database_markers_and_separate_distribution(monkeypatch):
+    def expand(command, **kwargs):
+        expression = command[1]
+        if expression == "--expand-path={$TEXMFDIST,$TEXMFMAIN}":
+            output = "!!/usr/share/texlive/texmf-dist"
+        else:
+            assert expression == "--expand-path={$TEXMF,$TEXMFCNF,$TEXMFCACHE}"
+            output = "/home/user/texmf:!!/usr/share/texlive/texmf-dist:/cache:relative"
+        return subprocess.CompletedProcess(command, 0, output, "")
+
+    monkeypatch.setattr("scriptorium.manuscript.subprocess.run", expand)
+    assert ManuscriptManager._texmf_roots() == (
+        TexmfRoot(Path("/usr/share/texlive/texmf-dist"), True),
+        TexmfRoot(Path("/home/user/texmf").resolve(), False),
+        TexmfRoot(Path("/usr/share/texlive/texmf-dist"), False),
+        TexmfRoot(Path("/cache"), False),
+    )
+
+
+@pytest.mark.parametrize("output", ["!!/", "!!relative", "", "/safe:!!/"])
+def test_texmf_database_markers_cannot_bypass_root_validation(monkeypatch, output):
+    monkeypatch.setattr(
+        "scriptorium.manuscript.subprocess.run",
+        lambda command, **kwargs: subprocess.CompletedProcess(command, 0, output, ""),
+    )
+    with pytest.raises(InfrastructureError, match="installation roots"):
+        ManuscriptManager._texmf_roots()
+
+
+@pytest.mark.parametrize("suffix", [".tex", ".bib", ".pdf", ".csv", ".unknown", ".tmp", ".gz"])
+def test_user_texmf_roots_do_not_authorize_content(tmp_path, suffix):
+    workspace = tmp_path / "snapshot"
+    workspace.mkdir()
+    user_tree = tmp_path / "texmf"
+    user_tree.mkdir()
+    content = user_tree / f"hidden{suffix}"
+    content.write_text("Uncommitted content.")
+    roots = (TexmfRoot(user_tree, False),)
+    (workspace / "main.fls").write_text(f"PWD {workspace}\nINPUT {content}\n")
+    with pytest.raises(InfrastructureError, match="outside the snapshot"):
+        ManuscriptManager._read_recorder(workspace, Path("main.tex"), roots)
+
+
+def test_distribution_sources_and_user_cache_resources_remain_supported(tmp_path):
+    workspace = tmp_path / "snapshot"
+    workspace.mkdir()
+    distribution = tmp_path / "dist"
+    cache = tmp_path / "cache"
+    roots = (TexmfRoot(distribution, True), TexmfRoot(cache, False))
+    for path, kind in (
+        (distribution / "latex.ltx", "INPUT"),
+        (distribution / "supp-pdf.mkii", "INPUT"),
+        (cache / "fonts.lua", "INPUT"),
+        (cache / "fonts.luc", "OUTPUT"),
+        (cache / "fonts.lua.gz", "INPUT"),
+        (cache / "fonts.luc.gz", "OUTPUT"),
+        (cache / "m_t_x_t_e_s_t.tmp", "OUTPUT"),
+    ):
+        assert ManuscriptManager._recorded_path(workspace, path, roots, kind) is None
+
+
+def test_native_build_rejects_hidden_content_in_user_texmf(tmp_path, monkeypatch):
+    if any(shutil.which(tool) is None for tool in ("latexmk", "pdflatex", "kpsewhich")):
+        pytest.skip("native TeX required; exercised in LaTeX CI")
+    workspace = tmp_path / "snapshot"
+    workspace.mkdir()
+    user_tree = tmp_path / "texmf"
+    content_dir = user_tree / "tex" / "latex" / "local"
+    content_dir.mkdir(parents=True)
+    (content_dir / "scriptorium-hidden.tex").write_text("Uncommitted manuscript content.")
+    monkeypatch.setenv("TEXMFHOME", str(user_tree))
+    (workspace / "main.tex").write_text(
+        r"\documentclass{article}\begin{document}" r"\InputIfFileExists{scriptorium-hidden.tex}{}{}\end{document}"
+    )
+    manager = ManuscriptManager(tmp_path)
+    assert [source.path for source in manager.scan_sources(workspace, "main.tex")] == ["main.tex"]
+    with pytest.raises(InfrastructureError, match="outside the snapshot.*scriptorium-hidden.tex"):
+        manager.build(workspace, ManuscriptConfig("main.tex", "pdflatex"))
+    assert (workspace / "main.pdf").is_file()
