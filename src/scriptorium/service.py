@@ -478,13 +478,9 @@ class ScriptoriumService:
             raise ConfigurationError("invalid search query, cursor, or limit")
         sources = [item for item in bundle.anchor_map.sources if item.text_anchorable]
         search_items = [(item.source_path, bundle.workspace / item.read_path, item.source_digest) for item in sources]
-        search_items.append(
-            (
-                "navigation.json",
-                bundle.workspace / "navigation.json",
-                ArtifactStore.digest_file(bundle.workspace / "navigation.json"),
-            )
-        )
+        for name in ("manifest.json", "navigation.json", "source-map.json"):
+            read_path = bundle.workspace / name
+            search_items.append((name, read_path, ArtifactStore.digest_file(read_path)))
         if path is not None:
             search_items = [item for item in search_items if item[0] == path]
             if not search_items:
