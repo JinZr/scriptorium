@@ -1051,14 +1051,15 @@ class Armarius:
         self._external_bundle(run, metadata)
         prompt_digest = metadata["prompt_digest"]
         previous = self.database.list_attempts(task.id)
-        if previous and previous[-1].validation_report_artifact_digest:
+        rejected = next((item for item in reversed(previous) if item.validation_report_artifact_digest), None)
+        if rejected is not None:
             report = self._load_validation_report(
-                previous[-1], metadata["schema_kind"], metadata["schema_digest"], metadata["bundle_digest"]
+                rejected, metadata["schema_kind"], metadata["schema_digest"], metadata["bundle_digest"]
             )
             correction = self._correction_prompt(
                 metadata["schema_kind"],
-                previous[-1].id,
-                previous[-1].validation_report_artifact_digest,
+                rejected.id,
+                rejected.validation_report_artifact_digest,
                 report,
             )
             prompt_digest = self._record_text(

@@ -47,6 +47,27 @@ def test_invalid_anchor_requires_explicit_retry_with_saved_diagnostics(tmp_path)
         assert len(service.list_findings(run.id)) == 1
 
 
+def test_abandoned_correction_claim_preserves_rejection_diagnostics(tmp_path):
+    repo = make_repository(tmp_path, roles=("substantive_review",))
+    with ScriptoriumService(repo, manuscript_manager=PdfBuildingManuscriptManager(repo)) as service:
+        run = asyncio.run(service.start_run("HEAD", "quick"))["run"]
+        first = claim(service, run.id, AgentRole.SUBSTANTIVE_REVIEW)
+        failed = submit(service, first, {"summary": "Invalid output", "findings": [{"wrong": "shape"}]})
+        task = service.database.list_tasks(run.id)[0]
+        asyncio.run(service.retry_task(run.id, task.id))
+        correction = claim(service, run.id, AgentRole.SUBSTANTIVE_REVIEW, session="correction-session")
+        assert failed["attempt"].id in correction["prompt"]
+        assert correction["input_digest"] != first["input_digest"]
+
+        asyncio.run(service.retry_task(run.id, task.id, correction["attempt"].id, "session lost"))
+        resumed = claim(service, run.id, AgentRole.SUBSTANTIVE_REVIEW, session="new-session")
+        assert resumed["prompt"] == correction["prompt"]
+        assert resumed["input_digest"] == correction["input_digest"]
+        assert resumed["attempt"].ordinal == 3
+        with pytest.raises(StateError, match="superseded"):
+            submit(service, correction, {"summary": "Late output", "findings": []})
+
+
 def test_corrupt_validation_report_blocks_retry(tmp_path):
     repo = make_repository(tmp_path, roles=("substantive_review",))
     with ScriptoriumService(repo, manuscript_manager=PdfBuildingManuscriptManager(repo)) as service:
