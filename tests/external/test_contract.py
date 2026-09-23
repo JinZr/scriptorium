@@ -432,3 +432,25 @@ def test_corrupt_completed_output_cannot_be_replayed_or_pass_the_gate(tmp_path: 
             asyncio.run(service.resume_run(run_id))
         assert service.list_findings(run_id) == []
         assert not service.evaluate_gate(run_id)["passed"]
+
+
+def test_historical_sdk_run_stays_readable_but_cannot_resume(tmp_path: Path) -> None:
+    repo = _repo(tmp_path / "paper")
+    run_id, _ = _start(repo)
+    with ScriptoriumService(repo) as service:
+        row = service.database.connection.execute(
+            "SELECT frozen_config_json FROM runs WHERE id = ?", (run_id,)
+        ).fetchone()
+        config = json.loads(row["frozen_config_json"])
+        config.pop("execution")
+        with service.database.transaction() as connection:
+            connection.execute(
+                "UPDATE runs SET frozen_config_json = ? WHERE id = ?",
+                (json.dumps(config), run_id),
+            )
+    with ScriptoriumService(repo) as service:
+        assert service.get_run(run_id)["run"].id == run_id
+        assert service.render_report(run_id, "json")["run"]["id"] == run_id
+        assert not service.evaluate_gate(run_id)["passed"]
+        with pytest.raises(StateError, match="retired SDK execution contract"):
+            asyncio.run(service.resume_run(run_id))
