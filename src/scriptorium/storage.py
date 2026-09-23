@@ -309,11 +309,11 @@ class Database:
                 self.connection.executescript(_MIGRATION_4)
 
     def ensure_external_schema(self) -> None:
-        with self._lock:
-            version = self.connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0]
+        with self.transaction() as connection:
+            version = connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0]
             if version == SCHEMA_VERSION:
                 return
-            active = self.connection.execute(
+            active = connection.execute(
                 "SELECT id FROM runs WHERE status NOT IN (?, ?) LIMIT 1",
                 (RunStatus.COMPLETED.value, RunStatus.CANCELLED.value),
             ).fetchone()
@@ -322,7 +322,11 @@ class Database:
                     f"historical SDK run {active['id']} must finish in its original version "
                     "before starting an external run"
                 )
-            self.connection.executescript(_MIGRATION_4)
+            # executescript commits an open transaction, so run each fixed migration statement under this lock.
+            for statement in _MIGRATION_4.split(";"):
+                statement = statement.strip()
+                if statement and statement not in {"BEGIN IMMEDIATE", "COMMIT"}:
+                    connection.execute(statement)
 
     @contextmanager
     def transaction(self) -> Iterator[sqlite3.Connection]:
