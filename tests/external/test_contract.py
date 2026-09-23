@@ -72,6 +72,7 @@ def test_each_host_uses_the_same_frozen_task_contract(tmp_path: Path, client: st
             "The supplement"
         )
         assert service.read_task(attempt_id, "manifest.json", 1, 1, 0, 8000)["lines"]
+        assert service.search_task(attempt_id, "supplement.tex", "manifest.json", 0, 1)["matches"]
         assert len(service.page_task(attempt_id, 1)["digest"]) == 64
         result = asyncio.run(
             service.submit_task(

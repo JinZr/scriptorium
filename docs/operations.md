@@ -20,7 +20,7 @@ scriptorium --json task page ATTEMPT_ID --number 1
 scriptorium --json task submit ATTEMPT_ID --input-digest DIGEST --file answer.json
 ```
 
-`task read` supports `manifest.json`, `navigation.json`, `source-map.json`, and text sources named in the source map (either `source_path` or `read_path`). It returns at most 8,000 characters per call, with `next_line` and `next_offset` when a read was truncated. `task search` searches frozen text sources and navigation, with `next_cursor` for further matches. `task page` returns the exact rendered image path and digest; the host must actually open the image for a visual review.
+`task read` supports `manifest.json`, `navigation.json`, `source-map.json`, and text sources named in the source map (either `source_path` or `read_path`). It returns at most 8,000 characters per call, with `next_line` and `next_offset` when a read was truncated. `task search` searches those frozen text sources and metadata files, with `next_cursor` for further matches. `task page` returns the exact rendered image path and digest; the host must actually open the image for a visual review.
 
 When output is invalid, inspect the returned validation report. No findings, patch, or verification are accepted from that attempt. Explicitly run `scriptorium --json run retry RUN_ID --task TASK_ID`, then claim again; the next prompt includes the durable diagnostics. Repeated identical submissions are idempotent. Different output for a terminal attempt and output for a superseded or cancelled attempt are rejected.
 
