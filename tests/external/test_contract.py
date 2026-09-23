@@ -10,7 +10,7 @@ import sys
 import pytest
 
 from scriptorium.domain import AttemptStatus, RunStatus, TaskStatus
-from scriptorium.errors import InfrastructureError, StateError
+from scriptorium.errors import ConfigurationError, InfrastructureError, StateError
 from scriptorium.service import ScriptoriumService
 
 pytestmark = pytest.mark.skipif(
@@ -218,23 +218,42 @@ def test_revision_requires_human_gates_and_independent_verification(tmp_path: Pa
 def test_json_cli_reads_and_submits_from_stdin_across_processes(tmp_path: Path) -> None:
     repo = _repo(tmp_path / "paper")
     run_id, task_id = _start(repo)
-    with ScriptoriumService(repo) as service:
-        claim = service.claim_task(task_id, "codex", "selected-model", "max", "host-session", "host")
-    attempt_id = claim["attempt"].id
 
-    def command(*args: str, input_text: str | None = None):
+    def command(*args: str, input_text: str | None = None, success: bool = True):
         result = subprocess.run(
             [sys.executable, "-m", "scriptorium", "--json", *args],
             cwd=repo,
             input=input_text,
             capture_output=True,
             text=True,
-            check=True,
         )
+        assert (result.returncode == 0) == success
         return json.loads(result.stdout)
 
+    claim_args = (
+        "task",
+        "claim",
+        task_id,
+        "--client",
+        "codex",
+        "--model",
+        "selected-model",
+        "--effort",
+        "max",
+        "--session-id",
+        "host-session",
+        "--session-source",
+        "host",
+    )
+    claim = command(*claim_args)["data"]
+    attempt_id = claim["attempt"]["id"]
+    assert command(*claim_args)["data"]["attempt"]["id"] == attempt_id
+    conflict_args = list(claim_args)
+    conflict_args[-3] = "other-session"
+    assert command(*conflict_args, success=False)["error"]["code"] == "invalid_state"
     searched = command("task", "search", attempt_id, "--query", "explains")
     assert searched["ok"] and searched["data"]["matches"][0]["path"] == "supplement.tex"
+    output = json.dumps({"summary": "Read the supplement.", "findings": []})
     submitted = command(
         "task",
         "submit",
@@ -243,11 +262,67 @@ def test_json_cli_reads_and_submits_from_stdin_across_processes(tmp_path: Path) 
         claim["input_digest"],
         "--file",
         "-",
-        input_text=json.dumps({"summary": "Read the supplement.", "findings": []}),
+        input_text=output,
     )
     assert submitted["data"]["attempt"]["status"] == "completed"
     assert submitted["data"]["attempt"]["estimated_cost_usd"] is None
+    assert (
+        command(
+            "task", "submit", attempt_id, "--input-digest", claim["input_digest"], "--file", "-", input_text=output
+        )["data"]["output_digest"]
+        == submitted["data"]["output_digest"]
+    )
+    assert (
+        command(
+            "task",
+            "submit",
+            attempt_id,
+            "--input-digest",
+            claim["input_digest"],
+            "--file",
+            "-",
+            input_text='{"summary":"different","findings":[]}',
+            success=False,
+        )["error"]["code"]
+        == "invalid_state"
+    )
     assert command("task", "list", run_id)["data"]["run_status"] == "awaiting_decision"
+
+
+def test_search_paging_long_line_and_bundle_path_boundary(tmp_path: Path) -> None:
+    repo = _repo(tmp_path / "paper")
+    (repo / "supplement.tex").write_text("result " * 1500 + "counterevidence\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(repo), "add", "supplement.tex"], check=True, capture_output=True)
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(repo),
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.org",
+            "commit",
+            "-m",
+            "long line",
+        ],
+        check=True,
+        capture_output=True,
+    )
+    _, task_id = _start(repo)
+    with ScriptoriumService(repo) as service:
+        claim = service.claim_task(task_id, "codex", "model", "max", "session", "host")
+        attempt_id = claim["attempt"].id
+        first = service.search_task(attempt_id, "result", "supplement.tex", 0, 1)
+        second = service.search_task(attempt_id, "result", "supplement.tex", first["next_cursor"], 1)
+        assert first["matches"][0]["column"] == 1
+        assert second["matches"][0]["column"] == 8
+        read = service.read_task(attempt_id, "supplement.tex", 1, 1, 0, 8000)
+        assert read["next_line"] == 1 and read["next_offset"] == 8000
+        continued = service.read_task(attempt_id, "supplement.tex", read["next_line"], 1, read["next_offset"], 8000)
+        assert "counterevidence" in continued["lines"][0]["text"]
+        with pytest.raises(ConfigurationError, match="not a text source"):
+            service.read_task(attempt_id, "../scriptorium.toml", 1, 1, 0, 8000)
 
 
 def test_frozen_navigation_damage_blocks_claim_before_any_attempt(tmp_path: Path) -> None:
