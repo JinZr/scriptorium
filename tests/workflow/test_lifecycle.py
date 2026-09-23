@@ -209,7 +209,7 @@ def test_full_workflow_preserves_worktree_until_approved_patch_is_applied(tmp_pa
         assert "ReviewOutput JSON object with no prose before or after it" in review_prompt
         frozen_route = started["run"].frozen_config["local"]["routes"]["primary"]
         assert frozen_route["runtime"] == "codex"
-        assert frozen_route["runtime_version"] == "0.144.4"
+        assert frozen_route["runtime_version"] == "0.156.1"
         assert "runtime" not in started["run"].frozen_config
         assert not (repo / ".scriptorium" / "runs" / run_id / "snapshot" / "main.pdf").exists()
         assert repo.joinpath("main.tex").read_text(encoding="utf-8") == MANUSCRIPT

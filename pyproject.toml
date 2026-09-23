@@ -9,7 +9,7 @@ description = "Local, durable manuscript review, revision, and verification"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
-    "openai-codex==0.144.4",
+    "openai-codex==0.156.1",
     "pydantic>=2.7,<3",
     "PyMuPDF>=1.24,<2",
     "tomli>=2,<3; python_version < '3.11'",
@@ -17,14 +17,14 @@ dependencies = [
 
 [project.optional-dependencies]
 claude = [
-    "claude-agent-sdk==0.2.128",
+    "claude-agent-sdk==0.2.158",
 ]
 antigravity = [
-    "google-antigravity==0.1.8",
+    "google-antigravity==0.1.18",
 ]
 all = [
-    "claude-agent-sdk==0.2.128",
-    "google-antigravity==0.1.8",
+    "claude-agent-sdk==0.2.158",
+    "google-antigravity==0.1.18",
 ]
 dev = [
     "black==26.3.1",

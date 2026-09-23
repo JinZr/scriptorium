@@ -504,7 +504,7 @@ def test_provider_barrier_stays_held_after_result_if_the_parent_disappears(tmp_p
 
 
 def _runtime(repo: Path, model: str, *, runtime_name: str = "codex") -> ContainedAgentRuntime:
-    versions = {"codex": "0.144.4", "claude_code": "0.2.128"}
+    versions = {"codex": "0.156.1", "claude_code": "0.2.158"}
     return ContainedAgentRuntime(
         RouteConfig(
             name="contained",
@@ -561,3 +561,24 @@ def _wait_for_process_group_exit(process_group: int, timeout: float = 3.0) -> No
         if time.monotonic() >= deadline:
             raise AssertionError(f"process group {process_group} is still alive")
         time.sleep(0.02)
+
+
+@pytest.mark.parametrize(
+    "runtime_name,previous_version",
+    [("codex", "0.144.4"), ("claude_code", "0.2.128"), ("antigravity", "0.1.8")],
+)
+def test_sdk_upgrade_rejects_previous_frozen_versions_before_worker_start(tmp_path, runtime_name, previous_version):
+    from scriptorium.runtime import RuntimeUnavailable
+
+    route = RouteConfig(
+        name="historical",
+        model_provider="provider",
+        model="model",
+        input_usd_per_million=0,
+        output_usd_per_million=0,
+        runtime=runtime_name,
+        runtime_version=previous_version,
+    )
+    with pytest.raises(RuntimeUnavailable, match="Frozen route.*requires.*but this Scriptorium build supports"):
+        ContainedAgentRuntime(route, tmp_path)
+    assert list(tmp_path.iterdir()) == []

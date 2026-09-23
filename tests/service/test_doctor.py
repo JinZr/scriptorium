@@ -109,7 +109,7 @@ def test_doctor_checks_only_selected_native_runtime(
 
     def version(package: str) -> str:
         requested_packages.append(package)
-        return {"claude-agent-sdk": "0.2.128"}[package]
+        return {"claude-agent-sdk": "0.2.158"}[package]
 
     monkeypatch.setattr("scriptorium.service.metadata.version", version)
 
@@ -151,7 +151,7 @@ def test_doctor_ignores_unused_visual_transcription_runtime(
 
     def version(package: str) -> str:
         requested_packages.append(package)
-        return {"claude-agent-sdk": "0.2.128", "openai-codex": "0.144.4"}[package]
+        return {"claude-agent-sdk": "0.2.158", "openai-codex": "0.156.1"}[package]
 
     monkeypatch.setattr("scriptorium.service.metadata.version", version)
 
@@ -168,7 +168,7 @@ def test_doctor_requires_gemini_api_key_for_antigravity(
 ) -> None:
     repo = make_repository(tmp_path, "antigravity", "gemini")
     prepare_doctor(monkeypatch)
-    monkeypatch.setattr("scriptorium.service.metadata.version", lambda package: "0.1.8")
+    monkeypatch.setattr("scriptorium.service.metadata.version", lambda package: "0.1.18")
     monkeypatch.delenv("GEMINI_API_KEY", raising=False)
 
     with ScriptoriumService(repo, manuscript_manager=DoctorManuscriptManager(repo)) as service:
@@ -197,7 +197,7 @@ def test_doctor_reports_wrong_runtime_sdk_version_as_infrastructure_failure(
     assert check == {
         "name": "runtime_claude_code_sdk",
         "ok": False,
-        "message": "expected 0.2.128, found 0.2.127",
+        "message": "expected 0.2.158, found 0.2.127",
     }
 
 
@@ -212,7 +212,7 @@ def test_doctor_checks_runtime_when_model_is_not_ready(
         model="USER_CONFIGURED_MODEL",
     )
     prepare_doctor(monkeypatch)
-    monkeypatch.setattr("scriptorium.service.metadata.version", lambda package: "0.2.128")
+    monkeypatch.setattr("scriptorium.service.metadata.version", lambda package: "0.2.158")
 
     with ScriptoriumService(repo, manuscript_manager=DoctorManuscriptManager(repo)) as service:
         result = service.doctor(profile="quick")
@@ -254,7 +254,7 @@ def test_doctor_checks_antigravity_auth_when_budget_is_not_ready(
         include_prices=False,
     )
     prepare_doctor(monkeypatch)
-    monkeypatch.setattr("scriptorium.service.metadata.version", lambda package: "0.1.8")
+    monkeypatch.setattr("scriptorium.service.metadata.version", lambda package: "0.1.18")
     monkeypatch.delenv("GEMINI_API_KEY", raising=False)
 
     with ScriptoriumService(repo, manuscript_manager=DoctorManuscriptManager(repo)) as service:
@@ -278,7 +278,7 @@ def test_doctor_uses_the_requested_frozen_revision_and_ignores_dirty_worktree(
     (repo / "main.tex").write_text(r"\input{missing}", encoding="utf-8")
     (repo / "scriptorium.toml").write_text("not valid toml =", encoding="utf-8")
     prepare_doctor(monkeypatch)
-    monkeypatch.setattr("scriptorium.service.metadata.version", lambda package: "0.144.4")
+    monkeypatch.setattr("scriptorium.service.metadata.version", lambda package: "0.156.1")
     manager = DoctorManuscriptManager(repo)
 
     with ScriptoriumService(repo, manuscript_manager=manager) as service:
@@ -300,7 +300,7 @@ def test_doctor_reports_missing_source_without_starting_build(
     git(repo, "add", "main.tex")
     git(repo, "commit", "--quiet", "-m", "missing dependency")
     prepare_doctor(monkeypatch)
-    monkeypatch.setattr("scriptorium.service.metadata.version", lambda package: "0.144.4")
+    monkeypatch.setattr("scriptorium.service.metadata.version", lambda package: "0.156.1")
     manager = DoctorManuscriptManager(repo)
 
     with ScriptoriumService(repo, manuscript_manager=manager) as service:
@@ -324,7 +324,7 @@ def test_doctor_reports_compile_failure_and_continues_runtime_checks(
 
     def version(package: str) -> str:
         requested_packages.append(package)
-        return "0.2.128"
+        return "0.2.158"
 
     monkeypatch.setattr("scriptorium.service.metadata.version", version)
     manager = DoctorManuscriptManager(repo, InfrastructureError("LaTeX build failed:\ntest log"))
@@ -358,7 +358,7 @@ def test_doctor_skips_compile_when_latex_tool_is_missing(
             system_which("git") if command == "git" else None if command == missing_tool else f"/usr/bin/{command}"
         ),
     )
-    monkeypatch.setattr("scriptorium.service.metadata.version", lambda package: "0.144.4")
+    monkeypatch.setattr("scriptorium.service.metadata.version", lambda package: "0.156.1")
     manager = DoctorManuscriptManager(repo)
 
     with ScriptoriumService(repo, manuscript_manager=manager) as service:
@@ -417,7 +417,7 @@ def test_doctor_rebuilds_without_persisting_workflow_state(
 ) -> None:
     repo = make_repository(tmp_path, "codex", "openai")
     prepare_doctor(monkeypatch)
-    monkeypatch.setattr("scriptorium.service.metadata.version", lambda package: "0.144.4")
+    monkeypatch.setattr("scriptorium.service.metadata.version", lambda package: "0.156.1")
     manager = DoctorManuscriptManager(repo)
 
     with ScriptoriumService(repo, manuscript_manager=manager) as service:
@@ -468,7 +468,7 @@ def test_doctor_reports_compiler_source_omission(tmp_path, monkeypatch):
 
     repo = make_repository(tmp_path, "codex", "openai")
     prepare_doctor(monkeypatch)
-    monkeypatch.setattr("scriptorium.service.metadata.version", lambda package: "0.144.4")
+    monkeypatch.setattr("scriptorium.service.metadata.version", lambda package: "0.156.1")
     with ScriptoriumService(repo, manuscript_manager=UncoveredBuildManager(repo)) as service:
         result = service.doctor(profile="quick")
         assert service.database.list_runs() == []
@@ -478,7 +478,7 @@ def test_doctor_reports_compiler_source_omission(tmp_path, monkeypatch):
     assert "hidden.tex" in check["message"]
 
 
-@pytest.mark.parametrize("sdk_version,fails", [("0.144.4", False), ("0.144.4", True), ("wrong", False)])
+@pytest.mark.parametrize("sdk_version,fails", [("0.156.1", False), ("0.156.1", True), ("wrong", False)])
 def test_doctor_codex_startup_is_selected_version_gated_and_infrastructure_failure(
     tmp_path, monkeypatch, sdk_version, fails
 ):

@@ -140,7 +140,7 @@ async def _run_owner(repo: Path) -> None:
         input_usd_per_million=0,
         output_usd_per_million=0,
         runtime="codex",
-        runtime_version="0.144.4",
+        runtime_version="0.156.1",
     )
     runtime = ContainedAgentRuntime(
         route,

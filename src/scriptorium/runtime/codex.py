@@ -367,7 +367,7 @@ async def _run_thread_turn(
     if not hasattr(thread, "turn"):
         return await thread.run(task, **kwargs)
 
-    # openai-codex 0.144.4 starts turns in asyncio.to_thread(), so shielding keeps
+    # Codex starts turns on a background thread, so shielding keeps
     # the late turn handle reachable long enough to interrupt it after cancellation.
     start_task = asyncio.create_task(thread.turn(task, **kwargs))
     try:

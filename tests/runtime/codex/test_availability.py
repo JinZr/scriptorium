@@ -16,7 +16,7 @@ def test_missing_sdk_raises_clear_runtime_unavailable(monkeypatch: pytest.Monkey
 
     monkeypatch.setattr("scriptorium.runtime.codex.import_module", missing_sdk)
 
-    with pytest.raises(RuntimeUnavailable, match=r"openai-codex==0\.144\.4"):
+    with pytest.raises(RuntimeUnavailable, match=r"openai-codex==0\.156\.1"):
         CodexAgentRuntime(route="primary", model="model", provider="openai", reasoning="high")
 
 

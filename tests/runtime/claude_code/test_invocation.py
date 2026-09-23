@@ -128,3 +128,20 @@ def test_session_callback_receives_provider_session_id(tmp_path: Path) -> None:
 
     assert result.status == "completed"
     assert seen == [session_id]
+
+
+def test_installed_sdk_accepts_adapter_options_without_provider_calls(tmp_path):
+    sdk = pytest.importorskip("claude_agent_sdk")
+    query = FakeQuery([[_success()]])
+    runtime = _runtime(query)
+    runtime._options_type = sdk.ClaudeAgentOptions
+    runtime._hook_matcher_type = sdk.HookMatcher
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    result = asyncio.run(runtime.run_agent("task", AgentRole.COPYEDIT, workspace, {}, tmp_path / "session"))
+    assert result.status == "completed"
+    options = query.calls[0][1]
+    assert isinstance(options, sdk.ClaudeAgentOptions)
+    assert options.tools == ["Glob", "Grep", "Read"]
+    assert options.setting_sources == [] and options.strict_mcp_config
+    assert options.session_store_flush == "eager"

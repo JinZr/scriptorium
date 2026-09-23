@@ -133,3 +133,24 @@ def test_session_callback_receives_conversation_id(
 
     assert result.status == "completed"
     assert seen == ["12345678-1234-1234-1234-123456789012"]
+
+
+def test_installed_sdk_accepts_adapter_config_without_provider_calls(tmp_path, monkeypatch):
+    native = pytest.importorskip("google.antigravity")
+    native_types = pytest.importorskip("google.antigravity.types")
+    sdk = make_sdk(
+        response=FakeResponse(structured_output={"summary": "ok"}),
+        current_steps=[FakeStep("finish", "DONE", type="FINISH")],
+    )
+    sdk.LocalAgentConfig = native.LocalAgentConfig
+    sdk.types = native_types
+    runtime = make_runtime(monkeypatch, sdk, reasoning="low")
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    result = asyncio.run(runtime.run_agent("task", AgentRole.COPYEDIT, workspace, {}, tmp_path / "session"))
+    assert result.status == "completed", result.error
+    config = FakeAgent.instances[0].config
+    assert isinstance(config, native.LocalAgentConfig)
+    assert config.model.endpoint.options.thinking_level == native_types.ThinkingLevel.LOW
+    assert config.capabilities.enable_subagents is False
+    assert config.tools == [] and config.mcp_servers == []

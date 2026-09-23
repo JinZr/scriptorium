@@ -13,7 +13,7 @@ def test_runtime_requires_exact_distribution_version(monkeypatch: pytest.MonkeyP
     monkeypatch.setattr("scriptorium.runtime.claude_code.import_module", lambda _name: sdk)
     monkeypatch.setattr("scriptorium.runtime.claude_code.package_version", lambda _name: "0.2.127")
 
-    with pytest.raises(RuntimeUnavailable, match="requires claude-agent-sdk==0.2.128"):
+    with pytest.raises(RuntimeUnavailable, match="requires claude-agent-sdk==0.2.158"):
         ClaudeCodeAgentRuntime(
             route="claude_review",
             model="claude-test",
@@ -26,7 +26,7 @@ def test_runtime_uses_distribution_version_without_module_version(monkeypatch: p
     sdk = _sdk(FakeQuery([]))
     del sdk.__version__
     monkeypatch.setattr("scriptorium.runtime.claude_code.import_module", lambda _name: sdk)
-    monkeypatch.setattr("scriptorium.runtime.claude_code.package_version", lambda _name: "0.2.128")
+    monkeypatch.setattr("scriptorium.runtime.claude_code.package_version", lambda _name: "0.2.158")
 
     runtime = ClaudeCodeAgentRuntime(
         route="claude_review",
@@ -35,4 +35,4 @@ def test_runtime_uses_distribution_version_without_module_version(monkeypatch: p
         reasoning="high",
     )
 
-    assert runtime._runtime_version == "0.2.128"
+    assert runtime._runtime_version == "0.2.158"
