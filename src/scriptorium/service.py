@@ -32,6 +32,7 @@ from .domain import (
     Task,
     TaskStatus,
     VerificationResult,
+    digest_json,
     new_id,
     utc_now,
 )
@@ -317,20 +318,23 @@ class ScriptoriumService:
         run = self._storage(self.database.get_run, run_id)
         self.armarius.require_external_run(run)
         with self._run_operation(run.id, "run resume"):
+            self._storage(self.armarius.invalidate_stale_tasks, run.id)
             await self.armarius.resume_run(run.id)
             return self.get_run(run.id)
 
-    async def retry_task(self, run_id: str, task_id: str) -> dict[str, Any]:
+    async def retry_task(
+        self, run_id: str, task_id: str, abandon_attempt_id: str | None = None, reason: str | None = None
+    ) -> dict[str, Any]:
         run = self._storage(self.database.get_run, run_id)
         self.armarius.require_external_run(run)
         with self._run_operation(run.id, "run retry"):
-            await self.armarius.retry_task(run.id, task_id)
+            await self.armarius.retry_task(run.id, task_id, abandon_attempt_id, reason)
             return self.get_run(run.id)
 
     def cancel_run(self, run_id: str, reason: str) -> dict[str, Any]:
         run = self._storage(self.database.get_run, run_id)
         self.armarius.require_external_run(run)
-        with self._run_operation(run.id, "run cancel"):
+        with self._run_operation(run.id, "run cancel", wait=True):
             self._storage(self.armarius.cancel_run, run.id, reason, new_id("cancel"))
             return self.get_run(run.id)
 
@@ -380,7 +384,13 @@ class ScriptoriumService:
             "attempt": attempt,
             "prompt": prompt,
             "schema": json.loads(schema_bytes),
-            "input_digest": task.input_digest,
+            "input_digest": digest_json(
+                {
+                    "prompt_digest": attempt.prompt_digest,
+                    "schema_digest": attempt.schema_digest,
+                    "bundle_digest": attempt.bundle_digest,
+                }
+            ),
             "bundle_digest": metadata["bundle_digest"],
             "bundle_path": str(bundle.workspace),
             "navigation_digest": ArtifactStore.digest_file(bundle.workspace / "navigation.json"),
@@ -565,6 +575,8 @@ class ScriptoriumService:
                 raise StateError("only a later explicit waiver is allowed after the decision stage")
             record = self._storage(self.database.decide_finding, finding_id, decision, reason)
             updated = self._storage(self.database.get_finding, finding_id)
+            if finding.status == FindingStatus.CONFIRMED and updated.status == FindingStatus.WAIVED:
+                self._storage(self.armarius.invalidate_stale_tasks, run.id)
         return {"decision": record, "finding": updated}
 
     def get_patch(self, patch_id: str) -> dict[str, Any]:
@@ -742,7 +754,7 @@ class ScriptoriumService:
         }
 
     @contextmanager
-    def _run_operation(self, run_id: str, operation: str) -> Iterator[None]:
+    def _run_operation(self, run_id: str, operation: str, *, wait: bool = False) -> Iterator[None]:
         locks = self.state_dir / "locks"
         locks.mkdir(parents=True, exist_ok=True)
         path = locks / f"{run_id}.lock"
@@ -771,7 +783,7 @@ class ScriptoriumService:
                 os.close(directory_descriptor)
         with handle:
             try:
-                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | (0 if wait else fcntl.LOCK_NB))
             except BlockingIOError as exc:
                 owner = self._lock_owner(handle)
                 if owner is None:
