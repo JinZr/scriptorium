@@ -9,7 +9,7 @@ You are the reviewer in the current client conversation. Use the model selected 
 
 ## Start or resume
 
-Inspect `scriptorium --json doctor --revision REVISION --profile PROFILE` before a new run. `scriptorium --json run start --revision REVISION --profile PROFILE` freezes and compiles that commit and returns pending review tasks. It does not spend model tokens by itself. For an existing run, inspect `run status RUN_ID`, then `task list RUN_ID` or `run resume RUN_ID` as appropriate. Use IDs and input digests returned by the CLI, not guessed values.
+Run every command from the manuscript project that owns the run. Inspect `scriptorium --json doctor --revision REVISION --profile PROFILE` before a new run. `scriptorium --json run start --revision REVISION --profile PROFILE` freezes and compiles that commit and returns pending review tasks. It does not spend model tokens by itself. For an existing run, inspect `run status RUN_ID`, then `task list RUN_ID` or `run resume RUN_ID` as appropriate. Use IDs and input digests returned by the CLI, not guessed values. If a run is not found, stop and check the project directory with the caller; do not search other repositories or inspect SQLite directly.
 
 For each task, claim from this current session:
 
