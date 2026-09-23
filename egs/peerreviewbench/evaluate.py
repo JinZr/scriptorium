@@ -352,7 +352,7 @@ def collect_exports(
     for paper_id in run_manifest["frozen_inputs"]["paper_ids"]:
         entry = run_manifest["papers"][str(paper_id)]
         project = paper_project_path(run_dir, entry)
-        validate_paper_project(project, run_manifest["frozen_inputs"]["route_config_digest"])
+        validate_paper_project(project)
         prepared = cache_root / "dataset" / revision / f"paper{paper_id}"
         prepared_manifest = validate_prepared_paper(prepared)
         if json_digest(prepared_manifest) != entry["prepared_manifest_digest"]:

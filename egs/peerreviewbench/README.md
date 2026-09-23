@@ -14,7 +14,7 @@ Run the example from a Scriptorium repository checkout. Use Python 3.12 or 3.13 
 precision evaluator's OpenHands version is pinned by the upstream benchmark and requires that range.
 
 ```bash
-python -m pip install -e '.[all]'
+python -m pip install -e '.[dev]'
 python -m pip install -r egs/peerreviewbench/requirements.txt
 
 docker build --pull \
@@ -22,15 +22,10 @@ docker build --pull \
   --tag scriptorium-peerreviewbench-precision:openhands-1.7.0 \
   egs/peerreviewbench
 
-mkdir -p egs/peerreviewbench/.scriptorium
-cp egs/peerreviewbench/routes.example.toml \
-  egs/peerreviewbench/.scriptorium/config.toml
+# Reviewer tasks are claimed from the selected Codex, Claude Code, or AGY session.
 ```
 
-Edit the copied route file before running. All four review roles are used. Revision and verification routes are also
-present because the core configuration freeze validates them, but this benchmark never invokes those stages. Replace
-the example's zero token prices if model cost should be meaningful; those values are placeholders, not a claim that
-the configured models are free.
+All four reviewer roles use the shared external task contract. The wrapper prepares frozen tasks; it does not call a model. The selected host supplies its own model, effort, credentials, and spending controls.
 
 Docker is required only for precision evaluation. The image name is locked in `benchmark.lock.toml`, and the exact
 local image ID is frozen in each evaluation manifest. Evaluation fails before invoking either judge if the image has
@@ -99,15 +94,9 @@ figure inputs.
 The generated `benchmark.tex` is only a configuration sentinel: the core project parser currently requires a `.tex`
 `manuscript.main`, but the file is never compiled or exposed as a manuscript source.
 
-The command prints the new run directory. Its atomic `run_manifest.json` freezes the Scriptorium commit, hashes of the
-relevant core, prompt, and benchmark source files, dataset and upstream revisions, a secret-free route summary and
-digest, paper selection, per-paper core run IDs, attempt provenance, prompt/schema/artifact digests, token use, cost,
-duration, finding payload digest, and status. A paper is complete only after all four review tasks finish, leaving the
-core run at `awaiting_decision`. Findings and per-role selection remain limited to the four configured reviewer roles.
+The command prints the new run directory. For each generated paper project, use `scriptorium --json task list RUN_ID`, claim the four review tasks from the chosen host, inspect the frozen bundle through `task search`, `task read`, and `task page`, then submit each structured result. Run this wrapper again with `--resume` to collect validated findings. A paper is complete only when all four review tasks finish and the core run reaches `awaiting_decision`. The wrapper never advances into revision.
 
-The wrapper rechecks the frozen Scriptorium commit and source-file hashes before and after every paper. It captures
-the route configuration once at startup and creates every paper project from those same frozen bytes, while still
-stopping at paper boundaries if the user-facing route file changes.
+Its atomic `run_manifest.json` freezes the Scriptorium commit, relevant source hashes, dataset and upstream revisions, paper selection, core run IDs, attempt provenance, prompt/schema/artifact digests, finding payload digest, and status. External model tokens and cost remain unknown unless independently recorded by the host. The wrapper rechecks the frozen code and source hashes at paper boundaries.
 
 Before a completed paper is accepted on resume, the benchmark rechecks the frozen bundle directory digest, its source
 map, PDF, rendered pages, and every content-addressed artifact in the paper's Scriptorium store, including build
@@ -120,7 +109,7 @@ python egs/peerreviewbench/run.py \
   --resume egs/peerreviewbench/runs/<run-id>
 ```
 
-Resume rejects changed code, installed package versions, data, routes, budget, or paper selection. It does not
+Resume rejects changed code, installed package versions, data, or paper selection. It does not
 advance an `awaiting_decision` run into revision.
 
 ## 3. Export and evaluate
@@ -170,7 +159,7 @@ manifest, manifest-verified isolated copies of the prepared preprints, separate 
 `recall.json` and `precision.json`, component logs, and a combined `summary.json`. If a complete component output is
 invalid, that component's selected-paper cache files are removed so a later retry can make progress; ordinary
 interruption caches remain available. The summary reports overall recall, precision, F1, axis and role breakdowns,
-selection counts, reviewer cost, timing, and errors. Upstream judge cost is recorded as unavailable because the
+selection counts, reviewer cost when available, timing, and errors. Upstream judge cost is recorded as unavailable because the
 pinned components do not expose it.
 
 Before judging, the wrapper independently derives and freezes each selected paper's rubric-item count from the locked
@@ -193,7 +182,7 @@ mutation make the evaluation `incomplete` rather than silently contributing a ze
 
 ## Local artifacts
 
-All downloaded data, route configuration, Scriptorium state, review runs, and evaluation runs are ignored locally:
+All downloaded data, Scriptorium state, review runs, and evaluation runs are ignored locally:
 
 ```text
 egs/peerreviewbench/.cache/
@@ -202,6 +191,6 @@ egs/peerreviewbench/runs/
 egs/peerreviewbench/evaluations/
 ```
 
-Do not compare scores without the corresponding review and evaluation manifests: reviewer code, routes, models,
+Do not compare scores without the corresponding review and evaluation manifests: reviewer code, actual host models,
 prompts, parser/schema digests, dataset revision, judge models, finding policy, cost, and latency are part of the result
 contract.
