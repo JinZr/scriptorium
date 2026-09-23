@@ -406,6 +406,7 @@ class ScriptoriumService:
         attempt = self._storage(self.database.get_attempt, attempt_id)
         task = self._storage(self.database.get_task, attempt.task_id)
         with self._run_operation(task.run_id, "task submit"):
+            attempt = self._storage(self.database.get_attempt, attempt_id)
             finished = self._storage(self.armarius.submit_task, attempt_id, input_digest, output_text)
             if attempt.status == AttemptStatus.RUNNING and finished.status == AttemptStatus.COMPLETED:
                 await self.armarius.resume_run(task.run_id)
