@@ -31,7 +31,7 @@ from scriptorium.domain import (
     validate_task_transition,
 )
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 
 _MIGRATION_1 = """
@@ -238,6 +238,23 @@ INSERT INTO schema_migrations (version, applied_at) VALUES (3, CURRENT_TIMESTAMP
 COMMIT;
 """
 
+_MIGRATION_4 = """
+BEGIN IMMEDIATE;
+CREATE TABLE external_tasks (
+    task_id TEXT PRIMARY KEY REFERENCES tasks(id) ON DELETE RESTRICT,
+    prompt_digest TEXT NOT NULL REFERENCES artifacts(digest) ON DELETE RESTRICT,
+    schema_digest TEXT NOT NULL REFERENCES artifacts(digest) ON DELETE RESTRICT,
+    bundle_digest TEXT NOT NULL,
+    bundle_path TEXT NOT NULL,
+    schema_kind TEXT NOT NULL
+);
+ALTER TABLE attempts ADD COLUMN external_client TEXT;
+ALTER TABLE attempts ADD COLUMN effort TEXT;
+ALTER TABLE attempts ADD COLUMN session_source TEXT;
+INSERT INTO schema_migrations (version, applied_at) VALUES (4, CURRENT_TIMESTAMP);
+COMMIT;
+"""
+
 
 class StorageError(RuntimeError):
     pass
@@ -286,6 +303,9 @@ class Database:
                 version = 2
             if version == 2:
                 self.connection.executescript(_MIGRATION_3)
+                version = 3
+            if version == 3:
+                self.connection.executescript(_MIGRATION_4)
 
     @contextmanager
     def transaction(self) -> Iterator[sqlite3.Connection]:
@@ -457,6 +477,39 @@ class Database:
         ).fetchone()
         return self._task_from_row(row) if row is not None else None
 
+    def record_external_task(
+        self,
+        task_id: str,
+        prompt_digest: str,
+        schema_digest: str,
+        bundle_digest: str,
+        bundle_path: str,
+        schema_kind: str,
+    ) -> None:
+        with self.transaction() as connection:
+            connection.execute(
+                """INSERT OR IGNORE INTO external_tasks
+                (task_id, prompt_digest, schema_digest, bundle_digest, bundle_path, schema_kind)
+                VALUES (?, ?, ?, ?, ?, ?)""",
+                (task_id, prompt_digest, schema_digest, bundle_digest, bundle_path, schema_kind),
+            )
+            row = connection.execute("SELECT * FROM external_tasks WHERE task_id = ?", (task_id,)).fetchone()
+            expected = (prompt_digest, schema_digest, bundle_digest, bundle_path, schema_kind)
+            if (
+                tuple(
+                    row[key]
+                    for key in ("prompt_digest", "schema_digest", "bundle_digest", "bundle_path", "schema_kind")
+                )
+                != expected
+            ):
+                raise ConflictError(f"external task material changed: {task_id}")
+
+    def get_external_task(self, task_id: str) -> dict[str, str]:
+        row = self.connection.execute("SELECT * FROM external_tasks WHERE task_id = ?", (task_id,)).fetchone()
+        if row is None:
+            raise NotFoundError(f"external task not found: {task_id}")
+        return dict(row)
+
     def list_tasks(self, run_id: str) -> list[Task]:
         rows = self.connection.execute(
             "SELECT * FROM tasks WHERE run_id = ? ORDER BY created_at, id",
@@ -521,11 +574,12 @@ class Database:
                 """
                 INSERT INTO attempts (
                     id, task_id, ordinal, status, thread_id, runtime_name, runtime_version, model,
-                    model_provider, prompt_digest, schema_digest, bundle_digest, input_tokens,
+                    model_provider, external_client, effort, session_source,
+                    prompt_digest, schema_digest, bundle_digest, input_tokens,
                     cached_input_tokens, output_tokens, reasoning_tokens, estimated_cost_usd,
                     trace_artifact_digest, output_artifact_digest, validation_report_artifact_digest,
                     duration_ms, error, created_at, completed_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 self._attempt_values(attempt),
             )
@@ -1475,6 +1529,9 @@ class Database:
             attempt.runtime_version,
             attempt.model,
             attempt.model_provider,
+            attempt.external_client,
+            attempt.effort,
+            attempt.session_source,
             attempt.prompt_digest,
             attempt.schema_digest,
             attempt.bundle_digest,
@@ -1504,6 +1561,9 @@ class Database:
             runtime_version=row["runtime_version"],
             model=row["model"],
             model_provider=row["model_provider"],
+            external_client=row["external_client"],
+            effort=row["effort"],
+            session_source=row["session_source"],
             prompt_digest=row["prompt_digest"],
             schema_digest=row["schema_digest"],
             bundle_digest=row["bundle_digest"],

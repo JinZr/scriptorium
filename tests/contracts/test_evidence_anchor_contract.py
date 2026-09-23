@@ -23,7 +23,7 @@ def test_anchor_contract_is_content_addressed_without_a_version_field() -> None:
     assert evidence_anchor_contract_digest(restored) == evidence_anchor_contract_digest()
     assert EvidenceAnchorContract not in SCHEMA_MODELS.values()
     assert "evidence_anchor_contract" not in SCHEMA_MODELS
-    assert SCHEMA_VERSION == 3
+    assert SCHEMA_VERSION == 4
     assert (
         "final line terminator"
         in output_schema("revision")["$defs"]["ExactEdit"]["properties"]["before"]["description"]

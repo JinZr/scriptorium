@@ -1,13 +1,11 @@
 from __future__ import annotations
 
-import asyncio
-from contextlib import contextmanager, suppress
+from contextlib import contextmanager
 from dataclasses import asdict, is_dataclass
 from datetime import datetime, timezone
 from enum import Enum
 import fcntl
 from hashlib import sha256
-from importlib import metadata
 import json
 import os
 from pathlib import Path
@@ -17,16 +15,19 @@ import sqlite3
 import stat
 import subprocess
 import tempfile
-import time
-from typing import Any, Awaitable, Callable, Iterator
+from typing import Any, Iterator
 
 from .artifacts import ArtifactStore
-from .config import find_repo, load_local_config, load_project_config, validate_ready
+from .config import find_repo, load_project_config, reject_legacy_local_config, validate_ready
 from .domain import (
+    Attempt,
+    AttemptStatus,
+    Event,
     FindingSeverity,
     FindingStatus,
     Patch,
     PatchStatus,
+    Run,
     RunStatus,
     TaskStatus,
     VerificationResult,
@@ -35,18 +36,12 @@ from .domain import (
 )
 from .errors import ConfigurationError, InfrastructureError, NotFoundError, StateError
 from .manuscript import ManuscriptManager
-from .runtime import RUNTIME_SDK_VERSIONS, RuntimeUnavailable
-from .runtime.codex_preflight import codex_startup_preflight
 from .storage import ConflictError, Database, NotFoundError as StorageNotFoundError, StorageError
-from .workflow import Armarius, RuntimeFactory
+from .workflow import Armarius
 
 
 class _RunBusyError(StateError):
     pass
-
-
-_CANCEL_WAIT_SECONDS = 15.0
-_CANCEL_POLL_SECONDS = 0.2
 
 
 class ScriptoriumService:
@@ -54,12 +49,10 @@ class ScriptoriumService:
         self,
         repo: str | Path = ".",
         *,
-        runtime_factory: RuntimeFactory | None = None,
         manuscript_manager: ManuscriptManager | None = None,
     ) -> None:
         self.repo = find_repo(repo)
         self.state_dir = self.repo / ".scriptorium"
-        self.local_config = load_local_config(self.repo)
         try:
             self.database = Database(self.state_dir / "state.sqlite3")
             self.artifacts = ArtifactStore(self.state_dir / "artifacts")
@@ -68,11 +61,9 @@ class ScriptoriumService:
         self.manuscript = manuscript_manager or ManuscriptManager(self.repo)
         self.armarius = Armarius(
             repo=self.repo,
-            local_config=self.local_config,
             database=self.database,
             artifacts=self.artifacts,
             manuscript=self.manuscript,
-            runtime_factory=runtime_factory,
         )
 
     def close(self) -> None:
@@ -87,7 +78,6 @@ class ScriptoriumService:
     def doctor(
         self,
         profile: str | None = None,
-        budget_usd: float | None = None,
         revision: str = "HEAD",
     ) -> dict[str, Any]:
         selected_profile = profile or "full"
@@ -280,36 +270,15 @@ class ScriptoriumService:
                     )
 
         if project is None:
-            role_keys = ()
+            check("review_profile", False, "not run because tracked_project_config failed")
         else:
             try:
-                role_keys = (
-                    *project.profiles[selected_profile],
-                    "revision",
-                    "verification",
-                )
-            except KeyError:
-                role_keys = ()
-        selected_runtimes: set[str] = set()
-        for role_key in role_keys:
-            try:
-                selected_runtimes.add(self.local_config.route_for_role(role_key).runtime)
-            except ConfigurationError:
-                continue
-        if project is None:
-            check(
-                "model_routes",
-                False,
-                "not run because tracked_project_config failed",
-            )
-        else:
-            try:
-                validate_ready(project, self.local_config, selected_profile, budget_usd)
+                validate_ready(project, selected_profile)
+                reject_legacy_local_config(self.repo)
             except ConfigurationError as exc:
-                check("model_routes", False, str(exc), "configuration")
+                check("review_profile", False, str(exc), "configuration")
             else:
-                check("model_routes", True, f"profile {selected_profile}")
-        _check_runtime_dependencies(selected_runtimes, check)
+                check("review_profile", True, f"profile {selected_profile}")
         check("sqlite", True, str(self.state_dir / "state.sqlite3"))
 
         failed = [item for item in checks if not item["ok"]]
@@ -322,22 +291,12 @@ class ScriptoriumService:
             "checks": checks,
         }
 
-    async def start_run(
-        self,
-        revision: str,
-        profile: str,
-        budget_usd: float | None,
-    ) -> dict[str, Any]:
-        # Reserve the trusted ID before any run files or database rows exist so ownership starts first.
+    async def start_run(self, revision: str, profile: str) -> dict[str, Any]:
+        reject_legacy_local_config(self.repo)
         run_id = new_id("run")
         with self._run_operation(run_id, "run start"):
-            return await self._run_with_cancel_watcher(
-                run_id,
-                self._run_and_build_view(
-                    run_id,
-                    lambda: self.armarius.start_run(revision, profile, budget_usd, run_id=run_id),
-                ),
-            )
+            await self.armarius.start_run(revision, profile, run_id=run_id)
+            return self.get_run(run_id)
 
     def get_run(self, run_id: str) -> dict[str, Any]:
         run = self._storage(self.database.get_run, run_id)
@@ -347,11 +306,7 @@ class ScriptoriumService:
         return {
             "run": run,
             "tasks": [
-                {
-                    "task": task,
-                    "attempts": self._storage(self.database.list_attempts, task.id),
-                }
-                for task in tasks
+                {"task": task, "attempts": self._storage(self.database.list_attempts, task.id)} for task in tasks
             ],
             "finding_ids": [finding.id for finding in findings],
             "patch_ids": [patch.id for patch in patches],
@@ -359,99 +314,231 @@ class ScriptoriumService:
 
     async def resume_run(self, run_id: str) -> dict[str, Any]:
         run = self._storage(self.database.get_run, run_id)
+        self.armarius.require_external_run(run)
         with self._run_operation(run.id, "run resume"):
-            current = self._storage(self.database.get_run, run.id)
-            if current.status not in {RunStatus.COMPLETED, RunStatus.CANCELLED}:
-                self.armarius.require_evidence_anchor_contract(current.id)
-            self._wait_for_provider_cleanup(run.id)
-            request = self._complete_pending_cancel(run.id, provider_cleanup_ready=True)
-            if request is not None:
-                current = self._storage(self.database.get_run, run.id)
-                if current.status == RunStatus.CANCELLED:
-                    raise StateError(f"run {run.id} was cancelled by request {request['request_id']}")
-                raise StateError(
-                    f"run {run.id} cannot be resumed while {current.status.value}; "
-                    f"cancellation request {request['request_id']} was cleared"
-                )
-            return await self._run_with_cancel_watcher(
-                run.id,
-                self._run_and_build_view(run.id, lambda: self.armarius.resume_run(run.id)),
-            )
+            await self.armarius.resume_run(run.id)
+            return self.get_run(run.id)
 
-    async def retry_task(
-        self,
-        run_id: str,
-        task_id: str,
-        route: str | None = None,
-    ) -> dict[str, Any]:
+    async def retry_task(self, run_id: str, task_id: str) -> dict[str, Any]:
         run = self._storage(self.database.get_run, run_id)
+        self.armarius.require_external_run(run)
         with self._run_operation(run.id, "run retry"):
-            current = self._storage(self.database.get_run, run.id)
-            if current.status not in {RunStatus.COMPLETED, RunStatus.CANCELLED}:
-                self.armarius.require_evidence_anchor_contract(current.id)
-            self._wait_for_provider_cleanup(run.id)
-            request = self._complete_pending_cancel(run.id, provider_cleanup_ready=True)
-            if request is not None:
-                current = self._storage(self.database.get_run, run.id)
-                if current.status == RunStatus.CANCELLED:
-                    raise StateError(f"run {run.id} was cancelled by request {request['request_id']}")
-                raise StateError(
-                    f"run {run.id} cannot be retried while {current.status.value}; "
-                    f"cancellation request {request['request_id']} was cleared"
-                )
-            return await self._run_with_cancel_watcher(
-                run.id,
-                self._run_and_build_view(
-                    run.id,
-                    lambda: self.armarius.retry_task(run.id, task_id, route),
-                ),
-            )
+            await self.armarius.retry_task(run.id, task_id)
+            return self.get_run(run.id)
 
     def cancel_run(self, run_id: str, reason: str) -> dict[str, Any]:
-        if not reason.strip():
-            raise StateError("cancellation reason is required")
         run = self._storage(self.database.get_run, run_id)
-        if run.status in {RunStatus.COMPLETED, RunStatus.FAILED, RunStatus.CANCELLED}:
-            with self._run_operation(run.id, "run cancel"):
-                request = self._complete_pending_cancel(run.id)
-                if request is not None and run.status == RunStatus.CANCELLED:
-                    return self.get_run(run.id)
-            raise StateError(f"run cannot be cancelled while {run.status.value}")
-        request = self._publish_cancel_request(run.id, reason)
-        deadline = time.monotonic() + _CANCEL_WAIT_SECONDS
-        while True:
-            try:
-                with self._run_operation(run.id, "run cancel"):
-                    remaining = max(0.0, deadline - time.monotonic())
-                    from .runtime.contained import ProviderCleanupTimeout
+        self.armarius.require_external_run(run)
+        with self._run_operation(run.id, "run cancel"):
+            self._storage(self.armarius.cancel_run, run.id, reason, new_id("cancel"))
+            return self.get_run(run.id)
 
-                    try:
-                        self._wait_for_provider_cleanup(run.id, timeout=remaining)
-                    except ProviderCleanupTimeout:
-                        raise StateError(
-                            f"cancellation request {request['request_id']} remains pending for run {run.id}"
-                        ) from None
-                    self._complete_pending_cancel(run.id, provider_cleanup_ready=True)
-                    current = self._storage(self.database.get_run, run.id)
-                    if current.status == RunStatus.CANCELLED:
-                        return self.get_run(run.id)
-                    raise StateError(f"run cannot be cancelled while {current.status.value}")
-            except _RunBusyError:
-                if time.monotonic() >= deadline:
-                    pending = any(item["request_id"] == request["request_id"] for item in self._cancel_requests(run.id))
-                    if pending:
-                        raise StateError(
-                            f"cancellation request {request['request_id']} remains pending for run {run.id}"
-                        ) from None
-                    current = self._storage(self.database.get_run, run.id)
-                    if current.status == RunStatus.CANCELLED:
-                        return self.get_run(run.id)
-                    if current.status in {RunStatus.COMPLETED, RunStatus.FAILED}:
-                        raise StateError(f"run cannot be cancelled while {current.status.value}") from None
-                    raise StateError(
-                        f"cancellation request {request['request_id']} remains pending for run {run.id}"
-                    ) from None
-                time.sleep(min(_CANCEL_POLL_SECONDS, max(0.0, deadline - time.monotonic())))
+    def list_tasks(self, run_id: str) -> dict[str, Any]:
+        view = self.get_run(run_id)
+        self.armarius.require_external_run(view["run"])
+        return {"run_id": run_id, "run_status": view["run"].status, "tasks": view["tasks"]}
+
+    def claim_task(
+        self, task_id: str, client: str, model: str, effort: str, session_id: str, session_source: str
+    ) -> dict[str, Any]:
+        if client not in {"codex", "claude_code", "antigravity"}:
+            raise ConfigurationError("client must be codex, claude_code, or antigravity")
+        if session_source not in {"host", "declared"}:
+            raise ConfigurationError("session source must be host or declared")
+        if not all(value.strip() and len(value) <= 200 for value in (model, effort, session_id)):
+            raise ConfigurationError("model, effort, and session ID must be 1-200 characters")
+        task = self._storage(self.database.get_task, task_id)
+        with self._run_operation(task.run_id, "task claim"):
+            attempt = self._storage(
+                self.armarius.claim_task, task_id, client, model, effort, session_id, session_source
+            )
+            return self.show_task(attempt.id)
+
+    def show_task(self, attempt_id: str) -> dict[str, Any]:
+        attempt = self._storage(self.database.get_attempt, attempt_id)
+        task = self._storage(self.database.get_task, attempt.task_id)
+        run = self._storage(self.database.get_run, task.run_id)
+        self.armarius.require_external_run(run)
+        metadata = self._storage(self.database.get_external_task, task.id)
+        bundle = self.armarius._external_bundle(run, metadata)
+        prompt = self.armarius._load_prompt_artifact(attempt.prompt_digest)
+        schema_bytes = self.artifacts.get_bytes(metadata["schema_digest"])
+        self._record_access(
+            run.id,
+            attempt.id,
+            "show",
+            {
+                "prompt_digest": attempt.prompt_digest,
+                "schema_digest": metadata["schema_digest"],
+                "bundle_digest": metadata["bundle_digest"],
+            },
+        )
+        return {
+            "run_id": run.id,
+            "task": task,
+            "attempt": attempt,
+            "prompt": prompt,
+            "schema": json.loads(schema_bytes),
+            "input_digest": task.input_digest,
+            "bundle_digest": metadata["bundle_digest"],
+            "bundle_path": str(bundle.workspace),
+            "navigation_digest": ArtifactStore.digest_file(bundle.workspace / "navigation.json"),
+            "source_map": bundle.anchor_map.model_dump(mode="json"),
+        }
+
+    async def submit_task(self, attempt_id: str, input_digest: str, output_text: str) -> dict[str, Any]:
+        if len(output_text.encode("utf-8")) > 2_000_000:
+            raise ConfigurationError("submission exceeds the 2 MB limit")
+        attempt = self._storage(self.database.get_attempt, attempt_id)
+        task = self._storage(self.database.get_task, attempt.task_id)
+        with self._run_operation(task.run_id, "task submit"):
+            finished = self._storage(self.armarius.submit_task, attempt_id, input_digest, output_text)
+            if finished.status == AttemptStatus.COMPLETED:
+                await self.armarius.resume_run(task.run_id)
+            report = None
+            if finished.validation_report_artifact_digest:
+                metadata = self._storage(self.database.get_external_task, task.id)
+                report = self.armarius._load_validation_report(
+                    finished, metadata["schema_kind"], metadata["schema_digest"], metadata["bundle_digest"]
+                ).model_dump(mode="json")
+            return {
+                "attempt": finished,
+                "output_digest": finished.output_artifact_digest,
+                "validation_report": report,
+                "run_status": self._storage(self.database.get_run, task.run_id).status,
+            }
+
+    def _readable_task(self, attempt_id: str):
+        attempt = self._storage(self.database.get_attempt, attempt_id)
+        task = self._storage(self.database.get_task, attempt.task_id)
+        run = self._storage(self.database.get_run, task.run_id)
+        self.armarius.require_external_run(run)
+        if attempt.status != AttemptStatus.RUNNING or task.status != TaskStatus.RUNNING:
+            raise StateError("retrieval requires an active attempt")
+        metadata = self._storage(self.database.get_external_task, task.id)
+        bundle = self.armarius._external_bundle(run, metadata)
+        return attempt, task, bundle
+
+    def read_task(self, attempt_id: str, path: str, start_line: int, max_lines: int, offset: int, max_chars: int):
+        attempt, task, bundle = self._readable_task(attempt_id)
+        if start_line < 1 or not 1 <= max_lines <= 100 or offset < 0 or not 1 <= max_chars <= 8000:
+            raise ConfigurationError("invalid read range or size")
+        source = next((item for item in bundle.anchor_map.sources if item.source_path == path), None)
+        if path in {"navigation.json", "source-map.json"}:
+            read_path = bundle.workspace / path
+            source_digest = ArtifactStore.digest_file(read_path)
+        elif source is not None and source.text_anchorable:
+            read_path = bundle.workspace / source.read_path
+            source_digest = source.source_digest
+        else:
+            raise ConfigurationError("path is not a text source in the frozen bundle")
+        lines = read_path.read_text(encoding="utf-8").splitlines()
+        if start_line > len(lines):
+            raise ConfigurationError("start line is beyond the source")
+        pieces = []
+        remaining = max_chars
+        next_line = None
+        next_offset = None
+        for index in range(start_line - 1, min(len(lines), start_line - 1 + max_lines)):
+            line = lines[index]
+            position = offset if index == start_line - 1 else 0
+            if position > len(line):
+                raise ConfigurationError("offset is beyond the line")
+            text = line[position : position + remaining]
+            pieces.append({"line": index + 1, "offset": position, "text": text})
+            remaining -= len(text)
+            if position + len(text) < len(line):
+                next_line, next_offset = index + 1, position + len(text)
+                break
+            if remaining == 0:
+                next_line, next_offset = index + 2, 0
+                break
+        if next_line is None and start_line - 1 + max_lines < len(lines):
+            next_line, next_offset = start_line + max_lines, 0
+        if next_line is not None and next_line > len(lines):
+            next_line = next_offset = None
+        self._record_access(
+            task.run_id,
+            attempt.id,
+            "read",
+            {"path": path, "lines": [item["line"] for item in pieces], "next_line": next_line},
+        )
+        return {
+            "path": path,
+            "source_digest": source_digest,
+            "lines": pieces,
+            "next_line": next_line,
+            "next_offset": next_offset,
+        }
+
+    def search_task(self, attempt_id: str, query: str, path: str | None, cursor: int, limit: int):
+        attempt, task, bundle = self._readable_task(attempt_id)
+        if not query or len(query) > 200 or cursor < 0 or not 1 <= limit <= 50:
+            raise ConfigurationError("invalid search query, cursor, or limit")
+        sources = [item for item in bundle.anchor_map.sources if item.text_anchorable]
+        search_items = [(item.source_path, bundle.workspace / item.read_path, item.source_digest) for item in sources]
+        search_items.append(
+            (
+                "navigation.json",
+                bundle.workspace / "navigation.json",
+                ArtifactStore.digest_file(bundle.workspace / "navigation.json"),
+            )
+        )
+        if path is not None:
+            search_items = [item for item in search_items if item[0] == path]
+            if not search_items:
+                raise ConfigurationError("path is not a text source in the frozen bundle")
+        matches = []
+        for source_path, read_path, source_digest in search_items:
+            for number, line in enumerate(read_path.read_text(encoding="utf-8").splitlines(), 1):
+                folded = line.casefold()
+                position = folded.find(query.casefold())
+                while position >= 0:
+                    excerpt_start = max(0, position - 120)
+                    matches.append(
+                        {
+                            "path": source_path,
+                            "line": number,
+                            "column": position + 1,
+                            "excerpt": line[excerpt_start : excerpt_start + 300],
+                            "source_digest": source_digest,
+                        }
+                    )
+                    position = folded.find(query.casefold(), position + max(1, len(query)))
+        page = matches[cursor : cursor + limit]
+        next_cursor = cursor + len(page) if cursor + len(page) < len(matches) else None
+        self._record_access(
+            task.run_id,
+            attempt.id,
+            "search",
+            {
+                "query": query,
+                "path": path,
+                "matches": [{"path": item["path"], "line": item["line"]} for item in page],
+                "next_cursor": next_cursor,
+            },
+        )
+        return {"matches": page, "total_matches": len(matches), "next_cursor": next_cursor}
+
+    def page_task(self, attempt_id: str, page_number: int):
+        attempt, task, bundle = self._readable_task(attempt_id)
+        page = next((item for item in bundle.anchor_map.compiled_pdf.pages if item.page == page_number), None)
+        if page is None:
+            raise ConfigurationError("page is outside the frozen PDF")
+        self._record_access(task.run_id, attempt.id, "page", {"page": page_number, "read_path": page.read_path})
+        return {"page": page_number, "path": str(bundle.workspace / page.read_path), "digest": page.page_digest}
+
+    def _record_access(self, run_id: str, attempt_id: str, operation: str, payload: dict[str, Any]) -> None:
+        self._storage(
+            self.database.append_event,
+            Event(
+                run_id=run_id,
+                event_type=f"tool.{operation}",
+                entity_type="attempt",
+                entity_id=attempt_id,
+                payload=payload,
+            ),
+        )
 
     def list_findings(self, run_id: str):
         self._storage(self.database.get_run, run_id)
@@ -470,9 +557,9 @@ class ScriptoriumService:
     ) -> dict[str, Any]:
         initial = self._storage(self.database.get_finding, finding_id)
         with self._run_operation(initial.run_id, "finding decide"):
-            self._reject_if_pending_cancel(initial.run_id)
             finding = self._storage(self.database.get_finding, finding_id)
             run = self._storage(self.database.get_run, finding.run_id)
+            self.armarius.require_external_run(run)
             if run.status in {RunStatus.COMPLETED, RunStatus.FAILED, RunStatus.CANCELLED}:
                 raise StateError(f"findings cannot be decided while run is {run.status.value}")
             if run.status != RunStatus.AWAITING_DECISION and decision != "waive":
@@ -501,9 +588,9 @@ class ScriptoriumService:
     ) -> dict[str, Any]:
         initial = self._storage(self.database.get_patch, patch_id)
         with self._run_operation(initial.run_id, "patch decide"):
-            self._reject_if_pending_cancel(initial.run_id)
             patch = self._storage(self.database.get_patch, patch_id)
             run = self._storage(self.database.get_run, patch.run_id)
+            self.armarius.require_external_run(run)
             if run.status != RunStatus.AWAITING_PATCH_APPROVAL:
                 raise StateError(f"patches cannot be decided while run is {run.status.value}")
             patches = self._storage(self.database.list_patches, run.id)
@@ -516,9 +603,9 @@ class ScriptoriumService:
     def apply_patch(self, patch_id: str):
         initial = self._storage(self.database.get_patch, patch_id)
         with self._run_operation(initial.run_id, "patch apply"):
-            self._reject_if_pending_cancel(initial.run_id)
             patch = self._storage(self.database.get_patch, patch_id)
             run = self._storage(self.database.get_run, patch.run_id)
+            self.armarius.require_external_run(run)
             if run.status != RunStatus.READY_TO_APPLY:
                 raise StateError(f"patch cannot be applied while run is {run.status.value}")
             if patch.status == PatchStatus.APPLIED:
@@ -654,259 +741,6 @@ class ScriptoriumService:
             "conditions": conditions,
             "reasons": reasons,
         }
-
-    async def _run_and_build_view(
-        self,
-        run_id: str,
-        operation_factory: Callable[[], Awaitable[Any]],
-    ) -> dict[str, Any]:
-        await operation_factory()
-        return self.get_run(run_id)
-
-    async def _run_with_cancel_watcher(self, run_id: str, operation) -> Any:
-        operation_task = asyncio.create_task(operation)
-        watcher = asyncio.create_task(self._wait_for_cancel_request(run_id))
-        try:
-            done, _ = await asyncio.wait(
-                {operation_task, watcher},
-                return_when=asyncio.FIRST_COMPLETED,
-            )
-        except BaseException:
-            operation_task.cancel()
-            try:
-                await operation_task
-            except asyncio.CancelledError:
-                pass
-            finally:
-                watcher.cancel()
-                with suppress(asyncio.CancelledError):
-                    await watcher
-            raise
-
-        if operation_task in done:
-            watcher.cancel()
-            with suppress(asyncio.CancelledError):
-                await watcher
-            result = await operation_task
-            request = self._complete_pending_cancel(run_id)
-            if request is not None and self._storage(self.database.get_run, run_id).status == RunStatus.CANCELLED:
-                raise asyncio.CancelledError(f"run {run_id} was cancelled by request {request['request_id']}")
-            return result
-
-        try:
-            request = watcher.result()
-        except BaseException:
-            operation_task.cancel()
-            with suppress(asyncio.CancelledError):
-                await operation_task
-            raise
-        operation_task.cancel()
-        result: Any = None
-        operation_error: Exception | None = None
-        try:
-            result = await operation_task
-        except asyncio.CancelledError:
-            pass
-        except Exception as exc:
-            operation_error = exc
-        self._wait_for_provider_cleanup(run_id)
-        self._complete_pending_cancel(run_id, provider_cleanup_ready=True)
-        status = self._storage(self.database.get_run, run_id).status
-        if status == RunStatus.CANCELLED:
-            interrupted = asyncio.CancelledError(f"run {run_id} was cancelled by request {request['request_id']}")
-            if operation_error is not None:
-                raise interrupted from operation_error
-            raise interrupted
-        if status in {RunStatus.COMPLETED, RunStatus.FAILED}:
-            if operation_error is not None:
-                raise operation_error
-            return result if result is not None else self.get_run(run_id)
-        if operation_error is not None:
-            raise operation_error
-        raise asyncio.CancelledError(f"run {run_id} was cancelled by request {request['request_id']}")
-
-    async def _wait_for_cancel_request(self, run_id: str) -> dict[str, Any]:
-        while True:
-            requests = self._cancel_requests(run_id)
-            if requests:
-                return requests[0]
-            await asyncio.sleep(_CANCEL_POLL_SECONDS)
-
-    def _reject_if_pending_cancel(self, run_id: str) -> None:
-        request = self._complete_pending_cancel(run_id)
-        if request is not None:
-            status = self._storage(self.database.get_run, run_id).status
-            raise StateError(
-                f"run {run_id} has pending cancellation request {request['request_id']} " f"and is now {status.value}"
-            )
-
-    def _complete_pending_cancel(
-        self,
-        run_id: str,
-        *,
-        provider_cleanup_ready: bool = False,
-    ) -> dict[str, Any] | None:
-        requests = self._cancel_requests(run_id)
-        if not requests:
-            return None
-        request = requests[0]
-        run = self._storage(self.database.get_run, run_id)
-        if run.status not in {RunStatus.COMPLETED, RunStatus.FAILED, RunStatus.CANCELLED}:
-            if not provider_cleanup_ready:
-                self._wait_for_provider_cleanup(run_id)
-            self._storage(
-                self.armarius.cancel_run,
-                run_id,
-                request["reason"],
-                request["request_id"],
-            )
-        self._remove_cancel_requests(run_id)
-        return request
-
-    def _wait_for_provider_cleanup(self, run_id: str, *, timeout: float = 15.0) -> None:
-        from .runtime.contained import wait_for_provider_cleanup
-
-        wait_for_provider_cleanup(self.repo, run_id, timeout=timeout)
-
-    def _publish_cancel_request(self, run_id: str, reason: str) -> dict[str, Any]:
-        request = {
-            "version": 1,
-            "request_id": new_id("cancel"),
-            "run_id": run_id,
-            "reason": reason,
-            "requested_at": utc_now(),
-        }
-        contents = (json.dumps(request, ensure_ascii=False, sort_keys=True) + "\n").encode("utf-8")
-        if len(contents) > 65536:
-            raise StateError("cancellation reason is too long")
-        final_name = f"{run_id}.{request['request_id']}.json"
-        temporary_name = f".{final_name}.{new_id('tmp')}"
-        with self._cancel_directory() as directory_descriptor:
-            descriptor = -1
-            try:
-                descriptor = os.open(
-                    temporary_name,
-                    os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
-                    0o600,
-                    dir_fd=directory_descriptor,
-                )
-                with os.fdopen(descriptor, "wb") as handle:
-                    descriptor = -1
-                    handle.write(contents)
-                    handle.flush()
-                    os.fsync(handle.fileno())
-                # The inbox is durable before waiting, so either the current or next owner can replay it.
-                os.rename(
-                    temporary_name,
-                    final_name,
-                    src_dir_fd=directory_descriptor,
-                    dst_dir_fd=directory_descriptor,
-                )
-                os.fsync(directory_descriptor)
-            except OSError as exc:
-                with suppress(OSError):
-                    os.unlink(temporary_name, dir_fd=directory_descriptor)
-                raise InfrastructureError(f"cannot publish cancellation request for run {run_id}: {exc}") from exc
-            finally:
-                if descriptor >= 0:
-                    os.close(descriptor)
-        return request
-
-    def _cancel_requests(self, run_id: str) -> list[dict[str, Any]]:
-        requests: list[dict[str, Any]] = []
-        prefix = f"{run_id}."
-        with self._cancel_directory() as directory_descriptor:
-            for name in os.listdir(directory_descriptor):
-                if not name.startswith(prefix) or not name.endswith(".json"):
-                    continue
-                descriptor = -1
-                try:
-                    descriptor = os.open(name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=directory_descriptor)
-                    file_stat = os.fstat(descriptor)
-                    if not stat.S_ISREG(file_stat.st_mode) or file_stat.st_nlink != 1:
-                        raise InfrastructureError(f"unsafe cancellation request file: {name}")
-                    with os.fdopen(descriptor, "rb") as handle:
-                        descriptor = -1
-                        contents = handle.read(65537)
-                    if len(contents) > 65536:
-                        raise InfrastructureError(f"invalid cancellation request for run {run_id}: {name}")
-                    value = json.loads(contents.decode("utf-8"))
-                except FileNotFoundError:
-                    continue
-                except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
-                    raise InfrastructureError(f"invalid cancellation request for run {run_id}: {name}") from exc
-                finally:
-                    if descriptor >= 0:
-                        os.close(descriptor)
-                if not self._valid_cancel_request(value, run_id, name):
-                    raise InfrastructureError(f"invalid cancellation request for run {run_id}: {name}")
-                value["_name"] = name
-                value["_requested_at_sort"] = datetime.fromisoformat(value["requested_at"])
-                requests.append(value)
-        return sorted(requests, key=lambda item: (item["_requested_at_sort"], item["request_id"]))
-
-    @staticmethod
-    def _valid_cancel_request(value: Any, run_id: str, name: str) -> bool:
-        expected = {"version", "request_id", "run_id", "reason", "requested_at"}
-        if not isinstance(value, dict) or set(value) != expected:
-            return False
-        if type(value["version"]) is not int or value["version"] != 1:
-            return False
-        if value.get("run_id") != run_id:
-            return False
-        request_id = value.get("request_id")
-        if not isinstance(request_id, str) or name != f"{run_id}.{request_id}.json":
-            return False
-        if not isinstance(value.get("reason"), str) or not value["reason"].strip():
-            return False
-        requested_at = value.get("requested_at")
-        if not isinstance(requested_at, str):
-            return False
-        try:
-            timestamp = datetime.fromisoformat(requested_at)
-        except ValueError:
-            return False
-        return timestamp.tzinfo is not None
-
-    def _remove_cancel_requests(self, run_id: str) -> None:
-        requests = self._cancel_requests(run_id)
-        with self._cancel_directory() as directory_descriptor:
-            for request in requests:
-                try:
-                    os.unlink(request["_name"], dir_fd=directory_descriptor)
-                except FileNotFoundError:
-                    continue
-                except OSError as exc:
-                    raise InfrastructureError(
-                        f"cannot remove cancellation request {request['request_id']}: {exc}"
-                    ) from exc
-            os.fsync(directory_descriptor)
-
-    @contextmanager
-    def _cancel_directory(self) -> Iterator[int]:
-        descriptors: list[int] = []
-        try:
-            # Walk from the trusted state directory so a linked control directory cannot redirect request I/O.
-            parent = os.open(self.state_dir, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
-            descriptors.append(parent)
-            for name in ("control", "cancel"):
-                created = False
-                try:
-                    os.mkdir(name, 0o700, dir_fd=parent)
-                    created = True
-                except FileExistsError:
-                    pass
-                if created:
-                    os.fsync(parent)
-                child = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent)
-                descriptors.append(child)
-                parent = child
-            yield parent
-        except OSError as exc:
-            raise InfrastructureError(f"cannot open cancellation request directory: {exc}") from exc
-        finally:
-            for descriptor in reversed(descriptors):
-                os.close(descriptor)
 
     @contextmanager
     def _run_operation(self, run_id: str, operation: str) -> Iterator[None]:
@@ -1053,13 +887,14 @@ class ScriptoriumService:
     def _markdown_report(payload: dict[str, Any]) -> str:
         plain = _plain(payload)
         run = plain["run"]
+        cost = "unknown" if run["estimated_cost_usd"] is None else f"${run['estimated_cost_usd']:.6f}"
         lines = [
             f"# Scriptorium run {run['id']}",
             "",
             f"- Status: `{run['status']}`",
             f"- Commit: `{run['commit_sha']}`",
             f"- Profile: `{run['profile']}`",
-            f"- Estimated cost: `${run['estimated_cost_usd']:.6f}`",
+            f"- Estimated cost: {cost}",
             f"- Gate: `{'pass' if plain['gate']['passed'] else 'not passed'}`",
             "",
             "## Tasks",
@@ -1106,6 +941,17 @@ class ScriptoriumService:
 def _plain(value: Any) -> Any:
     if isinstance(value, Enum):
         return value.value
+    if isinstance(value, Run) and value.frozen_config.get("execution") == "external":
+        return {**{key: _plain(item) for key, item in asdict(value).items()}, "estimated_cost_usd": None}
+    if isinstance(value, Attempt) and value.external_client is not None:
+        return {
+            **{key: _plain(item) for key, item in asdict(value).items()},
+            "input_tokens": None,
+            "cached_input_tokens": None,
+            "output_tokens": None,
+            "reasoning_tokens": None,
+            "estimated_cost_usd": None,
+        }
     if is_dataclass(value) and not isinstance(value, type):
         return {key: _plain(item) for key, item in asdict(value).items()}
     if isinstance(value, dict):
@@ -1115,38 +961,3 @@ def _plain(value: Any) -> Any:
     if isinstance(value, Path):
         return str(value)
     return value
-
-
-def _check_runtime_dependencies(selected_runtimes: set[str], check: Callable[[str, bool, str, str], None]) -> None:
-    package_names = {
-        "codex": "openai-codex",
-        "claude_code": "claude-agent-sdk",
-        "antigravity": "google-antigravity",
-    }
-    for runtime_name in sorted(selected_runtimes):
-        package_name = package_names[runtime_name]
-        check_name = "codex_sdk" if runtime_name == "codex" else f"runtime_{runtime_name}_sdk"
-        try:
-            version = metadata.version(package_name)
-            expected = RUNTIME_SDK_VERSIONS[runtime_name]
-            ok = version == expected
-            message = version if ok else f"expected {expected}, found {version}"
-        except metadata.PackageNotFoundError:
-            ok = False
-            message = f"{package_name} is not installed"
-        check(check_name, ok, message, "infrastructure")
-        if runtime_name == "codex" and ok:
-            try:
-                message = codex_startup_preflight()
-            except RuntimeUnavailable as exc:
-                check("codex_startup", False, str(exc), "infrastructure")
-            else:
-                check("codex_startup", True, message, "infrastructure")
-    if "antigravity" in selected_runtimes:
-        antigravity_auth_ok = bool(os.environ.get("GEMINI_API_KEY", "").strip())
-        check(
-            "antigravity_auth",
-            antigravity_auth_ok,
-            "GEMINI_API_KEY is set" if antigravity_auth_ok else "GEMINI_API_KEY is not set",
-            "infrastructure",
-        )

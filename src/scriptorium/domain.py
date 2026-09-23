@@ -191,8 +191,8 @@ TASK_TRANSITIONS: Mapping[TaskStatus, frozenset[TaskStatus]] = {
     TaskStatus.RUNNING: frozenset(
         {TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.INTERRUPTED, TaskStatus.CANCELLED}
     ),
-    TaskStatus.INTERRUPTED: frozenset({TaskStatus.RUNNING, TaskStatus.CANCELLED}),
-    TaskStatus.FAILED: frozenset({TaskStatus.RUNNING, TaskStatus.CANCELLED}),
+    TaskStatus.INTERRUPTED: frozenset({TaskStatus.PENDING, TaskStatus.RUNNING, TaskStatus.CANCELLED}),
+    TaskStatus.FAILED: frozenset({TaskStatus.PENDING, TaskStatus.RUNNING, TaskStatus.CANCELLED}),
     TaskStatus.COMPLETED: frozenset(),
     TaskStatus.CANCELLED: frozenset(),
 }
@@ -230,8 +230,8 @@ class Task:
     run_id: str
     stage: str
     role: AgentRole
-    route: str
     input_digest: str
+    route: str = ""
     id: str = field(default_factory=lambda: new_id("task"))
     status: TaskStatus = TaskStatus.PENDING
     created_at: str = field(default_factory=utc_now)
@@ -249,6 +249,9 @@ class Attempt:
     runtime_version: str | None = None
     model: str | None = None
     model_provider: str | None = None
+    external_client: str | None = None
+    effort: str | None = None
+    session_source: str | None = None
     prompt_digest: str | None = None
     schema_digest: str | None = None
     bundle_digest: str | None = None
