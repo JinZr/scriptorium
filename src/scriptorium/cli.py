@@ -252,7 +252,17 @@ def _dispatch_task(service: Any, arguments: argparse.Namespace) -> tuple[Any, in
     if arguments.task_command == "show":
         return service.show_task(arguments.attempt_id), 0, None
     if arguments.task_command == "submit":
-        contents = sys.stdin.read() if arguments.file == "-" else Path(arguments.file).read_text(encoding="utf-8")
+        if arguments.file == "-":
+            raw = sys.stdin.buffer.read(2_000_001)
+        else:
+            with Path(arguments.file).open("rb") as submitted:
+                raw = submitted.read(2_000_001)
+        if len(raw) > 2_000_000:
+            raise ConfigurationError("submission exceeds the 2 MB limit")
+        try:
+            contents = raw.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise ConfigurationError("submission must be UTF-8") from exc
         return asyncio.run(service.submit_task(arguments.attempt_id, arguments.input_digest, contents)), 0, None
     if arguments.task_command == "read":
         return (

@@ -1,4 +1,5 @@
 import asyncio
+import io
 import json
 import os
 from pathlib import Path
@@ -6,6 +7,7 @@ import signal
 import subprocess
 import sys
 import time
+from types import SimpleNamespace
 
 import pytest
 
@@ -59,6 +61,30 @@ def test_argument_errors_use_stable_json_envelope(capsys) -> None:
     output = json.loads(capsys.readouterr().out)
     assert output["ok"] is False
     assert output["error"]["code"] == "invalid_arguments"
+
+
+def test_submit_rejects_oversize_file_before_reading_it_all(tmp_path, monkeypatch, capsys) -> None:
+    install_fake_service(monkeypatch, FakeService())
+    output = tmp_path / "huge.json"
+    output.write_bytes(b"x" * 2_000_001)
+
+    assert cli.main(["--json", "task", "submit", "attempt_1", "--input-digest", "digest", "--file", str(output)]) == 2
+    response = json.loads(capsys.readouterr().out)
+    assert response["error"] == {"code": "configuration_error", "message": "submission exceeds the 2 MB limit"}
+
+
+def test_submit_rejects_oversize_stdin_with_a_bounded_read(monkeypatch, capsys) -> None:
+    install_fake_service(monkeypatch, FakeService())
+
+    class Input(io.BytesIO):
+        def read(self, size=-1):
+            assert size == 2_000_001
+            return super().read(size)
+
+    monkeypatch.setattr(cli.sys, "stdin", SimpleNamespace(buffer=Input(b"x" * 2_000_002)))
+    assert cli.main(["--json", "task", "submit", "attempt_1", "--input-digest", "digest", "--file", "-"]) == 2
+    response = json.loads(capsys.readouterr().out)
+    assert response["error"] == {"code": "configuration_error", "message": "submission exceeds the 2 MB limit"}
 
 
 def test_known_and_unexpected_errors_map_to_exit_codes(monkeypatch, capsys) -> None:
