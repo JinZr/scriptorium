@@ -26,4 +26,5 @@ def test_search_counts_many_matches_without_retaining_unreturned_pages(tmp_path)
         assert len(last["matches"]) == 10
         assert first["next_cursor"] == 20
         assert last["next_cursor"] is None
+        assert "\n" not in last["matches"][-1]["excerpt"]
         assert middle["matches"][0]["column"] == 17431
