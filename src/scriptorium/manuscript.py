@@ -10,7 +10,7 @@ import shutil
 import subprocess
 import sys
 import tarfile
-from typing import Iterable
+from typing import Iterable, Iterator
 
 import fitz
 
@@ -26,10 +26,11 @@ from .schemas import (
     evidence_anchor_contract_digest,
 )
 
-INPUT_PATTERN = re.compile(r"\\(?:input|include)\s*\{([^}]+)\}")
+INPUT_PATTERN = re.compile(r"\\(?:input(?![A-Za-z@])\s*(?:\{([^{}]+)\}|([^\\\s{}%]+))|include\s*\{([^{}]+)\})")
 BIB_PATTERN = re.compile(r"\\bibliography\s*\{([^}]+)\}")
 ADDBIB_PATTERN = re.compile(r"\\addbibresource(?:\[[^\]]*\])?\s*\{([^}]+)\}")
-GRAPHICS_PATTERN = re.compile(r"\\includegraphics(?:\[[^\]]*\])?\s*\{([^}]+)\}")
+GRAPHICS_PATTERN = re.compile(r"\\includegraphics\*?(?:\s*\[[^\]]*\])?\s*\{([^}]+)\}")
+GRAPHICSPATH_PATTERN = re.compile(r"\\graphicspath(?![A-Za-z@])\s*(\{(?:\s*\{[^{}]*\}\s*)*\})?")
 GRAPHICS_EXTENSIONS = ("", ".pdf", ".png", ".jpg", ".jpeg", ".eps")
 NON_TEXT_ANCHOR_EXTENSIONS = frozenset(
     {
@@ -121,11 +122,17 @@ class ManuscriptManager:
 
     def scan_sources(self, snapshot: Path, main: str) -> tuple[SourceFile, ...]:
         root = snapshot.resolve()
-        pending = [Path(main)]
+        # Pause each parent at an input so child graphicspath declarations take effect in order.
+        pending = [iter([Path(main)])]
+        graphics_paths: list[Path] = []
         bibliography_fallback = Path(main).with_suffix(".bbl")
         included: set[Path] = set()
         while pending:
-            relative = pending.pop()
+            try:
+                relative = next(pending[-1])
+            except StopIteration:
+                pending.pop()
+                continue
             relative = self._normalized_relative(root, relative)
             if relative in included:
                 continue
@@ -135,51 +142,51 @@ class ManuscriptManager:
             included.add(relative)
             if path.suffix.lower() != ".tex":
                 continue
-            text = self._strip_comments(path.read_text(encoding="utf-8"))
-            base = relative.parent
-            for raw in INPUT_PATTERN.findall(text):
-                dependency = Path(raw.strip())
-                if not dependency.suffix:
-                    dependency = dependency.with_suffix(".tex")
-                pending.append(self._resolve_dependency(root, base, dependency))
-            for raw_group in BIB_PATTERN.findall(text):
-                for raw in raw_group.split(","):
-                    dependency = Path(raw.strip())
-                    if not dependency.suffix:
-                        dependency = dependency.with_suffix(".bib")
-                    pending.append(
-                        self._resolve_dependency(
-                            root,
-                            base,
-                            dependency,
-                            fallback=bibliography_fallback,
-                        )
-                    )
-            for raw in ADDBIB_PATTERN.findall(text):
-                dependency = Path(raw.strip())
-                pending.append(
-                    self._resolve_dependency(
-                        root,
-                        base,
-                        dependency,
-                        fallback=bibliography_fallback,
-                    )
-                )
-            for raw in GRAPHICS_PATTERN.findall(text):
-                pending.append(
-                    self._resolve_dependency(
-                        root,
-                        base,
-                        Path(raw.strip()),
-                        GRAPHICS_EXTENSIONS,
-                    )
-                )
+            pending.append(self._source_dependencies(root, relative, graphics_paths, bibliography_fallback))
         sources = []
         for relative in sorted(included):
             data = (root / relative).read_bytes()
             line_count = len(data.decode("utf-8", errors="replace").splitlines())
             sources.append(SourceFile(relative.as_posix(), sha256(data).hexdigest(), line_count))
         return tuple(sources)
+
+    def _source_dependencies(
+        self, root: Path, relative: Path, graphics_paths: list[Path], bibliography_fallback: Path
+    ) -> Iterator[Path]:
+        text = self._strip_comments((root / relative).read_text(encoding="utf-8"))
+        commands = sorted(
+            (match.start(), kind, match)
+            for kind, pattern in (
+                ("input", INPUT_PATTERN),
+                ("bibliography", BIB_PATTERN),
+                ("addbibresource", ADDBIB_PATTERN),
+                ("graphics", GRAPHICS_PATTERN),
+                ("graphicspath", GRAPHICSPATH_PATTERN),
+            )
+            for match in pattern.finditer(text)
+        )
+        for _, kind, match in commands:
+            raw = next((group for group in match.groups() if group is not None), "")
+            if kind == "graphicspath":
+                if not raw or "\\" in raw:
+                    raise InfrastructureError(f"Only literal \\graphicspath declarations are supported: {relative}")
+                graphics_paths[:] = [
+                    self._normalized_relative(root, Path(directory))
+                    for directory in re.findall(r"\{([^{}]*)\}", raw[1:-1])
+                ]
+                continue
+            for name in raw.split(",") if kind == "bibliography" else [raw]:
+                dependency = Path(name.strip())
+                if not dependency.suffix and kind in {"input", "bibliography"}:
+                    dependency = dependency.with_suffix(".tex" if kind == "input" else ".bib")
+                yield self._resolve_dependency(
+                    root,
+                    relative.parent,
+                    dependency,
+                    GRAPHICS_EXTENSIONS if kind == "graphics" else ("",),
+                    search_paths=tuple(graphics_paths) if kind == "graphics" else (),
+                    fallback=bibliography_fallback if kind in {"bibliography", "addbibresource"} else None,
+                )
 
     def build(self, workspace: Path, manuscript: ManuscriptConfig) -> BuildResult:
         engine_option = {
@@ -399,10 +406,11 @@ class ManuscriptManager:
         suffixes: tuple[str, ...] = ("",),
         *,
         fallback: Path | None = None,
+        search_paths: tuple[Path, ...] = (),
     ) -> Path:
         candidates: list[Path] = []
-        for parent in (base, Path()):
-            for suffix in suffixes:
+        for suffix in suffixes:
+            for parent in (Path(), *search_paths, base):
                 candidate = Path(f"{parent / dependency}{suffix}")
                 if candidate not in candidates:
                     candidates.append(candidate)

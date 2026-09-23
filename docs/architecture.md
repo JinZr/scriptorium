@@ -122,6 +122,25 @@ source-map.json
 task.md
 ```
 
+The dependency scanner handles braced `\input`/`\include`, unbraced literal
+`\input supplement.tex` (also without the `.tex` suffix), bibliography commands,
+and `\includegraphics`/`\includegraphics*` with an optional argument. Literal
+`\graphicspath{{figures/}{plots/}}` declarations are applied in source order,
+including declarations in input files. An empty declaration clears that search
+path. Paths are relative to the snapshot root, matching the build working
+directory; the including file's directory remains a last fallback. Graphics
+search tries the supported extensions in order, searching the root, declared
+graphics directories, and that fallback for each extension. All resolved paths
+must stay inside the snapshot and satisfy the bundle's forbidden-path rules.
+
+This is a static scanner, not a TeX interpreter: macro-generated filenames,
+conditional execution, group-local path changes, and repeated inputs evaluated
+under different graphics paths are outside its supported scope. Macro-based
+`\graphicspath` declarations fail explicitly. A successful static scan is not
+proof of complete compiler-input coverage. Scanner fixes apply to newly created
+runs; existing runs retain their frozen source lists and must be restarted as a
+new run if an incomplete list prevents progress.
+
 The bundle becomes the selected runtime's workspace. Repository-level `.codex/`, `AGENTS.md`, source code, scripts, unrelated files, and uncommitted changes are excluded.
 
 `source-map.json` is the per-bundle authority for evidence anchors. It separates the runtime read namespace from the durable output namespace: a source is read at `sources/<relative-path>` but cited and edited as the bare `<relative-path>`, while a rendered page is read at the map's exact `pages/page-0001.png`-style path but cited as `source_path="manuscript.pdf"` plus a 1-based page number. Read paths are not aliases and are never normalized into durable anchors. The map also records source digests, line counts, text-anchor eligibility, compiled page count, and page-image digests, and is checked against the bundle manifest before a provider starts.
