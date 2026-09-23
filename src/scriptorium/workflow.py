@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 import difflib
+import hashlib
 from importlib import resources
 import json
 from pathlib import Path
@@ -11,7 +12,7 @@ from typing import Any, Callable
 
 from pydantic import ValidationError
 
-from .artifacts import ArtifactError, ArtifactStore
+from .artifacts import ArtifactError, ArtifactNotFoundError, ArtifactStore
 from .config import ManuscriptConfig, ProjectConfig, load_project_config, validate_ready
 from .domain import (
     AgentRole,
@@ -978,7 +979,9 @@ class Armarius:
         schema = dict(run.frozen_config["schemas"][schema_kind]["content"])
         prompt_artifact = self._record_text(prompt, "text/markdown; charset=utf-8")
         schema_artifact = self._record_text(canonical_json(schema), "application/schema+json")
-        bundle_digest = self._directory_digest(base_bundle.workspace)
+        files = self._directory_records(base_bundle.workspace)
+        bundle_digest = digest_json(files)
+        self._record_text(canonical_json(files), "application/vnd.scriptorium.bundle-index+json")
         input_digest = digest_json(
             {
                 "prompt_digest": prompt_artifact.digest,
@@ -1079,15 +1082,90 @@ class Armarius:
         )
 
     def _external_bundle(self, run: Run, metadata: dict[str, str]) -> ManuscriptBundle:
-        relative = Path(metadata["bundle_path"])
-        if relative.is_absolute() or ".." in relative.parts or not relative.parts:
-            raise InfrastructureError("external task has unsafe bundle path")
-        workspace = self._run_dir(run.id) / relative
+        workspace = self._external_bundle_path(run, metadata)
         contract = self.require_evidence_anchor_contract(run.id)
         bundle = self._load_bundle(workspace, contract, navigation_required=True)
         if self._directory_digest(workspace) != metadata["bundle_digest"]:
             raise InfrastructureError("external task bundle digest mismatch")
         return bundle
+
+    def _external_bundle_path(self, run: Run, metadata: dict[str, str]) -> Path:
+        relative = Path(metadata["bundle_path"])
+        if relative.is_absolute() or ".." in relative.parts or not relative.parts:
+            raise InfrastructureError("external task has unsafe bundle path")
+        workspace = self._run_dir(run.id) / relative
+        if workspace.is_symlink() or not workspace.is_dir():
+            raise InfrastructureError(f"bundle workspace is missing or unsafe: {workspace}")
+        return workspace
+
+    def _retrieval_bundle(self, run: Run, metadata: dict[str, str]) -> tuple[ManuscriptBundle, dict[str, dict]]:
+        workspace = self._external_bundle_path(run, metadata)
+        try:
+            records = json.loads(self.artifacts.get_bytes(metadata["bundle_digest"]))
+        except ArtifactNotFoundError:
+            bundle = self._external_bundle(run, metadata)
+            records = self._directory_records(workspace)
+            index = self._record_text(canonical_json(records), "application/vnd.scriptorium.bundle-index+json")
+            if index.digest != metadata["bundle_digest"]:
+                raise InfrastructureError("external task bundle digest mismatch")
+            return bundle, {item["path"]: item for item in records}
+        except (ArtifactError, TypeError, ValueError) as exc:
+            raise InfrastructureError("external task bundle index is corrupt") from exc
+        try:
+            files = {item["path"]: item for item in records}
+            if len(files) != len(records):
+                raise ValueError("duplicate bundle path")
+            manifest_path = self._verify_retrieval_file(workspace, files, "manifest.json")
+            source_map_path = self._verify_retrieval_file(workspace, files, "source-map.json")
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            anchor_map = EvidenceAnchorMap.model_validate(json.loads(source_map_path.read_text(encoding="utf-8")))
+            sources = tuple(SourceFile(**item) for item in manifest["sources"])
+            pages = manifest["pages"]
+            pdf_pages = int(manifest["pdf_pages"])
+            if anchor_map.contract_digest != evidence_anchor_contract_digest(
+                self.require_evidence_anchor_contract(run.id)
+            ):
+                raise ValueError("source map contract mismatch")
+            if [(item.source_path, item.source_digest) for item in anchor_map.sources] != [
+                (item.path, item.digest) for item in sources
+            ]:
+                raise ValueError("source map sources mismatch")
+            if anchor_map.compiled_pdf.page_count != pdf_pages or [
+                (item.read_path, item.page_digest) for item in anchor_map.compiled_pdf.pages
+            ] != [(item["path"], item["digest"]) for item in pages]:
+                raise ValueError("source map pages mismatch")
+            if files["manuscript.pdf"]["digest"] != manifest["pdf_digest"]:
+                raise ValueError("PDF digest mismatch")
+            for source in anchor_map.sources:
+                if files[source.read_path]["digest"] != source.source_digest:
+                    raise ValueError("source digest mismatch")
+            for page in anchor_map.compiled_pdf.pages:
+                if files[page.read_path]["digest"] != page.page_digest:
+                    raise ValueError("page digest mismatch")
+            if "navigation" in run.frozen_config:
+                self._verify_retrieval_file(workspace, files, "navigation.json")
+                if files["navigation.json"]["digest"] != manifest["navigation_digest"]:
+                    raise ValueError("navigation digest mismatch")
+            return ManuscriptBundle(workspace, sources, pdf_pages, anchor_map), files
+        except (KeyError, OSError, TypeError, UnicodeDecodeError, ValueError, ValidationError) as exc:
+            raise InfrastructureError("external task bundle index or metadata is invalid") from exc
+
+    @classmethod
+    def _verify_retrieval_file(cls, workspace: Path, files: dict[str, dict], relative: str) -> Path:
+        path = Path(relative)
+        if path.is_absolute() or ".." in path.parts or relative not in files:
+            raise InfrastructureError(f"file is outside the frozen bundle: {relative}")
+        parent = workspace
+        for part in path.parts[:-1]:
+            parent /= part
+            if parent.is_symlink() or not parent.is_dir():
+                raise InfrastructureError(f"bundle directory is missing or unsafe: {parent}")
+        target = workspace / path
+        cls._require_regular_bundle_file(target)
+        record = files[relative]
+        if target.stat().st_size != record["size"] or ArtifactStore.digest_file(target) != record["digest"]:
+            raise InfrastructureError(f"frozen bundle file digest mismatch: {relative}")
+        return target
 
     def submit_task(self, attempt_id: str, input_digest: str, output_text: str) -> Attempt:
         attempt = self.database.get_attempt(attempt_id)
@@ -1997,17 +2075,26 @@ class Armarius:
 
     @staticmethod
     def _directory_digest(path: Path) -> str:
+        return digest_json(Armarius._directory_records(path))
+
+    @staticmethod
+    def _directory_records(path: Path) -> list[dict[str, Any]]:
         files = []
         for file_path in sorted(item for item in path.rglob("*") if item.is_file()):
-            data = file_path.read_bytes()
+            digest = hashlib.sha256()
+            size = 0
+            with file_path.open("rb") as source:
+                for chunk in iter(lambda: source.read(1024 * 1024), b""):
+                    digest.update(chunk)
+                    size += len(chunk)
             files.append(
                 {
                     "path": file_path.relative_to(path).as_posix(),
-                    "digest": ArtifactStore.digest_bytes(data),
-                    "size": len(data),
+                    "digest": digest.hexdigest(),
+                    "size": size,
                 }
             )
-        return digest_json(files)
+        return files
 
     @staticmethod
     def _write_json(path: Path, value: Any) -> None:

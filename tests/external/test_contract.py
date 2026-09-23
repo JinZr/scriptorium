@@ -9,6 +9,7 @@ import sys
 
 import pytest
 
+from scriptorium.artifacts import ArtifactStore
 from scriptorium.domain import AttemptStatus, RunStatus, TaskStatus
 from scriptorium.errors import ConfigurationError, InfrastructureError, StateError
 from scriptorium.service import ScriptoriumService
@@ -376,6 +377,93 @@ def test_search_maps_casefolded_matches_to_source_columns(tmp_path: Path) -> Non
         street = service.search_task(attempt.id, "STRASSE", "supplement.tex", 0, 10)["matches"][0]
         assert street["column"] == 162
         assert "Straße" in street["excerpt"]
+
+
+def test_retrieval_checks_requested_files_without_reloading_the_bundle(tmp_path: Path, monkeypatch) -> None:
+    repo = _repo(tmp_path / "paper")
+    run_id, task_id = _start(repo)
+    with ScriptoriumService(repo) as service:
+        attempt = service.claim_task(task_id, "codex", "model", "max", "session", "host")["attempt"]
+
+    with ScriptoriumService(repo) as service:
+        workspace = repo / ".scriptorium" / "runs" / run_id / "bundle"
+        touched = []
+        digest_file = ArtifactStore.digest_file
+
+        def record_digest(path):
+            touched.append(Path(path).relative_to(workspace).as_posix())
+            return digest_file(path)
+
+        monkeypatch.setattr(ArtifactStore, "digest_file", staticmethod(record_digest))
+        monkeypatch.setattr(service.armarius, "_external_bundle", lambda *args: pytest.fail("full bundle reload"))
+        assert service.read_task(attempt.id, "supplement.tex", 1, 1, 0, 8000)["lines"]
+        assert service.search_task(attempt.id, "explains", "supplement.tex", 0, 10)["matches"]
+        assert service.page_task(attempt.id, 1)["page"] == 1
+        assert set(touched) == {
+            "manifest.json",
+            "source-map.json",
+            "navigation.json",
+            "sources/supplement.tex",
+            "pages/page-0001.png",
+        }
+
+
+def test_retrieval_rejects_selected_corruption_and_submission_checks_the_whole_bundle(tmp_path: Path) -> None:
+    repo = _repo(tmp_path / "paper")
+    run_id, task_id = _start(repo)
+    with ScriptoriumService(repo) as service:
+        claim = service.claim_task(task_id, "codex", "model", "max", "session", "host")
+        workspace = repo / ".scriptorium" / "runs" / run_id / "bundle"
+        (workspace / "sources/main.tex").write_text("damaged\n", encoding="utf-8")
+        assert service.read_task(claim["attempt"].id, "supplement.tex", 1, 1, 0, 8000)["lines"]
+        with pytest.raises(InfrastructureError, match="bundle source digest"):
+            asyncio.run(
+                service.submit_task(
+                    claim["attempt"].id,
+                    claim["input_digest"],
+                    json.dumps({"summary": "Review complete.", "findings": []}),
+                )
+            )
+        (workspace / "sources/supplement.tex").write_text("also damaged\n", encoding="utf-8")
+        with pytest.raises(InfrastructureError, match="frozen bundle file digest"):
+            service.read_task(claim["attempt"].id, "supplement.tex", 1, 1, 0, 8000)
+        (workspace / "pages/page-0001.png").write_bytes(b"damaged")
+        with pytest.raises(InfrastructureError, match="frozen bundle file digest"):
+            service.page_task(claim["attempt"].id, 1)
+
+
+def test_retrieval_rebuilds_a_missing_index_after_full_validation(tmp_path: Path) -> None:
+    repo = _repo(tmp_path / "paper")
+    _, task_id = _start(repo)
+    with ScriptoriumService(repo) as service:
+        claim = service.claim_task(task_id, "codex", "model", "max", "session", "host")
+        index = service.artifacts.path_for(claim["bundle_digest"])
+        assert index.is_file()
+        index.unlink()
+        assert service.read_task(claim["attempt"].id, "supplement.tex", 1, 1, 0, 8000)["lines"]
+        assert index.is_file()
+
+
+@pytest.mark.parametrize("name", ["manifest.json", "source-map.json", "navigation.json"])
+def test_retrieval_rejects_corrupt_frozen_metadata(tmp_path: Path, name: str) -> None:
+    repo = _repo(tmp_path / "paper")
+    run_id, task_id = _start(repo)
+    with ScriptoriumService(repo) as service:
+        claim = service.claim_task(task_id, "codex", "model", "max", "session", "host")
+        metadata = repo / ".scriptorium" / "runs" / run_id / "bundle" / name
+        metadata.write_text("{}\n", encoding="utf-8")
+        with pytest.raises(InfrastructureError, match="frozen bundle file digest"):
+            service.read_task(claim["attempt"].id, "supplement.tex", 1, 1, 0, 8000)
+
+
+def test_retrieval_rejects_corrupt_bundle_index(tmp_path: Path) -> None:
+    repo = _repo(tmp_path / "paper")
+    _, task_id = _start(repo)
+    with ScriptoriumService(repo) as service:
+        claim = service.claim_task(task_id, "codex", "model", "max", "session", "host")
+        service.artifacts.path_for(claim["bundle_digest"]).write_bytes(b"corrupt")
+        with pytest.raises(InfrastructureError, match="bundle index is corrupt"):
+            service.read_task(claim["attempt"].id, "supplement.tex", 1, 1, 0, 8000)
 
 
 def test_read_prefers_canonical_source_path_over_colliding_bundle_alias(tmp_path: Path) -> None:

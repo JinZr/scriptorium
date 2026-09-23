@@ -430,11 +430,11 @@ class ScriptoriumService:
         if attempt.status != AttemptStatus.RUNNING or task.status != TaskStatus.RUNNING:
             raise StateError("retrieval requires an active attempt")
         metadata = self._storage(self.database.get_external_task, task.id)
-        bundle = self.armarius._external_bundle(run, metadata)
-        return attempt, task, bundle
+        bundle, files = self.armarius._retrieval_bundle(run, metadata)
+        return attempt, task, bundle, files
 
     def read_task(self, attempt_id: str, path: str, start_line: int, max_lines: int, offset: int, max_chars: int):
-        attempt, task, bundle = self._readable_task(attempt_id)
+        attempt, task, bundle, files = self._readable_task(attempt_id)
         if start_line < 1 or not 1 <= max_lines <= 100 or offset < 0 or not 1 <= max_chars <= 8000:
             raise ConfigurationError("invalid read range or size")
         source = next((item for item in bundle.anchor_map.sources if item.source_path == path), None)
@@ -442,12 +442,15 @@ class ScriptoriumService:
             source = next((item for item in bundle.anchor_map.sources if item.read_path == path), None)
         if path in {"manifest.json", "navigation.json", "source-map.json"}:
             read_path = bundle.workspace / path
-            source_digest = ArtifactStore.digest_file(read_path)
+            source_digest = files[path]["digest"]
         elif source is not None and source.text_anchorable:
             read_path = bundle.workspace / source.read_path
             source_digest = source.source_digest
         else:
             raise ConfigurationError("path is not a text source in the frozen bundle")
+        self.armarius._verify_retrieval_file(
+            bundle.workspace, files, read_path.relative_to(bundle.workspace).as_posix()
+        )
         pieces, next_line, next_offset = _read_text_window(read_path, start_line, max_lines, offset, max_chars)
         self._record_access(
             task.run_id,
@@ -477,14 +480,14 @@ class ScriptoriumService:
         }
 
     def search_task(self, attempt_id: str, query: str, path: str | None, cursor: int, limit: int):
-        attempt, task, bundle = self._readable_task(attempt_id)
+        attempt, task, bundle, files = self._readable_task(attempt_id)
         if not query or len(query) > 200 or cursor < 0 or not 1 <= limit <= 50:
             raise ConfigurationError("invalid search query, cursor, or limit")
         sources = [item for item in bundle.anchor_map.sources if item.text_anchorable]
         search_items = [(item.source_path, bundle.workspace / item.read_path, item.source_digest) for item in sources]
         for name in ("manifest.json", "navigation.json", "source-map.json"):
             read_path = bundle.workspace / name
-            search_items.append((name, read_path, ArtifactStore.digest_file(read_path)))
+            search_items.append((name, read_path, files[name]["digest"]))
         if path is not None:
             search_items = [item for item in search_items if item[0] == path]
             if not search_items:
@@ -493,6 +496,9 @@ class ScriptoriumService:
         total_matches = 0
         folded_query = query.casefold()
         for source_path, read_path, source_digest in search_items:
+            self.armarius._verify_retrieval_file(
+                bundle.workspace, files, read_path.relative_to(bundle.workspace).as_posix()
+            )
             with read_path.open(encoding="utf-8") as source_file:
                 for number, line in enumerate(source_file, 1):
                     line = line.removesuffix("\n")
@@ -533,10 +539,11 @@ class ScriptoriumService:
         return {"matches": matches, "total_matches": total_matches, "next_cursor": next_cursor}
 
     def page_task(self, attempt_id: str, page_number: int):
-        attempt, task, bundle = self._readable_task(attempt_id)
+        attempt, task, bundle, files = self._readable_task(attempt_id)
         page = next((item for item in bundle.anchor_map.compiled_pdf.pages if item.page == page_number), None)
         if page is None:
             raise ConfigurationError("page is outside the frozen PDF")
+        self.armarius._verify_retrieval_file(bundle.workspace, files, page.read_path)
         self._record_access(task.run_id, attempt.id, "page", {"page": page_number, "read_path": page.read_path})
         return {"page": page_number, "path": str(bundle.workspace / page.read_path), "digest": page.page_digest}
 
