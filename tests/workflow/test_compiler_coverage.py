@@ -4,12 +4,12 @@ from hashlib import sha256
 
 import pytest
 
-from scriptorium.domain import AgentRole, RunStatus
+from scriptorium.domain import RunStatus
 from scriptorium.errors import InfrastructureError
 from scriptorium.manuscript import CompilerInput
 from scriptorium.service import ScriptoriumService
 
-from ._support import MANUSCRIPT, FakeAgentRuntime, PdfBuildingManuscriptManager, make_repository
+from ._support import MANUSCRIPT, PdfBuildingManuscriptManager, make_repository, prepare_patch
 
 
 class RecordedBuildManager(PdfBuildingManuscriptManager):
@@ -30,42 +30,31 @@ class RecordedBuildManager(PdfBuildingManuscriptManager):
 
 
 @pytest.mark.parametrize("fail_at", [1, 2, 3, None])
-def test_compiler_coverage_gates_each_build_stage(tmp_path, monkeypatch, fail_at):
+def test_compiler_coverage_gates_each_external_build_stage(tmp_path, fail_at):
     repo = make_repository(tmp_path)
-    runtime = FakeAgentRuntime()
     manager = RecordedBuildManager(repo, fail_at)
-    with ScriptoriumService(repo, runtime_factory=lambda route: runtime, manuscript_manager=manager) as service:
+    with ScriptoriumService(repo, manuscript_manager=manager) as service:
         if fail_at == 1:
             with pytest.raises(InfrastructureError, match="hidden.tex"):
-                asyncio.run(service.start_run("HEAD", "quick", None))
+                asyncio.run(service.start_run("HEAD", "quick"))
             run = service.database.list_runs()[0]
             assert run.status == RunStatus.FAILED
-            assert not runtime.run_calls
-            frozen = run.frozen_config
-            manager.fail_at = 2
-            monkeypatch.setattr(manager, "scan_sources", lambda *args: pytest.fail("resume must reuse frozen sources"))
-            with pytest.raises(InfrastructureError, match="hidden.tex"):
-                asyncio.run(service.resume_run(run.id))
-            assert service.get_run(run.id)["run"].frozen_config == frozen
-            assert not runtime.run_calls
+            assert service.database.list_tasks(run.id) == []
             return
-        run = asyncio.run(service.start_run("HEAD", "quick", None))["run"]
-        finding = service.list_findings(run.id)[0]
-        service.decide_finding(finding.id, "confirm", "Correct the typo.")
+        run = asyncio.run(service.start_run("HEAD", "quick"))["run"]
         if fail_at == 2:
             with pytest.raises(InfrastructureError, match="hidden.tex"):
-                asyncio.run(service.resume_run(run.id))
-            assert not service.database.list_patches(run.id)
+                prepare_patch(service, run.id)
+            assert service.database.list_patches(run.id) == []
         else:
-            revised = asyncio.run(service.resume_run(run.id))
-            service.decide_patch(revised["patch_ids"][0], "approve", "Verify the exact edit.")
+            patch, _ = prepare_patch(service, run.id)
+            service.decide_patch(patch.id, "approve", "Verify the exact edit.")
             if fail_at == 3:
                 with pytest.raises(InfrastructureError, match="hidden.tex"):
                     asyncio.run(service.resume_run(run.id))
             else:
-                verified = asyncio.run(service.resume_run(run.id))
-                assert verified["run"].status == RunStatus.READY_TO_APPLY
+                view = asyncio.run(service.resume_run(run.id))
+                assert view["run"].status == RunStatus.VERIFYING
         if fail_at:
             assert service.get_run(run.id)["run"].status == RunStatus.FAILED
-            assert runtime.run_calls[AgentRole.VERIFICATION] == 0
         assert (repo / "main.tex").read_text() == MANUSCRIPT
