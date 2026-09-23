@@ -1,4 +1,7 @@
 import asyncio
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
+import threading
 
 import pytest
 
@@ -21,6 +24,48 @@ def test_running_attempt_is_durable_across_service_restarts(tmp_path):
             claim(service, run.id, AgentRole.SUBSTANTIVE_REVIEW, session="other-session")
         receipt = submit(service, repeated, {"summary": "Reviewed the frozen text.", "findings": []})
         assert receipt["run_status"] == RunStatus.AWAITING_DECISION
+
+
+@pytest.mark.parametrize("with_finding", [False, True])
+def test_duplicate_submission_uses_attempt_state_after_run_lock(tmp_path, monkeypatch, with_finding):
+    repo = make_repository(tmp_path, roles=("substantive_review",))
+    with (
+        ScriptoriumService(repo, manuscript_manager=PdfBuildingManuscriptManager(repo)) as first,
+        ScriptoriumService(repo, manuscript_manager=PdfBuildingManuscriptManager(repo)) as second,
+    ):
+        run = asyncio.run(first.start_run("HEAD", "quick"))["run"]
+        review = claim(first, run.id, AgentRole.SUBSTANTIVE_REVIEW)
+        output = {
+            "summary": "Reviewed the frozen text.",
+            "findings": [review_finding(review)] if with_finding else [],
+        }
+        waiting = threading.Event()
+        release = threading.Event()
+        original = second._run_operation
+
+        @contextmanager
+        def delayed_lock(*args, **kwargs):
+            waiting.set()
+            assert release.wait(5)
+            with original(*args, **kwargs):
+                yield
+
+        monkeypatch.setattr(second, "_run_operation", delayed_lock)
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            duplicate = pool.submit(submit, second, review, output)
+            assert waiting.wait(5)
+            try:
+                accepted = submit(first, review, output)
+            finally:
+                release.set()
+            repeated = duplicate.result(timeout=5)
+
+        assert accepted["run_status"] == RunStatus.AWAITING_DECISION
+        assert repeated["run_status"] == RunStatus.AWAITING_DECISION
+        assert repeated["output_digest"] == accepted["output_digest"]
+        assert first.database.get_run(run.id).status == RunStatus.AWAITING_DECISION
+        assert len(first.list_findings(run.id)) == int(with_finding)
+        assert [event.event_type for event in first.database.list_events(run.id)].count("attempt.finished") == 1
 
 
 def test_invalid_anchor_requires_explicit_retry_with_saved_diagnostics(tmp_path):
