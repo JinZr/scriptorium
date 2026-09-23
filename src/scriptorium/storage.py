@@ -291,6 +291,7 @@ class Database:
                 "SELECT COALESCE(MAX(version), 0) AS version FROM schema_migrations"
             ).fetchone()
             version = int(row["version"])
+            new_database = version == 0
             if version > SCHEMA_VERSION:
                 raise StorageError(
                     f"database schema version {version} is newer than supported version {SCHEMA_VERSION}"
@@ -304,8 +305,24 @@ class Database:
             if version == 2:
                 self.connection.executescript(_MIGRATION_3)
                 version = 3
-            if version == 3:
+            if version == 3 and new_database:
                 self.connection.executescript(_MIGRATION_4)
+
+    def ensure_external_schema(self) -> None:
+        with self._lock:
+            version = self.connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0]
+            if version == SCHEMA_VERSION:
+                return
+            active = self.connection.execute(
+                "SELECT id FROM runs WHERE status NOT IN (?, ?) LIMIT 1",
+                (RunStatus.COMPLETED.value, RunStatus.CANCELLED.value),
+            ).fetchone()
+            if active is not None:
+                raise ConflictError(
+                    f"historical SDK run {active['id']} must finish in its original version "
+                    "before starting an external run"
+                )
+            self.connection.executescript(_MIGRATION_4)
 
     @contextmanager
     def transaction(self) -> Iterator[sqlite3.Connection]:
@@ -1561,9 +1578,9 @@ class Database:
             runtime_version=row["runtime_version"],
             model=row["model"],
             model_provider=row["model_provider"],
-            external_client=row["external_client"],
-            effort=row["effort"],
-            session_source=row["session_source"],
+            external_client=row["external_client"] if "external_client" in row.keys() else None,
+            effort=row["effort"] if "effort" in row.keys() else None,
+            session_source=row["session_source"] if "session_source" in row.keys() else None,
             prompt_digest=row["prompt_digest"],
             schema_digest=row["schema_digest"],
             bundle_digest=row["bundle_digest"],
