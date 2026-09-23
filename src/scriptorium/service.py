@@ -497,15 +497,21 @@ class ScriptoriumService:
                 for number, line in enumerate(source_file, 1):
                     line = line.removesuffix("\n")
                     folded = line.casefold()
+                    source_offsets = (
+                        [index for index, character in enumerate(line) for _ in character.casefold()]
+                        if len(folded) != len(line)
+                        else None
+                    )
                     position = folded.find(folded_query)
                     while position >= 0:
                         if cursor <= total_matches < cursor + limit:
-                            excerpt_start = max(0, position - 120)
+                            source_position = source_offsets[position] if source_offsets is not None else position
+                            excerpt_start = max(0, source_position - 100)
                             matches.append(
                                 {
                                     "path": source_path,
                                     "line": number,
-                                    "column": position + 1,
+                                    "column": source_position + 1,
                                     "excerpt": line[excerpt_start : excerpt_start + 300],
                                     "source_digest": source_digest,
                                 }

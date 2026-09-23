@@ -347,6 +347,37 @@ def test_search_paging_long_line_and_bundle_path_boundary(tmp_path: Path) -> Non
             service.read_task(attempt_id, "../scriptorium.toml", 1, 1, 0, 8000)
 
 
+def test_search_maps_casefolded_matches_to_source_columns(tmp_path: Path) -> None:
+    repo = _repo(tmp_path / "paper")
+    (repo / "supplement.tex").write_text("ß" * 150 + "Needle and Straße.\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(repo), "add", "supplement.tex"], check=True, capture_output=True)
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(repo),
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.org",
+            "commit",
+            "-m",
+            "unicode",
+        ],
+        check=True,
+        capture_output=True,
+    )
+    _, task_id = _start(repo)
+    with ScriptoriumService(repo) as service:
+        attempt = service.claim_task(task_id, "codex", "model", "max", "session", "host")["attempt"]
+        needle = service.search_task(attempt.id, "needle", "supplement.tex", 0, 10)["matches"][0]
+        assert needle["column"] == 151
+        assert "Needle" in needle["excerpt"]
+        street = service.search_task(attempt.id, "STRASSE", "supplement.tex", 0, 10)["matches"][0]
+        assert street["column"] == 162
+        assert "Straße" in street["excerpt"]
+
+
 def test_read_prefers_canonical_source_path_over_colliding_bundle_alias(tmp_path: Path) -> None:
     repo = _repo(tmp_path / "paper")
     nested = repo / "sources" / "supplement.tex"
