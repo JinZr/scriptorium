@@ -8,13 +8,11 @@ from enum import Enum
 from hashlib import sha256
 from importlib import metadata
 import json
-import math
 from pathlib import Path
 import re
 import shutil
 import subprocess
 import sys
-import tempfile
 import textwrap
 from typing import Any
 from urllib.parse import unquote, urlparse
@@ -23,12 +21,11 @@ import uuid
 import fitz
 
 import scriptorium
-from scriptorium.config import LocalConfig, ManuscriptConfig, load_local_config, load_project_config, validate_ready
+from scriptorium.config import ManuscriptConfig
 from scriptorium.domain import RunStatus
-from scriptorium.errors import ConfigurationError, InfrastructureError, StateError
+from scriptorium.errors import InfrastructureError, StateError
 from scriptorium.manuscript import BuildResult, FrozenRevision, ManuscriptManager, SourceFile
 from scriptorium.service import ScriptoriumService
-from scriptorium.workflow import RuntimeFactory
 
 try:
     from .prepare import (
@@ -58,7 +55,6 @@ except ImportError:  # Direct script execution.
 HERE = Path(__file__).resolve().parent
 REPOSITORY_ROOT = HERE.parents[1]
 DEFAULT_RUNS_ROOT = HERE / "runs"
-DEFAULT_ROUTES_PATH = HERE / ".scriptorium" / "config.toml"
 REVIEW_ROLES = ("substantive_review", "copyedit", "consistency", "figure_review")
 RASTER_EXTENSIONS = {".bmp", ".gif", ".jpeg", ".jpg", ".png", ".tif", ".tiff", ".webp"}
 MARKDOWN_IMAGE_PATTERN = re.compile(r"!\[[^\]]*\]\(([^)]+)\)")
@@ -290,7 +286,7 @@ def project_config_text() -> str:
     )
 
 
-def create_paper_project(project: Path, route_config: bytes, route_digest: str) -> None:
+def create_paper_project(project: Path) -> None:
     if project.exists():
         raise BenchmarkError(f"Paper project already exists: {project}")
     project.parent.mkdir(parents=True, exist_ok=True)
@@ -299,15 +295,14 @@ def create_paper_project(project: Path, route_config: bytes, route_digest: str) 
         (temporary / ".scriptorium").mkdir(parents=True)
         (temporary / "scriptorium.toml").write_text(project_config_text(), encoding="utf-8")
         (temporary / "benchmark.tex").write_text(SENTINEL_TEXT, encoding="utf-8")
-        (temporary / ".scriptorium" / "config.toml").write_bytes(route_config)
-        validate_paper_project(temporary, route_digest)
+        validate_paper_project(temporary)
         temporary.replace(project)
     except BaseException:
         shutil.rmtree(temporary, ignore_errors=True)
         raise
 
 
-def validate_paper_project(project: Path, route_digest: str) -> None:
+def validate_paper_project(project: Path) -> None:
     state_dir = project / ".scriptorium"
     if (
         project.is_symlink()
@@ -325,9 +320,6 @@ def validate_paper_project(project: Path, route_digest: str) -> None:
         path = project / relative
         if path.is_symlink() or not path.is_file() or path.read_text(encoding="utf-8") != content:
             raise BenchmarkError(f"Generated paper project changed: {path}")
-    local_routes = state_dir / "config.toml"
-    if local_routes.is_symlink() or not local_routes.is_file() or file_digest(local_routes) != route_digest:
-        raise BenchmarkError(f"Generated paper route configuration changed: {local_routes}")
     for path in (state_dir / "state.sqlite3", state_dir / "artifacts", state_dir / "runs"):
         if path.is_symlink():
             raise BenchmarkError(f"Generated paper state path is unsafe: {path}")
@@ -426,9 +418,6 @@ def source_manifest(repo: Path = REPOSITORY_ROOT) -> list[dict[str, Any]]:
 def package_versions() -> dict[str, str | None]:
     names = (
         "scriptorium",
-        "openai-codex",
-        "claude-agent-sdk",
-        "google-antigravity",
         "PyMuPDF",
         "litellm",
         "datasets",
@@ -445,24 +434,6 @@ def package_versions() -> dict[str, str | None]:
         except metadata.PackageNotFoundError:
             versions[name] = None
     return versions
-
-
-def route_config_summary(config: LocalConfig) -> dict[str, Any]:
-    return {
-        "max_concurrency": config.max_concurrency,
-        "roles": dict(sorted(config.roles.items())),
-        "routes": {
-            name: {
-                "runtime": route.runtime,
-                "model_provider": route.model_provider,
-                "model": route.model,
-                "reasoning_effort": route.reasoning_effort,
-                "input_usd_per_million": route.input_usd_per_million,
-                "output_usd_per_million": route.output_usd_per_million,
-            }
-            for name, route in sorted(config.routes.items())
-        },
-    }
 
 
 def utc_now() -> str:
@@ -489,13 +460,6 @@ def summarize_scriptorium_run(service: ScriptoriumService, run_id: str) -> dict[
     view = service.get_run(run_id)
     run = view["run"]
     task_summaries = []
-    totals = {
-        "input_tokens": 0,
-        "cached_input_tokens": 0,
-        "output_tokens": 0,
-        "reasoning_tokens": 0,
-        "duration_ms": 0,
-    }
     for task_view in view["tasks"]:
         task = task_view["task"]
         attempts = []
@@ -504,14 +468,20 @@ def summarize_scriptorium_run(service: ScriptoriumService, run_id: str) -> dict[
             if attempt_data.get("validation_report_artifact_digest") is None:
                 attempt_data.pop("validation_report_artifact_digest", None)
             attempts.append(attempt_data)
-            for key in totals:
-                totals[key] += int(attempt_data.get(key) or 0)
+            if attempt.external_client is not None:
+                for key in (
+                    "input_tokens",
+                    "cached_input_tokens",
+                    "output_tokens",
+                    "reasoning_tokens",
+                    "estimated_cost_usd",
+                ):
+                    attempt_data[key] = None
         task_summaries.append(
             {
                 "id": task.id,
                 "stage": task.stage,
                 "role": task.role.value,
-                "route": task.route,
                 "status": task.status.value,
                 "input_digest": task.input_digest,
                 "attempts": attempts,
@@ -526,10 +496,10 @@ def summarize_scriptorium_run(service: ScriptoriumService, run_id: str) -> dict[
         "tree_sha": run.tree_sha,
         "profile": run.profile,
         "config_digest": run.config_digest,
-        "estimated_cost_usd": run.estimated_cost_usd,
+        "estimated_cost_usd": None,
         "created_at": run.created_at,
         "updated_at": run.updated_at,
-        "tokens": totals,
+        "tokens": None,
         "tasks": task_summaries,
         "finding_count": len(findings),
         "finding_ids": [finding.id for finding in findings],
@@ -539,10 +509,7 @@ def summarize_scriptorium_run(service: ScriptoriumService, run_id: str) -> dict[
 
 def _frozen_inputs(
     lock: dict[str, Any],
-    routes_digest: str,
-    routes_summary: dict[str, Any],
     paper_ids: list[int],
-    budget_usd: float | None,
 ) -> dict[str, Any]:
     return {
         "scriptorium_commit": repository_commit(),
@@ -556,11 +523,8 @@ def _frozen_inputs(
             "commit": lock["upstream"]["commit"],
             "archive_sha256": lock["upstream"]["archive_sha256"],
         },
-        "route_config_digest": routes_digest,
-        "route_config": routes_summary,
         "profile": "full",
         "paper_ids": paper_ids,
-        "budget_usd_per_paper": budget_usd,
     }
 
 
@@ -586,7 +550,7 @@ def validate_benchmark_manifest(manifest: dict[str, Any]) -> dict[str, Any]:
         manifest.get("benchmark") != "peerreviewbench"
         or not isinstance(run_id, str)
         or not run_id
-        or manifest.get("status") not in {"running", "complete", "incomplete"}
+        or manifest.get("status") not in {"running", "awaiting_review", "complete", "incomplete"}
         or not isinstance(manifest.get("frozen_inputs"), dict)
         or not isinstance(manifest.get("package_versions"), dict)
         or not isinstance(manifest.get("papers"), dict)
@@ -616,7 +580,7 @@ def validate_benchmark_manifest(manifest: dict[str, Any]) -> dict[str, Any]:
             not isinstance(entry, dict)
             or entry.get("paper_id") != paper_id
             or entry.get("project_dir") != f"papers/paper{paper_id}"
-            or entry.get("status") not in {"pending", "running", "complete", "incomplete"}
+            or entry.get("status") not in {"pending", "running", "awaiting_review", "complete", "incomplete"}
             or not isinstance(entry.get("prepared_manifest_digest"), str)
             or re.fullmatch(r"[0-9a-f]{64}", entry["prepared_manifest_digest"]) is None
         ):
@@ -685,25 +649,20 @@ async def _run_paper(
     entry: dict[str, Any],
     run_dir: Path,
     prepared_paper: Path,
-    route_config: bytes,
-    route_digest: str,
-    budget_usd: float | None,
-    runtime_factory: RuntimeFactory | None,
 ) -> dict[str, Any]:
     project = paper_project_path(run_dir, entry)
     if not project.exists():
-        create_paper_project(project, route_config, route_digest)
-    validate_paper_project(project, route_digest)
+        create_paper_project(project)
+    validate_paper_project(project)
     manager = PeerReviewBenchManuscriptManager(project, prepared_paper)
     with ScriptoriumService(
         project,
-        runtime_factory=runtime_factory,
         manuscript_manager=manager,
     ) as service:
         run_id = _recover_run_id(service, entry.get("scriptorium_run_id"))
         try:
             if run_id is None:
-                view = await service.start_run("prepared", "full", budget_usd)
+                view = await service.start_run("prepared", "full")
             else:
                 current = service.get_run(run_id)["run"]
                 if current.status == RunStatus.AWAITING_DECISION:
@@ -743,6 +702,9 @@ async def _run_paper(
             entry["status"] = "complete"
             entry["completed_at"] = entry.get("completed_at") or utc_now()
             entry["error"] = None
+        elif view["run"].status == RunStatus.REVIEWING:
+            entry["status"] = "awaiting_review"
+            entry["error"] = None
         else:
             entry["status"] = "incomplete"
             entry["error"] = view["run"].error or f"Scriptorium stopped at {view['run'].status.value}"
@@ -753,10 +715,9 @@ def _validate_completed_paper(
     entry: dict[str, Any],
     run_dir: Path,
     prepared_paper: Path,
-    route_digest: str,
 ) -> None:
     project = paper_project_path(run_dir, entry)
-    validate_paper_project(project, route_digest)
+    validate_paper_project(project)
     manager = PeerReviewBenchManuscriptManager(project, prepared_paper)
     with ScriptoriumService(project, manuscript_manager=manager) as service:
         validate_completed_scriptorium_state(service, entry)
@@ -849,39 +810,14 @@ async def run_benchmark(
     all_papers: bool = False,
     paper_ids: list[int] | None = None,
     resume: Path | None = None,
-    budget_usd: float | None = None,
     cache_root: Path = DEFAULT_CACHE_ROOT,
     runs_root: Path = DEFAULT_RUNS_ROOT,
-    routes_path: Path = DEFAULT_ROUTES_PATH,
-    runtime_factory: RuntimeFactory | None = None,
 ) -> tuple[Path, dict[str, Any]]:
-    if budget_usd is not None and (not math.isfinite(budget_usd) or budget_usd < 0):
-        raise BenchmarkError("--budget-usd must be finite and non-negative")
     validate_imported_scriptorium()
     lock = load_lock()
     dataset = lock["dataset"]
     if cache_root.is_symlink():
         raise BenchmarkError(f"Benchmark cache root must not be a symlink: {cache_root}")
-    if routes_path.is_symlink() or not routes_path.is_file():
-        raise BenchmarkError(
-            f"Missing route configuration: {routes_path}. Copy routes.example.toml there and configure a model."
-        )
-    route_config = routes_path.read_bytes()
-    routes_digest = sha256(route_config).hexdigest()
-    with tempfile.TemporaryDirectory(prefix="scriptorium-peerreviewbench-routes-") as temporary:
-        validation_project = Path(temporary) / "project"
-        create_paper_project(validation_project, route_config, routes_digest)
-        try:
-            local_config = load_local_config(validation_project)
-            validate_ready(
-                load_project_config(validation_project),
-                local_config,
-                "full",
-                budget_usd,
-            )
-        except ConfigurationError as exc:
-            raise BenchmarkError(f"Route configuration is not ready: {exc}") from exc
-    routes_summary = route_config_summary(local_config)
     prepared = available_prepared_papers(cache_root, dataset["revision"], dataset["id"])
 
     if resume is not None:
@@ -894,13 +830,9 @@ async def run_benchmark(
         selected_ids = [int(paper_id) for paper_id in manifest["frozen_inputs"]["paper_ids"]]
         if manifest["package_versions"] != package_versions():
             raise BenchmarkError("Installed package versions do not match the resumed run")
-        frozen_budget = manifest["frozen_inputs"].get("budget_usd_per_paper")
-        if budget_usd is not None and budget_usd != frozen_budget:
-            raise BenchmarkError("--budget-usd does not match the resumed run")
-        budget_usd = frozen_budget
-        expected_frozen = _frozen_inputs(lock, routes_digest, routes_summary, selected_ids, budget_usd)
+        expected_frozen = _frozen_inputs(lock, selected_ids)
         if manifest.get("frozen_inputs") != expected_frozen:
-            raise BenchmarkError("Current code, data, routes, or selection do not match the resumed run")
+            raise BenchmarkError("Current code, data, or selection do not match the resumed run")
     else:
         selected_ids = select_paper_ids(
             prepared,
@@ -909,7 +841,7 @@ async def run_benchmark(
             expected_count=int(dataset["papers"]),
             smoke_count=int(lock["defaults"]["smoke_papers"]),
         )
-        frozen = _frozen_inputs(lock, routes_digest, routes_summary, selected_ids, budget_usd)
+        frozen = _frozen_inputs(lock, selected_ids)
         run_dir = _new_run_directory(runs_root)
         manifest = {
             "benchmark": "peerreviewbench",
@@ -942,17 +874,14 @@ async def run_benchmark(
     failures = 0
     did_work = False
     frozen_inputs = manifest["frozen_inputs"]
-    frozen_route_digest = frozen_inputs["route_config_digest"]
     for index, paper_id in enumerate(selected_ids, 1):
         _validate_frozen_benchmark_sources(frozen_inputs)
-        if routes_path.is_symlink() or not routes_path.is_file() or file_digest(routes_path) != routes_digest:
-            raise BenchmarkError("Route configuration changed during the benchmark")
         entry = manifest["papers"][str(paper_id)]
         if entry["prepared_manifest_digest"] != json_digest(validate_prepared_paper(prepared[paper_id])):
             raise BenchmarkError(f"Prepared paper changed since the run was created: paper{paper_id}")
         if entry["status"] == "complete":
             try:
-                _validate_completed_paper(entry, run_dir, prepared[paper_id], frozen_route_digest)
+                _validate_completed_paper(entry, run_dir, prepared[paper_id])
             except Exception as exc:
                 did_work = True
                 entry["status"] = "incomplete"
@@ -974,7 +903,7 @@ async def run_benchmark(
                 break
             print(f"[{index}/{len(selected_ids)}] paper{paper_id}: already complete and verified", flush=True)
             continue
-        print(f"[{index}/{len(selected_ids)}] paper{paper_id}: running full review profile", flush=True)
+        print(f"[{index}/{len(selected_ids)}] paper{paper_id}: preparing external review tasks", flush=True)
         did_work = True
         entry["status"] = "running"
         entry["started_at"] = entry["started_at"] or utc_now()
@@ -986,10 +915,6 @@ async def run_benchmark(
                 entry,
                 run_dir,
                 prepared[paper_id],
-                route_config,
-                frozen_route_digest,
-                budget_usd,
-                runtime_factory,
             )
         except KeyboardInterrupt:
             entry["status"] = "incomplete"
@@ -1011,20 +936,23 @@ async def run_benchmark(
             manifest["updated_at"] = utc_now()
             write_json_atomic(run_dir / "run_manifest.json", manifest)
             break
-        if entry["status"] != "complete":
+        if entry["status"] == "incomplete":
             failures += 1
         manifest["updated_at"] = utc_now()
         write_json_atomic(run_dir / "run_manifest.json", manifest)
 
     if resume is not None and not did_work and manifest["status"] == "complete":
         return run_dir, manifest
-    manifest["status"] = "complete" if failures == 0 else "incomplete"
-    manifest["updated_at"] = utc_now()
-    manifest["reviewer_cost_usd"] = sum(
-        float(entry.get("scriptorium", {}).get("estimated_cost_usd") or 0)
-        for entry in manifest["papers"].values()
-        if entry.get("scriptorium")
+    manifest["status"] = (
+        "incomplete"
+        if failures
+        else (
+            "awaiting_review"
+            if any(item["status"] == "awaiting_review" for item in manifest["papers"].values())
+            else "complete"
+        )
     )
+    manifest["updated_at"] = utc_now()
     write_json_atomic(run_dir / "run_manifest.json", manifest)
     return run_dir, manifest
 
@@ -1035,15 +963,11 @@ def build_parser() -> argparse.ArgumentParser:
     selection.add_argument("--all", action="store_true", help="Run all 78 prepared papers")
     selection.add_argument("--paper-id", action="append", type=int, dest="paper_ids", help="Run one paper ID")
     parser.add_argument("--resume", type=Path, help="Resume an existing benchmark run directory")
-    parser.add_argument("--budget-usd", type=float, help="Scriptorium budget per paper")
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    if args.budget_usd is not None and (not math.isfinite(args.budget_usd) or args.budget_usd < 0):
-        print("error: --budget-usd must be finite and non-negative", file=sys.stderr)
-        return 2
     try:
         import asyncio
 
@@ -1052,14 +976,13 @@ def main(argv: list[str] | None = None) -> int:
                 all_papers=args.all,
                 paper_ids=args.paper_ids,
                 resume=args.resume,
-                budget_usd=args.budget_usd,
             )
         )
     except (BenchmarkError, InfrastructureError, StateError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
     print(json.dumps({"run_dir": str(run_dir), "status": manifest["status"]}, indent=2))
-    return 0 if manifest["status"] == "complete" else 1
+    return 0 if manifest["status"] in {"complete", "awaiting_review"} else 1
 
 
 if __name__ == "__main__":

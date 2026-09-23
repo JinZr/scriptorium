@@ -448,7 +448,7 @@ def test_collect_exports_reads_duplicate_events_for_canonical_attribution(tmp_pa
             return [duplicate]
 
     monkeypatch.setattr(benchmark_evaluate, "paper_project_path", lambda run_dir, entry: tmp_path / "project")
-    monkeypatch.setattr(benchmark_evaluate, "validate_paper_project", lambda project, digest: None)
+    monkeypatch.setattr(benchmark_evaluate, "validate_paper_project", lambda project: None)
     monkeypatch.setattr(benchmark_evaluate, "validate_prepared_paper", lambda prepared: prepared_manifest)
     monkeypatch.setattr(
         benchmark_evaluate,
