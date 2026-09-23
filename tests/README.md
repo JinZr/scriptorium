@@ -18,3 +18,7 @@ it is present before running them. These tests require no provider credentials.
 compiler input coverage, including real `latexmk` builds. The LaTeX CI job also
 installs and verifies `latexmk`; workflow and doctor tests cover the shared
 coverage gate without provider calls.
+
+`manuscript/test_build_helpers.py` covers pre-build link containment and native
+BibTeX/Biber/EPS helper evidence. The LaTeX CI job installs bibliography tools
+and EPS conversion dependencies and runs these cases on Python 3.10.

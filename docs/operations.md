@@ -17,14 +17,20 @@ scriptorium --json doctor --revision COMMIT --profile full --budget-usd 10
 Doctor resolves the revision to a commit, creates a disposable snapshot, scans its recursive LaTeX dependencies, and compiles a separate snapshot copy with the same build implementation used by a run. Dirty worktree files do not enter the check. Doctor does not create a run, artifact, review bundle, rendered page, or provider invocation, and it recompiles on every call. Temporary snapshot and build files are removed after normal completion, ordinary failure, or interruption; an operating-system cleanup may be needed after `SIGKILL`.
 
 Native builds also require `kpsewhich` from the TeX installation and fresh
-compiler recorder evidence. Doctor lists local build-only inputs in its compile
+compiler recorder and latexmk version-4 dependency evidence. EPS conversion also
+requires working native `epstopdf`/`repstopdf` and Ghostscript installations.
+Doctor lists local build-only inputs in its compile
 diagnostic. A missing review source, digest mismatch, unclassified local input,
 external content input, or unusable recorder is an infrastructure failure; a
 successful PDF alone does not pass this check. Repair the external toolchain or
 commit a manuscript whose dependencies are expressed in the supported syntax,
 then run doctor again. Start a new run when the old frozen source list is
 incomplete. Do not edit saved snapshots, bundles, SQLite, or artifacts to repair
-coverage, and do not add files to a frozen run after compilation.
+coverage, and do not add files to a frozen run after compilation. Escaping
+file/directory symlinks are rejected before compilation; remove such tracked
+links and commit the correction. Existing converted EPS PDFs are not accepted
+as fresh helper outputs. Keep generated conversion files out of the source
+snapshot, or reference an intentionally committed PDF directly as a source.
 
 The coverage check runs whenever a native build is executed, including a resumed
 preparing run and new patch/verification builds. Already materialized historical

@@ -166,7 +166,8 @@ def test_generated_auxiliary_must_have_output_evidence(tmp_path):
     with pytest.raises(InfrastructureError, match="no snapshot source"):
         ManuscriptManager._compiler_inputs(tmp_path, {}, {Path("hidden.aux")}, set())
     assert ManuscriptManager._compiler_inputs(tmp_path, {}, {Path("main.aux")}, {Path("main.aux")}) == ()
-    assert ManuscriptManager._compiler_inputs(tmp_path, {}, {Path("main.bbl")}, set()) == ()
+    with pytest.raises(InfrastructureError, match="no snapshot source"):
+        ManuscriptManager._compiler_inputs(tmp_path, {}, {Path("main.bbl")}, set())
 
 
 @pytest.mark.parametrize(
