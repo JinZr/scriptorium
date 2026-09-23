@@ -27,3 +27,9 @@ and EPS conversion dependencies and runs these cases on Python 3.10.
 probe of the pinned bundled binary. It does not invoke a model and runs in the
 ordinary test suite. The same package owns process cleanup, output redaction,
 and synthetic native protocol fixtures. Paid retrieval tests remain under `live/`.
+
+`live/test_retrieval_contract.py` runs offline: it checks randomized retrieval
+fixtures, native access evidence, and harness reporting without credentials.
+`live/test_native_harnesses.py` owns the opt-in, paid Codex, Claude Code, and
+Antigravity retrieval/resume checks. Default skips are not capability passes;
+see `docs/operations.md` for opt-in switches and evidence retention.

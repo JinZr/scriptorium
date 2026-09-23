@@ -1,102 +1,105 @@
 import asyncio
-from hashlib import sha256
+from dataclasses import asdict
+from datetime import datetime, timezone
 import json
 import os
 from pathlib import Path
+import time
 
 import pytest
 
 from scriptorium.domain import AgentRole
-from scriptorium.runtime import AgentResult, AgentRuntime
+from scriptorium.runtime import RUNTIME_SDK_VERSIONS
 
-SCHEMA = {
-    "type": "object",
-    "properties": {"answer": {"type": "string"}},
-    "required": ["answer"],
-    "additionalProperties": False,
-}
+from ._access import assert_retrieval
+from ._retrieval import directory_digest, make_fixture
 
 
-def _directory_digest(path: Path) -> str:
-    digest = sha256()
-    for item in sorted(candidate for candidate in path.rglob("*") if candidate.is_file()):
-        relative = item.relative_to(path).as_posix().encode()
-        content = item.read_bytes()
-        digest.update(len(relative).to_bytes(8, "big"))
-        digest.update(relative)
-        digest.update(len(content).to_bytes(8, "big"))
-        digest.update(content)
-    return digest.hexdigest()
+def _runtime(name: str, model: str, provider: str):
+    if name == "codex":
+        from scriptorium.runtime.codex import CodexAgentRuntime
+
+        adapter = CodexAgentRuntime
+    elif name == "claude_code":
+        from scriptorium.runtime.claude_code import ClaudeCodeAgentRuntime
+
+        adapter = ClaudeCodeAgentRuntime
+    else:
+        from scriptorium.runtime.antigravity import AntigravityAgentRuntime
+
+        adapter = AntigravityAgentRuntime
+    return adapter(route="live", model=model, provider=provider, reasoning="high")
 
 
-async def _exercise_runtime(runtime: AgentRuntime, tmp_path: Path) -> None:
+async def _exercise_runtime(name: str, model: str, provider: str, tmp_path: Path) -> None:
     workspace = tmp_path / "bundle"
-    workspace.mkdir()
-    (workspace / "manifest.json").write_text('{"sources":["paper.txt"]}\n', encoding="utf-8")
-    (workspace / "paper.txt").write_text("A short frozen manuscript.\n", encoding="utf-8")
+    cases = make_fixture(workspace)
     session_dir = tmp_path / "session"
-    original_digest = _directory_digest(workspace)
-
-    first = await runtime.run_agent(
-        'Return exactly {"answer":"first"} as structured output.',
-        AgentRole.COPYEDIT,
-        workspace,
-        SCHEMA,
-        session_dir,
-    )
-    _assert_live_result(first)
-    assert first.thread_id
-
-    resumed = await runtime.resume_agent(
-        first.thread_id,
-        'Return exactly {"answer":"resumed"} as structured output.',
-        AgentRole.COPYEDIT,
-        workspace,
-        SCHEMA,
-        session_dir,
-    )
-    _assert_live_result(resumed)
-    assert resumed.thread_id == first.thread_id
-    assert _directory_digest(workspace) == original_digest
-
-
-def _assert_live_result(result: AgentResult) -> None:
-    assert result.status == "completed", result.error
-    assert result.final_response is not None
-    structured = json.loads(result.final_response)
-    assert set(structured) == {"answer"}
-    assert isinstance(structured["answer"], str) and structured["answer"]
-    assert result.usage.input_tokens + result.usage.output_tokens > 0
-    trace = [json.loads(line) for line in result.trace_jsonl.splitlines() if line]
-    assert trace
+    session_dir.mkdir()
+    evidence = tmp_path / "evidence"
+    evidence.mkdir()
+    original_digest = directory_digest(workspace)
+    thread_id = None
+    for label, case in zip(("first", "resumed"), cases):
+        started = time.monotonic()
+        report = {
+            "recorded_at": datetime.now(timezone.utc).isoformat(),
+            "requested_runtime": name,
+            "requested_sdk_version": RUNTIME_SDK_VERSIONS[name],
+            "requested_model": model,
+            "requested_provider": provider,
+            "prompt": case.prompt,
+            "schema": case.schema,
+            "workspace_digest_before": original_digest,
+        }
+        try:
+            runtime = _runtime(name, model, provider)
+            arguments = (case.prompt, AgentRole.COPYEDIT, workspace, case.schema, session_dir)
+            invocation = (
+                runtime.run_agent(*arguments) if thread_id is None else runtime.resume_agent(thread_id, *arguments)
+            )
+            result = await asyncio.wait_for(invocation, timeout=300)
+            (evidence / f"{label}.trace.jsonl").write_text(result.trace_jsonl, encoding="utf-8")
+            normalized = asdict(result)
+            normalized.pop("trace_jsonl")
+            report.update(normalized)
+        except Exception as exc:
+            report.update(exception_type=type(exc).__name__, capability="unverified")
+            raise
+        finally:
+            current_digest = directory_digest(workspace)
+            report.update(
+                elapsed_seconds=time.monotonic() - started,
+                workspace_digest_after=current_digest,
+            )
+            (evidence / f"{label}.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
+        assert current_digest == original_digest, "Runtime modified the frozen workspace"
+        assert (result.runtime_name, result.runtime_version, result.model, result.model_provider) == (
+            name,
+            RUNTIME_SDK_VERSIONS[name],
+            model,
+            provider,
+        )
+        assert_retrieval(case, result, workspace)
+        assert result.thread_id, "Missing native session identity"
+        if thread_id is not None:
+            assert result.thread_id == thread_id, "Resume created an unrelated session"
+        thread_id = result.thread_id
 
 
 @pytest.mark.live_harness
-@pytest.mark.skipif(
-    os.environ.get("SCRIPTORIUM_LIVE_CLAUDE") != "1",
-    reason="set SCRIPTORIUM_LIVE_CLAUDE=1 to run the paid Claude Code smoke",
+@pytest.mark.parametrize(
+    "name,switch,provider",
+    [("codex", "CODEX", "openai"), ("claude_code", "CLAUDE", "anthropic"), ("antigravity", "ANTIGRAVITY", "gemini")],
 )
-def test_live_claude_first_turn_and_resume(tmp_path: Path) -> None:
-    from scriptorium.runtime.claude_code import ClaudeCodeAgentRuntime
-
-    model = os.environ.get("SCRIPTORIUM_LIVE_CLAUDE_MODEL")
-    assert model, "SCRIPTORIUM_LIVE_CLAUDE_MODEL is required when live Claude testing is enabled"
-    runtime = ClaudeCodeAgentRuntime(route="live", model=model, provider="anthropic", reasoning="high")
-
-    asyncio.run(_exercise_runtime(runtime, tmp_path))
-
-
-@pytest.mark.live_harness
-@pytest.mark.skipif(
-    os.environ.get("SCRIPTORIUM_LIVE_ANTIGRAVITY") != "1",
-    reason="set SCRIPTORIUM_LIVE_ANTIGRAVITY=1 to run the paid Antigravity smoke",
-)
-def test_live_antigravity_first_turn_and_resume(tmp_path: Path) -> None:
-    from scriptorium.runtime.antigravity import AntigravityAgentRuntime
-
-    model = os.environ.get("SCRIPTORIUM_LIVE_ANTIGRAVITY_MODEL")
-    assert model, "SCRIPTORIUM_LIVE_ANTIGRAVITY_MODEL is required when live Antigravity testing is enabled"
-    assert os.environ.get("GEMINI_API_KEY"), "GEMINI_API_KEY is required when live Antigravity testing is enabled"
-    runtime = AntigravityAgentRuntime(route="live", model=model, provider="gemini", reasoning="high")
-
-    asyncio.run(_exercise_runtime(runtime, tmp_path))
+def test_live_retrieval_and_resume(tmp_path: Path, name: str, switch: str, provider: str) -> None:
+    if os.environ.get(f"SCRIPTORIUM_LIVE_{switch}") != "1":
+        pytest.skip(f"set SCRIPTORIUM_LIVE_{switch}=1 for the paid retrieval test; capability unverified")
+    model = os.environ.get(f"SCRIPTORIUM_LIVE_{switch}_MODEL")
+    assert model, f"SCRIPTORIUM_LIVE_{switch}_MODEL is required when live testing is enabled"
+    if name == "codex":
+        provider = os.environ.get("SCRIPTORIUM_LIVE_CODEX_PROVIDER", "openai")
+        assert provider
+    if name == "antigravity":
+        assert os.environ.get("GEMINI_API_KEY"), "GEMINI_API_KEY is required when live testing is enabled"
+    asyncio.run(_exercise_runtime(name, model, provider, tmp_path))
