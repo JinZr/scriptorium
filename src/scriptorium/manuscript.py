@@ -153,7 +153,7 @@ class ManuscriptManager:
     def _source_dependencies(
         self, root: Path, relative: Path, graphics_paths: list[Path], bibliography_fallback: Path
     ) -> Iterator[Path]:
-        text = self._strip_comments((root / relative).read_text(encoding="utf-8"))
+        text = self._dependency_text((root / relative).read_text(encoding="utf-8"))
         commands = sorted(
             (match.start(), kind, match)
             for kind, pattern in (
@@ -425,17 +425,31 @@ class ManuscriptManager:
         raise InfrastructureError(f"Referenced manuscript file is missing: {dependency}")
 
     @staticmethod
-    def _strip_comments(text: str) -> str:
-        stripped = []
-        for line in text.splitlines():
-            consecutive_backslashes = 0
-            for index, character in enumerate(line):
-                if character == "\\":
-                    consecutive_backslashes += 1
-                    continue
-                if character == "%" and consecutive_backslashes % 2 == 0:
-                    line = line[:index]
-                    break
-                consecutive_backslashes = 0
-            stripped.append(line)
-        return "\n".join(stripped)
+    def _dependency_text(text: str) -> str:
+        # Consume control symbols in pairs so a line break cannot start a command.
+        token_pattern = re.compile(r"%[^\n]*|\\(?:[A-Za-z@]+\*?|[^\n])")
+        parts = []
+        position = 0
+        while match := token_pattern.search(text, position):
+            parts.append(text[position : match.start()])
+            token = match.group()
+            end = match.end()
+            replacement = token
+            if token.startswith("%") or not token[1].isalpha():
+                replacement = " "
+            elif token in {r"\verb", r"\verb*"}:
+                literal = re.match(r"([^\n])[^\n]*?\1", text[end:])
+                if literal:
+                    end += literal.end()
+                    replacement = " "
+            elif token == r"\begin":
+                environment = re.match(r"\s*\{(verbatim\*?)\}", text[end:])
+                if environment:
+                    terminator = rf"\end{{{environment.group(1)}}}"
+                    closing = text.find(terminator, end + environment.end())
+                    end = len(text) if closing == -1 else closing + len(terminator)
+                    replacement = " "
+            parts.append(replacement)
+            position = end
+        parts.append(text[position:])
+        return "".join(parts)

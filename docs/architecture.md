@@ -124,7 +124,9 @@ task.md
 
 The dependency scanner handles braced `\input`/`\include`, unbraced literal
 `\input supplement.tex` (also without the `.tex` suffix), bibliography commands,
-and `\includegraphics`/`\includegraphics*` with an optional argument. Literal
+and `\includegraphics`/`\includegraphics*` with an optional argument. Command
+matching skips comments, escaped control symbols, standard `verbatim`/`verbatim*`
+environments, and inline `\verb`/`\verb*` literals. Literal
 `\graphicspath{{figures/}{plots/}}` declarations are applied in source order,
 including declarations in input files. An empty declaration clears that search
 path. Paths are relative to the snapshot root, matching the build working
@@ -134,8 +136,9 @@ graphics directories, and that fallback for each extension. All resolved paths
 must stay inside the snapshot and satisfy the bundle's forbidden-path rules.
 
 This is a static scanner, not a TeX interpreter: macro-generated filenames,
-conditional execution, group-local path changes, and repeated inputs evaluated
-under different graphics paths are outside its supported scope. Macro-based
+custom verbatim environments, conditional execution, group-local path changes,
+and repeated inputs evaluated under different graphics paths are outside its
+supported scope. Macro-based
 `\graphicspath` declarations fail explicitly. A successful static scan is not
 proof of complete compiler-input coverage. Scanner fixes apply to newly created
 runs; existing runs retain their frozen source lists and must be restarted as a

@@ -46,6 +46,24 @@ from scriptorium.manuscript import ManuscriptManager
             {"figure.png": "", "figures/figure.pdf": ""},
             {"main.tex", "figures/figure.pdf"},
         ),
+        (r"row\\input data", {}, {"main.tex"}),
+        ("row\\\\\\input kept\n", {"kept.tex": "Included."}, {"main.tex", "kept.tex"}),
+        (
+            "\\begin{verbatim}\n\\input missing\n% \\end{verbatim}\n\\input kept\n",
+            {"kept.tex": "Included.", "missing.tex": "Unrelated namesake."},
+            {"main.tex", "kept.tex"},
+        ),
+        (
+            "\\begin{verbatim*}\n\\input missing\n\\end{verbatim*}\n\\input kept\n",
+            {"kept.tex": "Included."},
+            {"main.tex", "kept.tex"},
+        ),
+        (
+            r"\verb|\input missing| \verb*+\input missing+ \verb%\input missing% \verb|% \input missing|"
+            "\n\\input kept\n",
+            {"kept.tex": "Included."},
+            {"main.tex", "kept.tex"},
+        ),
     ],
     ids=[
         "root-precedence",
@@ -54,6 +72,11 @@ from scriptorium.manuscript import ManuscriptManager
         "graphicspath-order",
         "graphics-root",
         "graphics-extension",
+        "escaped-input",
+        "input-after-linebreak",
+        "verbatim",
+        "verbatim-star",
+        "inline-verb",
     ],
 )
 def test_scanned_sources_match_compiler_inputs(

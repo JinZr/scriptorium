@@ -182,3 +182,61 @@ def test_macro_graphicspath_is_explicitly_unsupported(tmp_path: Path, declaratio
     (tmp_path / "main.tex").write_text(declaration)
     with pytest.raises(InfrastructureError, match="Only literal"):
         ManuscriptManager(tmp_path).scan_sources(tmp_path, "main.tex")
+
+
+@pytest.mark.parametrize("backslashes", [1, 2, 3, 4, 5, 6])
+@pytest.mark.parametrize(
+    "command,dependency",
+    [
+        ("input kept", "kept.tex"),
+        ("include{kept}", "kept.tex"),
+        ("includegraphics*{kept.pdf}", "kept.pdf"),
+        ("bibliography{kept}", "kept.bib"),
+        ("addbibresource{kept.bib}", "kept.bib"),
+    ],
+)
+def test_dependency_commands_respect_backslash_parity(
+    tmp_path: Path, backslashes: int, command: str, dependency: str
+) -> None:
+    (tmp_path / "main.tex").write_text("row" + "\\" * backslashes + command + "\n")
+    (tmp_path / dependency).write_text("Kept.")
+    sources = ManuscriptManager(tmp_path).scan_sources(tmp_path, "main.tex")
+    expected = {"main.tex", dependency} if backslashes % 2 else {"main.tex"}
+    assert {source.path for source in sources} == expected
+
+
+@pytest.mark.parametrize(
+    "literal",
+    [
+        "\\begin{verbatim}\n\\input missing\n% \\end{verbatim}\n",
+        "\\begin{verbatim*}\n\\input missing\n\\end{verbatim*}\n",
+        r"\verb|\input missing|",
+        r"\verb*+\input missing+",
+        r"\verb%\input missing%",
+        r"\verb|% \input missing|",
+        r"\verb|\begin{verbatim}|",
+        "% \\begin{verbatim}\n",
+        r"\\begin{verbatim}",
+    ],
+)
+def test_literal_regions_do_not_hide_following_dependencies(tmp_path: Path, literal: str) -> None:
+    (tmp_path / "main.tex").write_text(literal + "\n\\input kept\n")
+    (tmp_path / "kept.tex").write_text("Kept.")
+    sources = ManuscriptManager(tmp_path).scan_sources(tmp_path, "main.tex")
+    assert {source.path for source in sources} == {"main.tex", "kept.tex"}
+
+
+def test_verbatim_does_not_modify_graphics_paths(tmp_path: Path) -> None:
+    (tmp_path / "figures").mkdir()
+    (tmp_path / "figures/kept.pdf").write_bytes(b"graphic")
+    (tmp_path / "main.tex").write_text(
+        "\\graphicspath{{figures/}}\n"
+        "\\begin{verbatim}\n"
+        "\\graphicspath{{../forbidden/}}\n"
+        "\\includegraphics*{missing}\n"
+        "\\bibliography{missing}\n"
+        "\\end{verbatim}\n"
+        "\\includegraphics{kept}\n"
+    )
+    sources = ManuscriptManager(tmp_path).scan_sources(tmp_path, "main.tex")
+    assert {source.path for source in sources} == {"main.tex", "figures/kept.pdf"}
