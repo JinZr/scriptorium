@@ -239,3 +239,9 @@ python -m pytest -m live_harness tests/live/test_native_harnesses.py
 Setting a model name alone does not opt in. Regular CI must not set any `SCRIPTORIUM_LIVE_*` enable switch. Each enabled case attempts two paid turns, each with a 300-second cancellation timeout; that timeout is not a billing limit.
 
 Per-turn reports and raw traces are retained in `evidence/` under the pytest test temporary directory, alongside the generated bundle and native session directory. Reports include the prompt/schema, requested and returned SDK/model/provider metadata, normalized token usage, elapsed time, and before/after workspace digests. Invocation exceptions retain their class and requested metadata, without fabricating a result or trace. Use pytest's `--basetemp` with a dedicated disposable directory if a known output location is needed (pytest clears that directory at startup). Treat the evidence as local diagnostic data. These tests are retrieval checks, not reviewer recall benchmarks or proof of complete manuscript coverage.
+
+## Navigation recovery
+
+New run bundles contain `navigation.json`. Use its source locations to find relevant sections, references, captions, and graphics, then inspect the source or rendered page using `source-map.json`. A single graphics candidate is a navigation hint; the index does not establish which PDF page contains it or prove the visual claim.
+
+A run created before navigation was introduced continues with its frozen prompts and bundle. Start a new run to use the new navigation and retrieval procedure. For new runs, a crash during initial preparation resumes using the saved base index even after an indexer upgrade. A completed verification bundle reuses the index bound to its patched sources. Missing, corrupt, or mismatched completed indexes stop execution; do not manually repair `.scriptorium/` or copy in a freshly generated index. Start a new run after resolving the underlying storage problem.

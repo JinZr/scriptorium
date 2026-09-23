@@ -33,3 +33,13 @@ fixtures, native access evidence, and harness reporting without credentials.
 `live/test_native_harnesses.py` owns the opt-in, paid Codex, Claude Code, and
 Antigravity retrieval/resume checks. Default skips are not capability passes;
 see `docs/operations.md` for opt-in switches and evidence retention.
+
+`manuscript/test_navigation.py` checks deterministic literal navigation and exact
+source locations. `workflow/test_navigation.py` covers frozen preparation recovery,
+old-run identity, and rejection of damaged or stale base/patched navigation before
+provider invocation. These offline checks do not measure model retrieval quality.
+
+`manuscript/fixtures/retrieval_cases.json` holds small clean, supplementary-counterexample,
+and cross-section-contradiction cases for later paired retrieval evaluation. Expected
+issue counts are evaluation annotations outside the manuscript files. Offline tests
+only check source/navigation reachability, not whether a model detects the intended issue.

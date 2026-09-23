@@ -220,6 +220,68 @@ class ManuscriptManager:
                     fallback=bibliography_fallback if kind in {"bibliography", "addbibresource"} else None,
                 )
 
+    def create_navigation(self, snapshot: Path, sources: tuple[SourceFile, ...]) -> str:
+        entries = []
+        for source in sorted(sources, key=lambda item: item.path):
+            if Path(source.path).suffix.lower() not in {".tex", ".ltx"}:
+                continue
+            text = (snapshot / source.path).read_text(encoding="utf-8")
+            masked = self._dependency_text(text, preserve_positions=True)
+            for command, start, end, value in self._navigation_commands(masked):
+                value = text[end - 1 - len(value) : end - 1]
+                entry = {
+                    "command": command,
+                    "source_path": source.path,
+                    "start_line": text.count("\n", 0, start) + 1,
+                    "end_line": text.count("\n", 0, end - 1) + 1,
+                    "value": value.strip(),
+                }
+                if command == "includegraphics":
+                    candidates = self._navigation_graphics(value.strip(), sources)
+                    entry["candidate_paths"] = candidates
+                    entry["target_path"] = candidates[0] if len(candidates) == 1 else None
+                entries.append(entry)
+        return (
+            json.dumps(
+                {
+                    "sources": [asdict(source) for source in sorted(sources, key=lambda item: item.path)],
+                    "entries": entries,
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+                indent=2,
+            )
+            + "\n"
+        )
+
+    @staticmethod
+    def _navigation_commands(text: str) -> Iterator[tuple[str, int, int, str]]:
+        pattern = re.compile(
+            r"\\(part|chapter|section|subsection|subsubsection|paragraph|subparagraph|"
+            r"label|ref|eqref|pageref|autoref|cref|Cref|cite|citep|citet|autocite|parencite|textcite|"
+            r"caption|includegraphics)\*?(?![A-Za-z@])(?:\s*\[[^\]]*\]){0,2}\s*\{"
+        )
+        for match in pattern.finditer(text):
+            depth = 1
+            end = match.end()
+            while end < len(text) and depth:
+                depth += (text[end] == "{") - (text[end] == "}")
+                end += 1
+            if depth == 0:
+                yield match.group(1), match.start(), end, text[match.end() : end - 1]
+
+    @staticmethod
+    def _navigation_graphics(value: str, sources: tuple[SourceFile, ...]) -> list[str]:
+        if not value or "\\" in value or Path(value).is_absolute() or ".." in Path(value).parts:
+            return []
+        names = {value + suffix for suffix in GRAPHICS_EXTENSIONS}
+        # Only offer frozen candidates; graphicspath state and TeX expansion are not inferred here.
+        return sorted(
+            source.path
+            for source in sources
+            if any(source.path == name or source.path.endswith("/" + name) for name in names)
+        )
+
     def build(self, workspace: Path, manuscript: ManuscriptConfig) -> BuildResult:
         workspace = workspace.resolve()
         for path in workspace.rglob("*"):
@@ -537,6 +599,7 @@ class ManuscriptManager:
         sources: tuple[SourceFile, ...],
         pdf_path: Path,
         anchor_contract: EvidenceAnchorContract,
+        navigation: str | None = None,
     ) -> ManuscriptBundle:
         if destination.exists():
             shutil.rmtree(destination)
@@ -608,6 +671,9 @@ class ManuscriptManager:
                 ],
             ),
         )
+        if navigation is not None:
+            (destination / "navigation.json").write_text(navigation, encoding="utf-8")
+            manifest["navigation_digest"] = sha256(navigation.encode("utf-8")).hexdigest()
         manifest_path = destination / "manifest.json"
         manifest_temporary = destination / ".manifest.json.tmp"
         manifest_temporary.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
@@ -740,7 +806,7 @@ class ManuscriptManager:
         raise InfrastructureError(f"Referenced manuscript file is missing: {dependency}")
 
     @staticmethod
-    def _dependency_text(text: str) -> str:
+    def _dependency_text(text: str, *, preserve_positions: bool = False) -> str:
         # Consume control symbols in pairs so a line break cannot start a command.
         token_pattern = re.compile(r"%[^\n]*|\\(?:[A-Za-z@]+\*?|[^\n])")
         parts = []
@@ -764,6 +830,8 @@ class ManuscriptManager:
                     closing = text.find(terminator, end + environment.end())
                     end = len(text) if closing == -1 else closing + len(terminator)
                     replacement = " "
+            if preserve_positions and replacement == " ":
+                replacement = "".join("\n" if char == "\n" else " " for char in text[match.start() : end])
             parts.append(replacement)
             position = end
         parts.append(text[position:])

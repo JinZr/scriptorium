@@ -1,0 +1,56 @@
+[
+  {
+    "name": "clean",
+    "expected_material_issues": 0,
+    "files": {
+      "main.tex": "\\section{Results}\nAll 120 enrolled participants were analyzed.\n\\input{supplement}\n",
+      "supplement.tex": "\\section{Analysis population}\\label{sec:supp}\nAll 120 enrolled participants had complete data and were analyzed.\n"
+    },
+    "relevant_locations": [
+      {
+        "source_path": "main.tex",
+        "start_line": 2
+      },
+      {
+        "source_path": "supplement.tex",
+        "start_line": 2
+      }
+    ]
+  },
+  {
+    "name": "supplement_explains",
+    "expected_material_issues": 0,
+    "files": {
+      "main.tex": "\\section{Results}\nWe enrolled 120 participants; see \\ref{sec:supp} for the analysis population.\n\\input{supplement}\n",
+      "supplement.tex": "\\section{Analysis population}\\label{sec:supp}\nTwo participants had missing outcomes; 118 were analyzed.\n"
+    },
+    "relevant_locations": [
+      {
+        "source_path": "main.tex",
+        "start_line": 2
+      },
+      {
+        "source_path": "supplement.tex",
+        "start_line": 2
+      }
+    ]
+  },
+  {
+    "name": "cross_section_contradiction",
+    "expected_material_issues": 1,
+    "files": {
+      "main.tex": "\\section{Results}\nAll 120 enrolled participants were analyzed without exclusions.\n\\input{supplement}\n",
+      "supplement.tex": "\\section{Analysis population}\\label{sec:supp}\nThe same primary analysis includes 118 participants; no participants were excluded and no outcomes were missing.\n"
+    },
+    "relevant_locations": [
+      {
+        "source_path": "main.tex",
+        "start_line": 2
+      },
+      {
+        "source_path": "supplement.tex",
+        "start_line": 2
+      }
+    ]
+  }
+]

@@ -123,6 +123,7 @@ class Armarius:
             profile,
             sources,
             (snapshot / "scriptorium.toml").read_text(encoding="utf-8"),
+            self.manuscript.create_navigation(snapshot, sources),
         )
         run = Run(
             id=run_id,
@@ -242,6 +243,7 @@ class Armarius:
         run = self.database.get_run(run_id)
         contract = self._evidence_anchor_contract_for_run(run, allow_missing=False)
         assert contract is not None
+        self._navigation_for_run(run)
         return contract
 
     def _evidence_anchor_contract_for_run(
@@ -330,12 +332,15 @@ class Armarius:
             sources,
             build.pdf_path,
             self.require_evidence_anchor_contract(run.id),
+            self._navigation_for_run(run),
         )
         self._record_file(snapshot / "scriptorium.toml", "application/toml")
         for source in sources:
             self._record_file(snapshot / source.path, "application/octet-stream")
         self._record_file(bundle.workspace / "manifest.json", "application/json")
         self._record_file(bundle.workspace / "source-map.json", "application/json")
+        if "navigation" in run.frozen_config:
+            self._record_file(bundle.workspace / "navigation.json", "application/json")
         for page in sorted((bundle.workspace / "pages").glob("page-*.png")):
             self._record_file(page, "image/png")
         manifest = {
@@ -657,21 +662,32 @@ class Armarius:
             for path in metadata_paths
         )
         if verification_workspace.exists() and (unsafe_metadata or all(path.is_file() for path in metadata_paths)):
-            verification_bundle = self._load_bundle(verification_workspace, anchor_contract)
+            verification_bundle = self._load_bundle(
+                verification_workspace, anchor_contract, navigation_required="navigation" in run.frozen_config
+            )
         else:
             build = self._build_copy(
                 patched,
                 self._run_dir(run.id) / "build" / f"verification-{patch.id}",
                 self._manuscript_config(run),
             )
+            patched_sources = self.manuscript.scan_sources(patched, self._manuscript_config(run).main)
+            navigation = (
+                self.manuscript.create_navigation(patched, patched_sources)
+                if "navigation" in run.frozen_config
+                else None
+            )
             verification_bundle = self.manuscript.create_bundle(
                 patched,
                 verification_workspace,
                 FrozenRevision(run.commit_sha, run.tree_sha),
-                self.manuscript.scan_sources(patched, self._manuscript_config(run).main),
+                patched_sources,
                 build.pdf_path,
                 anchor_contract,
+                navigation,
             )
+        if "navigation" in run.frozen_config:
+            self._record_file(verification_workspace / "navigation.json", "application/json")
         confirmed = self.database.list_findings(run.id, [FindingStatus.CONFIRMED])
         route = self._route_for_run(run, AgentRole.VERIFICATION, route_override)
         prompt = self._verification_prompt(run, patch, confirmed)
@@ -1710,6 +1726,7 @@ class Armarius:
         profile: str,
         sources: tuple[SourceFile, ...],
         project_config_text: str,
+        navigation: str,
     ) -> dict[str, Any]:
         anchor_contract = DEFAULT_EVIDENCE_ANCHOR_CONTRACT
         anchor_content = evidence_anchor_contract_content(anchor_contract)
@@ -1758,6 +1775,7 @@ class Armarius:
             "prompts": prompts,
             "schemas": schemas,
             "sources": [asdict(source) for source in sources],
+            "navigation": self._content_record(navigation),
             "evidence_anchor_contract": {
                 "digest": anchor_digest,
                 "content": anchor_content,
@@ -1919,12 +1937,48 @@ class Armarius:
     def _max_concurrency(self, run: Run) -> int:
         return int(run.frozen_config["local"]["max_concurrency"])
 
+    @staticmethod
+    def _navigation_for_run(run: Run) -> str | None:
+        if "navigation" not in run.frozen_config:
+            return None
+        try:
+            record = run.frozen_config["navigation"]
+            content = record["content"]
+            if record["digest"] != ArtifactStore.digest_bytes(content.encode("utf-8")):
+                raise ValueError("digest mismatch")
+            if json.loads(content)["sources"] != sorted(run.frozen_config["sources"], key=lambda item: item["path"]):
+                raise ValueError("source set mismatch")
+            return content
+        except (AttributeError, KeyError, TypeError, ValueError) as exc:
+            raise InfrastructureError(f"run {run.id} has corrupt frozen navigation") from exc
+
+    @classmethod
+    def _validate_navigation(cls, workspace, manifest, sources, required, expected_digest):
+        if not required:
+            return
+        path = workspace / "navigation.json"
+        cls._require_regular_bundle_file(path)
+        try:
+            data = path.read_bytes()
+            digest = ArtifactStore.digest_bytes(data)
+            if digest != manifest["navigation_digest"] or (expected_digest is not None and digest != expected_digest):
+                raise ValueError("digest mismatch")
+            if json.loads(data)["sources"] != [
+                asdict(source) for source in sorted(sources, key=lambda item: item.path)
+            ]:
+                raise ValueError("source set mismatch")
+        except (KeyError, OSError, TypeError, ValueError) as exc:
+            raise InfrastructureError(f"bundle navigation is missing or corrupt: {workspace}") from exc
+
     def _bundle_for_run(self, run: Run, *, allow_legacy: bool = False) -> ManuscriptBundle:
         contract = self._evidence_anchor_contract_for_run(run, allow_missing=allow_legacy)
+        navigation = self._navigation_for_run(run)
         return self._load_bundle(
             self._run_dir(run.id) / "bundle",
             contract,
             allow_legacy=allow_legacy and contract is None,
+            navigation_required="navigation" in run.frozen_config,
+            navigation_digest=self._content_record(navigation)["digest"] if navigation is not None else None,
         )
 
     @classmethod
@@ -1934,6 +1988,8 @@ class Armarius:
         contract: EvidenceAnchorContract | None,
         *,
         allow_legacy: bool = False,
+        navigation_required: bool = False,
+        navigation_digest: str | None = None,
     ) -> ManuscriptBundle:
         if workspace.is_symlink() or not workspace.is_dir():
             raise InfrastructureError(f"bundle workspace is missing or unsafe: {workspace}")
@@ -1949,6 +2005,7 @@ class Armarius:
             page_records = list(manifest["pages"])
         except (KeyError, OSError, TypeError, UnicodeDecodeError, ValueError) as exc:
             raise InfrastructureError(f"bundle metadata is invalid: {workspace}") from exc
+        cls._validate_navigation(workspace, manifest, sources, navigation_required, navigation_digest)
         if pdf_pages < 1 or len(page_records) != pdf_pages:
             raise InfrastructureError(f"bundle page render is incomplete: {workspace}")
 
@@ -2155,7 +2212,8 @@ class Armarius:
         return self.database.record_artifact(artifact)
 
     def _prompt_record(self, role: AgentRole) -> dict[str, str]:
-        content = self._load_prompt(role)
+        retrieval = resources.files("scriptorium").joinpath("prompts", "retrieval.md").read_text(encoding="utf-8")
+        content = self._load_prompt(role).rstrip() + "\n\n" + retrieval
         return self._content_record(content)
 
     @staticmethod
