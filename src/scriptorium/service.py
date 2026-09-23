@@ -35,7 +35,8 @@ from .domain import (
 )
 from .errors import ConfigurationError, InfrastructureError, NotFoundError, StateError
 from .manuscript import ManuscriptManager
-from .runtime import RUNTIME_SDK_VERSIONS
+from .runtime import RUNTIME_SDK_VERSIONS, RuntimeUnavailable
+from .runtime.codex_preflight import codex_startup_preflight
 from .storage import ConflictError, Database, NotFoundError as StorageNotFoundError, StorageError
 from .workflow import Armarius, RuntimeFactory
 
@@ -308,31 +309,7 @@ class ScriptoriumService:
                 check("model_routes", False, str(exc), "configuration")
             else:
                 check("model_routes", True, f"profile {selected_profile}")
-        package_names = {
-            "codex": "openai-codex",
-            "claude_code": "claude-agent-sdk",
-            "antigravity": "google-antigravity",
-        }
-        for runtime_name in sorted(selected_runtimes):
-            package_name = package_names[runtime_name]
-            check_name = "codex_sdk" if runtime_name == "codex" else f"runtime_{runtime_name}_sdk"
-            try:
-                version = metadata.version(package_name)
-                expected = RUNTIME_SDK_VERSIONS[runtime_name]
-                ok = version == expected
-                message = version if ok else f"expected {expected}, found {version}"
-            except metadata.PackageNotFoundError:
-                ok = False
-                message = f"{package_name} is not installed"
-            check(check_name, ok, message, "infrastructure")
-        if "antigravity" in selected_runtimes:
-            antigravity_auth_ok = bool(os.environ.get("GEMINI_API_KEY", "").strip())
-            check(
-                "antigravity_auth",
-                antigravity_auth_ok,
-                "GEMINI_API_KEY is set" if antigravity_auth_ok else "GEMINI_API_KEY is not set",
-                "infrastructure",
-            )
+        _check_runtime_dependencies(selected_runtimes, check)
         check("sqlite", True, str(self.state_dir / "state.sqlite3"))
 
         failed = [item for item in checks if not item["ok"]]
@@ -1138,3 +1115,38 @@ def _plain(value: Any) -> Any:
     if isinstance(value, Path):
         return str(value)
     return value
+
+
+def _check_runtime_dependencies(selected_runtimes: set[str], check: Callable[[str, bool, str, str], None]) -> None:
+    package_names = {
+        "codex": "openai-codex",
+        "claude_code": "claude-agent-sdk",
+        "antigravity": "google-antigravity",
+    }
+    for runtime_name in sorted(selected_runtimes):
+        package_name = package_names[runtime_name]
+        check_name = "codex_sdk" if runtime_name == "codex" else f"runtime_{runtime_name}_sdk"
+        try:
+            version = metadata.version(package_name)
+            expected = RUNTIME_SDK_VERSIONS[runtime_name]
+            ok = version == expected
+            message = version if ok else f"expected {expected}, found {version}"
+        except metadata.PackageNotFoundError:
+            ok = False
+            message = f"{package_name} is not installed"
+        check(check_name, ok, message, "infrastructure")
+        if runtime_name == "codex" and ok:
+            try:
+                message = codex_startup_preflight()
+            except RuntimeUnavailable as exc:
+                check("codex_startup", False, str(exc), "infrastructure")
+            else:
+                check("codex_startup", True, message, "infrastructure")
+    if "antigravity" in selected_runtimes:
+        antigravity_auth_ok = bool(os.environ.get("GEMINI_API_KEY", "").strip())
+        check(
+            "antigravity_auth",
+            antigravity_auth_ok,
+            "GEMINI_API_KEY is set" if antigravity_auth_ok else "GEMINI_API_KEY is not set",
+            "infrastructure",
+        )

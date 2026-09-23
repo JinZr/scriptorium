@@ -80,7 +80,7 @@ reason = "Attempt execution, correction, and durable completion must preserve li
 [[tool.scriptorium_complexity.debt]]
 path = "src/scriptorium/service.py"
 function = "ScriptoriumService.doctor"
-cap = 38
+cap = 34
 reason = "Preflight checks share dependency and diagnostic ordering."
 
 [[tool.scriptorium_complexity.debt]]

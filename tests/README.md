@@ -22,3 +22,8 @@ coverage gate without provider calls.
 `manuscript/test_build_helpers.py` covers pre-build link containment and native
 BibTeX/Biber/EPS helper evidence. The LaTeX CI job installs bibliography tools
 and EPS conversion dependencies and runs these cases on Python 3.10.
+
+`runtime/codex/test_preflight.py` includes a real, uncredentialed startup/config
+probe of the pinned bundled binary. It does not invoke a model and runs in the
+ordinary test suite. The same package owns process cleanup, output redaction,
+and synthetic native protocol fixtures. Paid retrieval tests remain under `live/`.

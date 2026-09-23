@@ -112,3 +112,10 @@ Input and output totals are priced once. Cached input and reasoning output remai
 Scriptorium checks recorded estimated cost before starting each new task. A task already in progress can make the estimate slightly exceed the requested budget, after which the run enters `waiting_budget`.
 
 This is a local scheduling gate and audit estimate, not a provider-level billing cap.
+
+For Codex, doctor additionally checks the bundled native process can initialize
+and read synthetic configuration in a temporary, credential-free home. The
+`codex_startup` diagnostic is not authentication or route validation: selected
+provider settings and existing native sessions are not read or changed by the
+probe. This does not change start/resume configuration or frozen run metadata.
+See [operations](operations.md) for the timeout, cleanup, and acceptance boundary.

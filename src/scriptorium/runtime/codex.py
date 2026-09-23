@@ -608,3 +608,33 @@ def _optional_string(value: Any) -> str | None:
 
 def _optional_int(value: Any) -> int | None:
     return None if value is None else int(value)
+
+
+def probe_native_configuration() -> None:
+    sdk = import_module("openai_codex")
+    client_sdk = import_module("openai_codex.client")
+    models = import_module("openai_codex.generated.v2_all")
+
+    if sdk.__version__ != CODEX_SDK_VERSION:
+        raise RuntimeError("SDK version mismatch")
+    expected = {
+        "model": "scriptorium-preflight",
+        "model_provider": "scriptorium_preflight",
+        "model_reasoning_effort": "high",
+        "sandbox_mode": "read-only",
+        "approval_policy": "never",
+        "web_search": "disabled",
+        "cli_auth_credentials_store": "file",
+        "project_root_markers": ["manifest.json"],
+    }
+    overrides = tuple(f"{key}={json.dumps(value)}" for key, value in expected.items()) + (
+        'model_providers.scriptorium_preflight={name="Preflight",'
+        'base_url="http://127.0.0.1:9",wire_api="responses",requires_openai_auth=false}',
+        "check_for_update_on_startup=false",
+    )
+    with client_sdk.CodexClient(sdk.CodexConfig(cwd=str(Path.cwd()), config_overrides=overrides)) as client:
+        client.initialize()
+        response = client.request("config/read", {"includeLayers": False}, response_model=models.ConfigReadResponse)
+        actual = response.config.model_dump(mode="json", by_alias=True)
+        if any(actual.get(key) != value for key, value in expected.items()):
+            raise RuntimeError("Native configuration differs from probe overrides")

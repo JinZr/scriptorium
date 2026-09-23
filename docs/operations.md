@@ -40,6 +40,24 @@ new run to obtain current coverage evidence. No historical bundle is rewritten.
 
 The compile preflight has the same trust boundary as a run: LaTeX executes the selected committed manuscript with the configured engine. It is not a TeX sandbox. Doctor also checks SQLite, the selected profile, routes, budget pricing, and each referenced native SDK at its pinned version. Antigravity requires `GEMINI_API_KEY`; Claude Code login or API authentication remains the responsibility of an explicitly enabled live smoke test.
 
+When Codex is selected and its SDK version matches, doctor also runs
+`codex_startup`: a bounded, no-model probe of the pinned SDK's bundled app-server.
+It initializes the protocol and reads synthetic configuration in a disposable
+home, with no inherited user configuration or credential environment. It never
+starts or resumes a thread, logs in, refreshes credentials, or submits a turn.
+Startup-generated native databases stay inside the temporary directory and are
+removed afterwards; timeout or interruption also terminates the process group.
+Raw native output is suppressed. A startup/configuration failure or the
+30-second deadline is an infrastructure failure (exit code 3).
+
+Passing this check establishes only native startup and acceptance of the probe's
+configuration overrides. It does **not** validate the selected provider endpoint,
+user settings, authentication, model availability, file/image retrieval, or
+historical session recovery. Real review workers still use their existing native
+home and configuration, and existing runs and sessions are unchanged. Full worker
+configuration isolation requires a separate authentication and session-compatibility
+change; a temporary probe home is not permission to migrate historical sessions.
+
 `--revision` defaults to `HEAD`, but HEAD can move between doctor and `run start`. Pass the same explicit commit to both commands when exact equivalence matters:
 
 ```bash

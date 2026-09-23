@@ -53,6 +53,7 @@ Runtime-native session state stays under the stable run session directory, outsi
 - `domain`: entities, enums, invariants, and state transitions.
 - `runtime/base.py`: runtime-neutral DTOs and `AgentRuntime`.
 - `runtime/codex.py`: the Codex adapter.
+- `runtime/codex_preflight.py`: bounded, credential-free native startup diagnostics for doctor; no thread or model invocation.
 - `runtime/claude_code.py` and `runtime/antigravity.py`: optional, lazily imported native harness adapters.
 - `workflow`: the deterministic `Armarius` scheduler, budgets, recovery, approval gates, and release gate.
 - `storage`: `sqlite3` migrations, transactions, and queries.

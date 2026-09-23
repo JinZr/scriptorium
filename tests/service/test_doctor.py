@@ -88,6 +88,7 @@ def make_repository(
 
 
 def prepare_doctor(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("scriptorium.service.codex_startup_preflight", lambda: "synthetic startup passed")
     system_which = shutil.which
     monkeypatch.setattr(
         "scriptorium.service.shutil.which",
@@ -101,6 +102,9 @@ def test_doctor_checks_only_selected_native_runtime(
 ) -> None:
     repo = make_repository(tmp_path, "claude_code", "anthropic")
     prepare_doctor(monkeypatch)
+    monkeypatch.setattr(
+        "scriptorium.service.codex_startup_preflight", lambda: pytest.fail("unselected Codex probe ran")
+    )
     requested_packages: list[str] = []
 
     def version(package: str) -> str:
@@ -346,6 +350,7 @@ def test_doctor_skips_compile_when_latex_tool_is_missing(
     failed_check: str,
 ) -> None:
     repo = make_repository(tmp_path, "codex", "openai")
+    monkeypatch.setattr("scriptorium.service.codex_startup_preflight", lambda: "synthetic startup passed")
     system_which = shutil.which
     monkeypatch.setattr(
         "scriptorium.service.shutil.which",
@@ -471,3 +476,34 @@ def test_doctor_reports_compiler_source_omission(tmp_path, monkeypatch):
     check = next(item for item in result["checks"] if item["name"] == "manuscript_compile")
     assert not check["ok"]
     assert "hidden.tex" in check["message"]
+
+
+@pytest.mark.parametrize("sdk_version,fails", [("0.144.4", False), ("0.144.4", True), ("wrong", False)])
+def test_doctor_codex_startup_is_selected_version_gated_and_infrastructure_failure(
+    tmp_path, monkeypatch, sdk_version, fails
+):
+    from scriptorium.runtime.base import RuntimeUnavailable
+
+    repo = make_repository(tmp_path, "codex", "openai")
+    prepare_doctor(monkeypatch)
+    monkeypatch.setattr("scriptorium.service.metadata.version", lambda package: sdk_version)
+    calls = []
+
+    def probe():
+        calls.append("probe")
+        if fails:
+            raise RuntimeUnavailable("native startup failed")
+        return "startup passed; authentication unverified"
+
+    monkeypatch.setattr("scriptorium.service.codex_startup_preflight", probe)
+    with ScriptoriumService(repo, manuscript_manager=DoctorManuscriptManager(repo)) as service:
+        result = service.doctor()
+        assert service.database.list_runs() == []
+    startup = [check for check in result["checks"] if check["name"] == "codex_startup"]
+    if sdk_version == "wrong":
+        assert calls == [] and startup == []
+        assert result["exit_code"] == 3
+    else:
+        assert calls == ["probe"]
+        assert startup[0]["ok"] is not fails
+        assert result["exit_code"] == (3 if fails else 0)
