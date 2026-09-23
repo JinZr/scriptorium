@@ -116,8 +116,31 @@ Use the non-mutating checks for CI and final verification:
 python -m isort --check-only .
 python -m black --check .
 python -m flake8 . --count --statistics
+python utils/check_complexity.py
 python -m pytest -q
 python -m build
 ```
+
+The complexity gate measures core functions and the checker itself with pinned
+McCabe semantics, independently of lint exclusions and `noqa`. The hard ceiling
+is 20; existing exceptions have exact score caps in `pyproject.toml`. Improved
+caps must be lowered, and resolved or deleted functions must leave the debt
+ledger. Body sizes above 80 AST statements and research-adapter complexity are
+advisory, not additional failure thresholds. A leading docstring is excluded;
+nested definitions count once in their enclosing body and are measured separately.
+
+To enforce historical debt constraints, supply the explicit PR base commit:
+
+```bash
+python utils/check_complexity.py --base BASE_COMMIT
+```
+
+PR CI uses its base SHA to reject new debt, cap increases, a raised hard ceiling,
+or narrowed scope. When introducing the policy for the first time, caps are
+bounded by actual base-source measurements. An unavailable base fails explicitly.
+Without `--base`, the command checks current scores and stale entries only;
+it cannot detect a simultaneous edit to a cap and its function. Neither mode
+executes base code or modifies source files. These checks are engineering limits,
+not proof of preserved workflow behavior or scientific review quality.
 
 Live native-harness smoke tests are skipped by default. They require an explicit per-runtime environment switch, a model name, and working native authentication; see [Operations and recovery](docs/operations.md#live-native-harness-smoke-tests).

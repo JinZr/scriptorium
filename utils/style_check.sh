@@ -9,3 +9,4 @@ cd "$REPO_ROOT"
 python -m isort .
 python -m black .
 python -m flake8 .
+python utils/check_complexity.py
