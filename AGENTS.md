@@ -94,6 +94,15 @@ version fields to the research dataset.
 - Put tests beside the behavior they own, following `tests/README.md`. Keep
   fakes and builders inside their owning test package.
 - Keep `pyproject.toml` authoritative for dependencies and tool configuration.
+- Run `utils/check_complexity.py` for the core complexity gate; use `--base`
+  with the PR base commit to enforce the debt ratchet. Thresholds, checked
+  paths, and per-function debt caps live in `pyproject.toml`. Do not raise
+  caps, add suppressions, or narrow scope to bypass the gate. Lower improved
+  caps and remove resolved entries in the same change.
+- Reduce complexity at coherent responsibility boundaries. Preserve validation
+  and event order, artifact bytes, transaction and lock boundaries, cancellation,
+  cleanup ownership, and session identity. Do not split code mechanically to
+  reduce a score; statement counts are advisory.
 - Update documentation when a public CLI, configuration, lifecycle, safety, or
   recovery contract changes.
 - Never place credentials in tracked files, manuscript bundles, SQLite, or
@@ -110,6 +119,7 @@ tests first, then validate in proportion to the change. The standard checks are:
 .venv/bin/python -m isort --check-only .
 .venv/bin/python -m black --check .
 .venv/bin/python -m flake8 . --count --statistics
+.venv/bin/python utils/check_complexity.py
 ```
 
 Run `.venv/bin/python -m build` when packaging, dependencies, package data, or

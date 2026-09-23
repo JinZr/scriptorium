@@ -31,6 +31,7 @@ dev = [
     "build>=1.2,<2",
     "flake8==7.3.0",
     "isort==5.13.2",
+    "mccabe==0.7.0",
     "pytest==9.0.3",
 ]
 
@@ -63,3 +64,45 @@ skip_gitignore = true
 markers = [
     "live_harness: paid, credentialed native harness integration smoke tests",
 ]
+
+[tool.scriptorium_complexity]
+max_complexity = 20
+statement_warning = 80
+paths = ["src/scriptorium", "utils/check_complexity.py"]
+advisory_paths = ["egs/peerreviewbench"]
+
+[[tool.scriptorium_complexity.debt]]
+path = "src/scriptorium/workflow.py"
+function = "Armarius._execute_task"
+cap = 43
+reason = "Attempt execution, correction, and durable completion must preserve lifecycle ordering."
+
+[[tool.scriptorium_complexity.debt]]
+path = "src/scriptorium/service.py"
+function = "ScriptoriumService.doctor"
+cap = 38
+reason = "Preflight checks share dependency and diagnostic ordering."
+
+[[tool.scriptorium_complexity.debt]]
+path = "src/scriptorium/runtime/contained.py"
+function = "ContainedAgentRuntime._invoke"
+cap = 29
+reason = "Worker ownership and cancellation cleanup must remain coordinated."
+
+[[tool.scriptorium_complexity.debt]]
+path = "src/scriptorium/runtime/antigravity.py"
+function = "AntigravityAgentRuntime._run"
+cap = 23
+reason = "Native session execution preserves cancellation and result normalization."
+
+[[tool.scriptorium_complexity.debt]]
+path = "src/scriptorium/runtime/claude_code.py"
+function = "ClaudeCodeAgentRuntime._run"
+cap = 22
+reason = "Native session execution preserves interruption and session persistence."
+
+[[tool.scriptorium_complexity.debt]]
+path = "src/scriptorium/workflow.py"
+function = "Armarius._load_bundle"
+cap = 22
+reason = "Bundle loading validates frozen source and page evidence before use."
