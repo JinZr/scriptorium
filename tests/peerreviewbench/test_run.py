@@ -449,7 +449,9 @@ def test_completed_benchmark_paper_is_not_repeated_on_resume(
     assert json.loads((run_dir / "run_manifest.json").read_text(encoding="utf-8"))["status"] == "complete"
 
 
-def test_shared_skill_change_invalidates_frozen_benchmark_sources(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_shared_skill_change_invalidates_frozen_benchmark_sources(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     for relative in benchmark_run.BENCHMARK_SOURCE_FILES:
         source = benchmark_run.REPOSITORY_ROOT / relative
         target = tmp_path / relative
