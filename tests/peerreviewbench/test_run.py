@@ -421,6 +421,7 @@ def test_completed_benchmark_paper_is_not_repeated_on_resume(
     source_paths = {item["path"] for item in initial["frozen_inputs"]["source_manifest"]}
     assert "egs/peerreviewbench/run.py" in source_paths
     assert "src/scriptorium/service.py" in source_paths
+    assert "skills/scriptorium/SKILL.md" in source_paths
 
     entry = initial["papers"]["9"]
     project = run_dir / entry["project_dir"]
@@ -446,6 +447,25 @@ def test_completed_benchmark_paper_is_not_repeated_on_resume(
     with pytest.raises(BenchmarkError, match="do not match the resumed run"):
         asyncio.run(run_benchmark(resume=run_dir, cache_root=cache_root))
     assert json.loads((run_dir / "run_manifest.json").read_text(encoding="utf-8"))["status"] == "complete"
+
+
+def test_shared_skill_change_invalidates_frozen_benchmark_sources(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    for relative in benchmark_run.BENCHMARK_SOURCE_FILES:
+        source = benchmark_run.REPOSITORY_ROOT / relative
+        target = tmp_path / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(source, target)
+    manifest = benchmark_run.source_manifest
+    monkeypatch.setattr(benchmark_run, "repository_commit", lambda: "unchanged-commit")
+    monkeypatch.setattr(benchmark_run, "source_manifest", lambda: manifest(tmp_path))
+    frozen = {
+        "scriptorium_commit": "unchanged-commit",
+        "source_manifest": manifest(tmp_path),
+    }
+    skill = tmp_path / "skills/scriptorium/SKILL.md"
+    skill.write_text(skill.read_text(encoding="utf-8") + "\nChanged reviewer instructions.\n", encoding="utf-8")
+    with pytest.raises(BenchmarkError, match="Benchmark source files changed"):
+        benchmark_run._validate_frozen_benchmark_sources(frozen)
 
 
 def test_corrupt_completed_artifact_stays_incomplete_across_resumes(tmp_path: Path) -> None:
