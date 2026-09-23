@@ -453,7 +453,20 @@ class ScriptoriumService:
             task.run_id,
             attempt.id,
             "read",
-            {"path": path, "lines": [item["line"] for item in pieces], "next_line": next_line},
+            {
+                "path": path,
+                "source_digest": source_digest,
+                "ranges": [
+                    {
+                        "line": item["line"],
+                        "start_offset": item["offset"],
+                        "end_offset": item["offset"] + len(item["text"]),
+                    }
+                    for item in pieces
+                ],
+                "next_line": next_line,
+                "next_offset": next_offset,
+            },
         )
         return {
             "path": path,

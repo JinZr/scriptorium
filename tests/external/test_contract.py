@@ -322,6 +322,27 @@ def test_search_paging_long_line_and_bundle_path_boundary(tmp_path: Path) -> Non
         assert read["next_line"] == 1 and read["next_offset"] == 8000
         continued = service.read_task(attempt_id, "supplement.tex", read["next_line"], 1, read["next_offset"], 8000)
         assert "counterevidence" in continued["lines"][0]["text"]
+        accesses = [
+            event.payload
+            for event in service.database.list_events(claim["task"].run_id)
+            if event.event_type == "tool.read"
+        ]
+        for response, access in zip((read, continued), accesses):
+            assert access["path"] == response["path"]
+            assert access["source_digest"] == response["source_digest"]
+            assert access["ranges"] == [
+                {
+                    "line": item["line"],
+                    "start_offset": item["offset"],
+                    "end_offset": item["offset"] + len(item["text"]),
+                }
+                for item in response["lines"]
+            ]
+            assert (access["next_line"], access["next_offset"]) == (
+                response["next_line"],
+                response["next_offset"],
+            )
+        assert accesses[0]["ranges"] != accesses[1]["ranges"]
         with pytest.raises(ConfigurationError, match="not a text source"):
             service.read_task(attempt_id, "../scriptorium.toml", 1, 1, 0, 8000)
 
