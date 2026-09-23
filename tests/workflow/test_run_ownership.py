@@ -129,3 +129,93 @@ def test_cancel_waits_for_in_progress_operation_then_invalidates_claim(tmp_path)
         assert finished.is_set()
         assert result["run"].status == RunStatus.CANCELLED
         assert service.database.get_attempt(review["attempt"].id).status.value == "interrupted"
+
+
+@pytest.mark.parametrize("operation", ["read", "search", "page"])
+def test_cancel_waits_for_retrieval_and_records_access_before_cancellation(tmp_path, monkeypatch, operation):
+    repo, run = _started(tmp_path)
+    entered = threading.Event()
+    release = threading.Event()
+    cancelled = threading.Event()
+    result = {}
+    with ScriptoriumService(repo, manuscript_manager=PdfBuildingManuscriptManager(repo)) as service:
+        review = claim(service, run.id, AgentRole.SUBSTANTIVE_REVIEW)
+        original = service.armarius._retrieval_bundle
+
+        def held_bundle(*args):
+            bundle = original(*args)
+            entered.set()
+            assert release.wait(5)
+            return bundle
+
+        monkeypatch.setattr(service.armarius, "_retrieval_bundle", held_bundle)
+        actions = {
+            "read": lambda: service.read_task(review["attempt"].id, "main.tex", 1, 1, 0, 100),
+            "search": lambda: service.search_task(review["attempt"].id, "result", "main.tex", 0, 1),
+            "page": lambda: service.page_task(review["attempt"].id, 1),
+        }
+
+        def retrieve():
+            result["retrieval"] = actions[operation]()
+
+        def cancel():
+            with ScriptoriumService(repo) as contender:
+                result["cancelled"] = contender.cancel_run(run.id, "stop after retrieval")["run"]
+            cancelled.set()
+
+        reader = threading.Thread(target=retrieve)
+        stopper = threading.Thread(target=cancel)
+        reader.start()
+        try:
+            assert entered.wait(5)
+            stopper.start()
+            assert not cancelled.wait(0.1)
+        finally:
+            release.set()
+            reader.join(timeout=5)
+            if stopper.ident is not None:
+                stopper.join(timeout=5)
+        assert result["retrieval"]
+        assert result["cancelled"].status == RunStatus.CANCELLED
+        events = [event.event_type for event in service.database.list_events(run.id)]
+        assert events.index(f"tool.{operation}") < events.index("run.cancelled")
+        with pytest.raises(StateError, match="active attempt"):
+            actions[operation]()
+
+
+def test_submit_is_busy_during_read_then_succeeds_after_access_event(tmp_path, monkeypatch):
+    repo, run = _started(tmp_path)
+    entered = threading.Event()
+    release = threading.Event()
+    result = {}
+    with ScriptoriumService(repo, manuscript_manager=PdfBuildingManuscriptManager(repo)) as service:
+        review = claim(service, run.id, AgentRole.SUBSTANTIVE_REVIEW)
+        original = service.armarius._retrieval_bundle
+
+        def held_bundle(*args):
+            bundle = original(*args)
+            entered.set()
+            assert release.wait(5)
+            return bundle
+
+        monkeypatch.setattr(service.armarius, "_retrieval_bundle", held_bundle)
+
+        def read():
+            result["read"] = service.read_task(review["attempt"].id, "main.tex", 1, 1, 0, 100)
+
+        reader = threading.Thread(target=read)
+        reader.start()
+        try:
+            assert entered.wait(5)
+            with ScriptoriumService(repo, manuscript_manager=PdfBuildingManuscriptManager(repo)) as contender:
+                with pytest.raises(StateError, match="already being changed by task read"):
+                    submit(contender, review, {"summary": "Reviewed.", "findings": []})
+        finally:
+            release.set()
+            reader.join(timeout=5)
+        assert result["read"]["lines"]
+        with ScriptoriumService(repo, manuscript_manager=PdfBuildingManuscriptManager(repo)) as contender:
+            receipt = submit(contender, review, {"summary": "Reviewed.", "findings": []})
+        assert receipt["run_status"] == RunStatus.AWAITING_DECISION
+        events = [event.event_type for event in service.database.list_events(run.id)]
+        assert events.index("tool.read") < events.index("attempt.finished")
