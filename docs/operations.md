@@ -202,9 +202,23 @@ After the old processes have stopped, perform recovery through `run resume`, `ru
 
 Runs created before the frozen evidence-anchor contract, and runs whose frozen PDF contract requires a quotation, require an explicit boundary. `run status`, `run report`, and `run gate` remain read-only, existing finding and patch decisions and `patch apply` retain their behavior, and `run cancel` remains available. Terminal `completed` or `cancelled` reads and no-ops are unchanged. For any other such run, `run resume` and `run retry` fail before provider-barrier waiting, attempt recovery, artifact publication, or provider invocation; start a new run instead. Do not backfill the contract, translate old Evidence, or infer current anchors from old prompts, transcription artifacts, or bundles.
 
-## Live native-harness smoke tests
+## Native retrieval capability tests
 
-Live tests are excluded from ordinary test runs. Each enabled test performs a small structured-output turn and a resume, checks the opaque session ID, normalized usage, and NDJSON trace, and confirms that the frozen workspace digest did not change.
+The ordinary suite checks generated fixtures and representative native trace messages offline. Paid tests under `tests/live/test_native_harnesses.py` skip unless their runtime is explicitly enabled. A skip means the native capability is unverified.
+
+Each enabled runtime gets the same five retrieval tasks across an initial turn and a resumed turn: discover an unknown file, retrieve a value beyond the initial long-file window, join evidence across two files, read digits from a PNG, and read a new appendix during resume. Random answers exist only in the bundle's sources or image, never in the prompt, filenames, or response schema. The long-file task permits targeted search; it does not require a particular pagination strategy.
+
+Passing requires exact answers, recognized successful native tool-result evidence for the source values, completed access to the requested image, nonzero native token usage, matching runtime/model/provider metadata, and an unchanged workspace digest. Resume uses a fresh adapter with the same native session identity and directory. Missing or unrecognized evidence fails even when the answer is correct. Trace recognition is tested against representative messages from the pinned SDK contracts; offline success does not establish compatibility with a real provider session.
+
+Install the runtime's pinned dependency and configure its native authentication before opting in. Codex uses its native login or provider configuration:
+
+```bash
+SCRIPTORIUM_LIVE_CODEX=1 \
+SCRIPTORIUM_LIVE_CODEX_MODEL=MODEL_NAME \
+python -m pytest -m live_harness tests/live/test_native_harnesses.py
+```
+
+`SCRIPTORIUM_LIVE_CODEX_PROVIDER` defaults to `openai`. Set it explicitly when selecting a different configured provider. These tests check retrieval and bundle immutability, not isolation from all host configuration; full Codex worker isolation remains a separate acceptance requirement.
 
 Claude Code uses its native login or API configuration:
 
@@ -214,13 +228,14 @@ SCRIPTORIUM_LIVE_CLAUDE_MODEL=MODEL_NAME \
 python -m pytest -m live_harness tests/live/test_native_harnesses.py
 ```
 
-Antigravity requires its supported API key:
+Antigravity requires `GEMINI_API_KEY` in the environment:
 
 ```bash
 SCRIPTORIUM_LIVE_ANTIGRAVITY=1 \
 SCRIPTORIUM_LIVE_ANTIGRAVITY_MODEL=MODEL_NAME \
-GEMINI_API_KEY=SECRET \
 python -m pytest -m live_harness tests/live/test_native_harnesses.py
 ```
 
-Setting a model name alone does not opt in. Treat these as paid, credentialed integration checks; regular CI must not set either `SCRIPTORIUM_LIVE_*` switch.
+Setting a model name alone does not opt in. Regular CI must not set any `SCRIPTORIUM_LIVE_*` enable switch. Each enabled case attempts two paid turns, each with a 300-second cancellation timeout; that timeout is not a billing limit.
+
+Per-turn reports and raw traces are retained in `evidence/` under the pytest test temporary directory, alongside the generated bundle and native session directory. Reports include the prompt/schema, requested and returned SDK/model/provider metadata, normalized token usage, elapsed time, and before/after workspace digests. Invocation exceptions retain their class and requested metadata, without fabricating a result or trace. Use pytest's `--basetemp` with a dedicated disposable directory if a known output location is needed (pytest clears that directory at startup). Treat the evidence as local diagnostic data. These tests are retrieval checks, not reviewer recall benchmarks or proof of complete manuscript coverage.
