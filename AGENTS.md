@@ -1,7 +1,7 @@
 # Scriptorium Agent Guide
 
 This file governs work on the Scriptorium repository. It is not part of the
-manuscript bundle shown to review runtimes.
+manuscript bundle shown to external reviewers.
 
 ## Project scope
 
@@ -12,7 +12,7 @@ orchestration layer, or distributed worker system unless the user explicitly
 requests that expansion.
 
 Before changing behavior, read the relevant contracts in `README.md` and
-`docs/architecture.md`. Use `docs/configuration.md` for route and budget work
+`docs/architecture.md`. Use `docs/configuration.md` for external task configuration
 and `docs/operations.md` for lifecycle, recovery, or CLI work.
 
 ## Authority and safety contracts
@@ -25,14 +25,12 @@ and `docs/operations.md` for lifecycle, recovery, or CLI work.
 - Never repair a run by editing `.scriptorium/`, SQLite, artifacts, snapshots,
   bundles, or generated patches manually. Repair the external prerequisite and
   resume or retry through the CLI.
-- Review runtimes are read-only task executors. They must not modify files,
-  choose routes, create subagents, use unrelated repository content, or fall
-  back silently to another runtime, provider, model, or route.
-- A run freezes its Git revision, source digests, role-to-route mapping,
-  runtime and SDK version, provider/model settings, prompts, schemas, pricing,
-  retry policy, and budget. Frozen metadata must describe the native invocation
-  that actually runs; reject unsupported settings instead of merely recording
-  or ignoring them.
+- External host models review through the same JSON CLI. Scriptorium does not
+  select, launch, or silently substitute a model. Its task tools read only the
+  frozen bundle; do not claim they isolate all tools available to the host.
+- A run freezes its Git revision, source digests, navigation, prompts, schemas,
+  and evidence contract. Attempts record the client's reported model, effort,
+  and session identity without presenting them as verified provider billing.
 - Findings, human decisions, patch approval, verification, application, and
   the release gate are separate stages. Do not infer approval from severity or
   bypass an explicit human gate.
@@ -48,10 +46,7 @@ and `docs/operations.md` for lifecycle, recovery, or CLI work.
 Preserve the dependency direction and existing ownership:
 
 - `domain.py`: entities, enums, invariants, and state transitions.
-- `runtime/base.py`: runtime-neutral contracts and normalized results.
-- `runtime/*.py`: native SDK details, security restrictions, start/resume, and
-  normalization. SDK objects and exceptions do not cross this boundary.
-- `workflow.py`: deterministic Armarius scheduling, recovery, budgets, and
+- `workflow.py`: deterministic task preparation, output validation, recovery, and
   approval/release gates.
 - `storage.py`: SQLite migrations, transactions, and persistence queries. Add a
   numbered migration for a schema change; do not rewrite historical migrations.
@@ -60,12 +55,11 @@ Preserve the dependency direction and existing ownership:
   source anchors, and exact patch construction.
 - `service.py`: application operations shared by entrypoints.
 - `cli.py`: argument parsing and text/JSON presentation, not business rules.
-- `schemas.py` and `prompts/`: structured runtime I/O contracts and role prompts.
+- `schemas.py` and `prompts/`: structured task I/O contracts and role prompts.
 
-Keep optional runtime SDKs lazily imported by their adapters. Treat pinned SDK
-versions and resume compatibility as recovery contracts. When adding or
-changing a frozen route field, trace it through to the native SDK call and add
-a regression test using a non-default value.
+Keep Scriptorium free of provider SDKs. Treat frozen task inputs and historical
+database records as recovery contracts. Bind every submitted output to its
+attempt and frozen input digest.
 
 Reimplement behavior independently. Do not introduce reference-project names,
 imports, dependencies, schemas, prompts, compatibility layers, filenames, or
@@ -106,8 +100,7 @@ version fields to the research dataset.
 - Update documentation when a public CLI, configuration, lifecycle, safety, or
   recovery contract changes.
 - Never place credentials in tracked files, manuscript bundles, SQLite, or
-  artifacts. Live provider checks require explicit opt-in and working native
-  authentication.
+  artifacts. Live external-host checks require explicit opt-in and host authentication.
 
 ## Validation
 
@@ -124,7 +117,7 @@ tests first, then validate in proportion to the change. The standard checks are:
 
 Run `.venv/bin/python -m build` when packaging, dependencies, package data, or
 entrypoints change. `bash utils/style_check.sh` mutates files, so do not run it
-blindly over unrelated user changes. Live native-harness tests are paid,
+blindly over unrelated user changes. Live external-harness tests are paid,
 credentialed integration checks and must never be enabled without explicit
 authorization.
 
