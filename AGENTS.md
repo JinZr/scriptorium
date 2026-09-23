@@ -128,6 +128,8 @@ blindly over unrelated user changes. Live native-harness tests are paid,
 credentialed integration checks and must never be enabled without explicit
 authorization.
 
+Use `dev/` for feature PR branch names and `fix/` for bug-fix PR branch names.
+
 Do not commit, push, rebase, amend, discard changes, or change branches unless
 the user explicitly authorizes it. When a commit is authorized, stage only the
 current task's paths or hunks, inspect the staged diff, and keep implementation
