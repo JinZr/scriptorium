@@ -447,31 +447,7 @@ class ScriptoriumService:
             source_digest = source.source_digest
         else:
             raise ConfigurationError("path is not a text source in the frozen bundle")
-        lines = read_path.read_text(encoding="utf-8").splitlines()
-        if start_line > len(lines):
-            raise ConfigurationError("start line is beyond the source")
-        pieces = []
-        remaining = max_chars
-        next_line = None
-        next_offset = None
-        for index in range(start_line - 1, min(len(lines), start_line - 1 + max_lines)):
-            line = lines[index]
-            position = offset if index == start_line - 1 else 0
-            if position > len(line):
-                raise ConfigurationError("offset is beyond the line")
-            text = line[position : position + remaining]
-            pieces.append({"line": index + 1, "offset": position, "text": text})
-            remaining -= len(text)
-            if position + len(text) < len(line):
-                next_line, next_offset = index + 1, position + len(text)
-                break
-            if remaining == 0:
-                next_line, next_offset = index + 2, 0
-                break
-        if next_line is None and start_line - 1 + max_lines < len(lines):
-            next_line, next_offset = start_line + max_lines, 0
-        if next_line is not None and next_line > len(lines):
-            next_line = next_offset = None
+        pieces, next_line, next_offset = _read_text_window(read_path, start_line, max_lines, offset, max_chars)
         self._record_access(
             task.run_id,
             attempt.id,
@@ -954,6 +930,57 @@ class ScriptoriumService:
             lines.extend(["", "## Gate conditions still open", ""])
             lines.extend(f"- `{reason}`" for reason in plain["gate"]["reasons"])
         return "\n".join(lines) + "\n"
+
+
+def _read_text_window(path: Path, start_line: int, max_lines: int, offset: int, max_chars: int):
+    pieces = []
+    remaining = max_chars
+    next_line = next_offset = None
+    with path.open(encoding="utf-8") as source:
+        current_line = 1
+        while current_line < start_line:
+            fragment = source.readline(8192)
+            if not fragment:
+                raise ConfigurationError("start line is beyond the source")
+            if fragment.endswith("\n"):
+                current_line += 1
+
+        for number in range(start_line, start_line + max_lines):
+            if number == start_line:
+                start = source.tell()
+                if not source.read(1):
+                    raise ConfigurationError("start line is beyond the source")
+                source.seek(start)
+            position = offset if number == start_line else 0
+            skipped = 0
+            while skipped < position:
+                fragment = source.readline(min(8192, position - skipped))
+                if not fragment or fragment.endswith("\n"):
+                    raise ConfigurationError("offset is beyond the line")
+                skipped += len(fragment)
+
+            fragment = source.readline(remaining + 1)
+            if not fragment:
+                if number == start_line and position == 0:
+                    raise ConfigurationError("start line is beyond the source")
+                if number == start_line:
+                    pieces.append({"line": number, "offset": position, "text": ""})
+                break
+            ended = fragment.endswith("\n")
+            content = fragment[:-1] if ended else fragment
+            if len(content) > remaining:
+                pieces.append({"line": number, "offset": position, "text": content[:remaining]})
+                next_line, next_offset = number, position + remaining
+                break
+            pieces.append({"line": number, "offset": position, "text": content})
+            remaining -= len(content)
+            if not ended:
+                break
+            if remaining == 0 or number == start_line + max_lines - 1:
+                if source.read(1):
+                    next_line, next_offset = number + 1, 0
+                break
+    return pieces, next_line, next_offset
 
 
 def _plain(value: Any) -> Any:
