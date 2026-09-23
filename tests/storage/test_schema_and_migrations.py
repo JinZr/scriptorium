@@ -21,12 +21,14 @@ def test_schema_and_pragmas(tmp_path) -> None:
             "patches",
             "verifications",
             "events",
+            "external_tasks",
         }
         patch_columns = {row["name"] for row in database.connection.execute("PRAGMA table_info(patches)").fetchall()}
         assert "attempt_id" in patch_columns
         attempt_columns = {row["name"] for row in database.connection.execute("PRAGMA table_info(attempts)").fetchall()}
         assert "validation_report_artifact_digest" in attempt_columns
-        assert database.connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0] == 3
+        assert {"external_client", "effort", "session_source"}.issubset(attempt_columns)
+        assert database.connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0] == 4
         assert database.connection.execute("PRAGMA foreign_keys").fetchone()[0] == 1
         assert database.connection.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
         assert database.connection.execute("PRAGMA busy_timeout").fetchone()[0] == 5000
@@ -100,7 +102,7 @@ def test_existing_database_is_upgraded_without_rewriting_old_patch(tmp_path) -> 
         patch = database.get_patch("patch_old")
 
         assert patch.attempt_id is None
-        assert database.connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0] == 3
+        assert database.connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0] == 4
 
 
 def test_version_two_database_adds_nullable_validation_report_pointer(tmp_path) -> None:
@@ -141,4 +143,5 @@ def test_version_two_database_adds_nullable_validation_report_pointer(tmp_path) 
 
         assert attempt.validation_report_artifact_digest is None
         assert attempt.error == "legacy validation failure"
-        assert database.connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0] == 3
+        assert attempt.external_client is None
+        assert database.connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0] == 4

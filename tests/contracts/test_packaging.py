@@ -6,19 +6,14 @@ except ModuleNotFoundError:  # pragma: no cover - Python 3.10
     import tomli as tomllib
 
 
-def test_native_runtime_extras_are_exact_and_codex_remains_in_base() -> None:
+def test_package_has_no_internal_model_sdk_dependencies() -> None:
     root = Path(__file__).resolve().parents[2]
     project = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))["project"]
 
-    assert "openai-codex==0.156.1" in project["dependencies"]
     assert all(
-        not dependency.startswith(("claude-agent-sdk", "google-antigravity")) for dependency in project["dependencies"]
+        not dependency.startswith(("openai-codex", "claude-agent-sdk", "google-antigravity"))
+        for dependency in project["dependencies"]
     )
 
     optional = project["optional-dependencies"]
-    assert optional["claude"] == ["claude-agent-sdk==0.2.158"]
-    assert optional["antigravity"] == ["google-antigravity==0.1.18"]
-    assert optional["all"] == [
-        "claude-agent-sdk==0.2.158",
-        "google-antigravity==0.1.18",
-    ]
+    assert set(optional) == {"dev"}
