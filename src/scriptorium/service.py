@@ -498,24 +498,28 @@ class ScriptoriumService:
             if not search_items:
                 raise ConfigurationError("path is not a text source in the frozen bundle")
         matches = []
+        total_matches = 0
+        folded_query = query.casefold()
         for source_path, read_path, source_digest in search_items:
-            for number, line in enumerate(read_path.read_text(encoding="utf-8").splitlines(), 1):
-                folded = line.casefold()
-                position = folded.find(query.casefold())
-                while position >= 0:
-                    excerpt_start = max(0, position - 120)
-                    matches.append(
-                        {
-                            "path": source_path,
-                            "line": number,
-                            "column": position + 1,
-                            "excerpt": line[excerpt_start : excerpt_start + 300],
-                            "source_digest": source_digest,
-                        }
-                    )
-                    position = folded.find(query.casefold(), position + max(1, len(query)))
-        page = matches[cursor : cursor + limit]
-        next_cursor = cursor + len(page) if cursor + len(page) < len(matches) else None
+            with read_path.open(encoding="utf-8") as source_file:
+                for number, line in enumerate(source_file, 1):
+                    folded = line.casefold()
+                    position = folded.find(folded_query)
+                    while position >= 0:
+                        if cursor <= total_matches < cursor + limit:
+                            excerpt_start = max(0, position - 120)
+                            matches.append(
+                                {
+                                    "path": source_path,
+                                    "line": number,
+                                    "column": position + 1,
+                                    "excerpt": line[excerpt_start : excerpt_start + 300],
+                                    "source_digest": source_digest,
+                                }
+                            )
+                        total_matches += 1
+                        position = folded.find(folded_query, position + max(1, len(folded_query)))
+        next_cursor = cursor + len(matches) if cursor + len(matches) < total_matches else None
         self._record_access(
             task.run_id,
             attempt.id,
@@ -523,11 +527,11 @@ class ScriptoriumService:
             {
                 "query": query,
                 "path": path,
-                "matches": [{"path": item["path"], "line": item["line"]} for item in page],
+                "matches": [{"path": item["path"], "line": item["line"]} for item in matches],
                 "next_cursor": next_cursor,
             },
         )
-        return {"matches": page, "total_matches": len(matches), "next_cursor": next_cursor}
+        return {"matches": matches, "total_matches": total_matches, "next_cursor": next_cursor}
 
     def page_task(self, attempt_id: str, page_number: int):
         attempt, task, bundle = self._readable_task(attempt_id)
