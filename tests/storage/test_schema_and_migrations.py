@@ -1,8 +1,10 @@
 import asyncio
+from concurrent.futures import ThreadPoolExecutor
 import json
 import sqlite3
 import subprocess
 import sys
+import threading
 
 import pytest
 
@@ -118,6 +120,27 @@ def test_active_historical_database_remains_compatible_until_explicit_external_s
         database.ensure_external_schema()
         assert database.connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0] == 4
         assert database.get_patch("patch_old") == patch
+
+
+def test_concurrent_external_schema_upgrades_share_one_transaction(tmp_path) -> None:
+    path = tmp_path / "state.sqlite3"
+    connection = sqlite3.connect(path, isolation_level=None)
+    connection.execute("CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)")
+    for migration in (_MIGRATION_1, _MIGRATION_2, _MIGRATION_3):
+        connection.executescript(migration)
+    connection.close()
+
+    with Database(path) as first, Database(path) as second:
+        start = threading.Barrier(2)
+
+        def upgrade(database):
+            start.wait(timeout=5)
+            database.ensure_external_schema()
+            return database.connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0]
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            assert list(pool.map(upgrade, (first, second))) == [4, 4]
+        assert first.connection.execute("SELECT COUNT(*) FROM schema_migrations WHERE version = 4").fetchone()[0] == 1
 
 
 def test_version_two_database_adds_nullable_validation_report_pointer(tmp_path) -> None:
