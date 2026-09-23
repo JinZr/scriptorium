@@ -163,38 +163,101 @@ class Armarius:
             raise
         return self.database.get_run(run_id)
 
-    async def retry_task(self, run_id: str, task_id: str) -> Run:
+    async def retry_task(
+        self, run_id: str, task_id: str, abandon_attempt_id: str | None = None, reason: str | None = None
+    ) -> Run:
         run = self.database.get_run(run_id)
         self.require_external_run(run)
         task = self.database.get_task(task_id)
         if task.run_id != run_id:
             raise StateError(f"task {task_id} does not belong to run {run_id}")
-        if task.status not in {TaskStatus.FAILED, TaskStatus.INTERRUPTED}:
+        if abandon_attempt_id is not None:
+            attempts = self.database.list_attempts(task.id)
+            if (
+                task.status != TaskStatus.RUNNING
+                or not attempts
+                or attempts[-1].id != abandon_attempt_id
+                or attempts[-1].status != AttemptStatus.RUNNING
+            ):
+                raise StateError("only the current running attempt can be abandoned")
+            if not reason or not reason.strip():
+                raise StateError("abandoning an attempt requires a reason")
+        elif reason is not None:
+            raise StateError("--reason requires --abandon-attempt")
+        elif task.status not in {TaskStatus.FAILED, TaskStatus.INTERRUPTED}:
             raise StateError(f"task {task_id} is not eligible for retry")
         if run.status not in {RunStatus.COMPLETED, RunStatus.CANCELLED}:
             self.require_evidence_anchor_contract(run.id)
+        target_status = run.status
         if run.status == RunStatus.FAILED:
-            target = {
+            target_status = {
                 "review": RunStatus.REVIEWING,
                 "revision": RunStatus.REVISING,
                 "verification": RunStatus.VERIFYING,
             }.get(task.stage)
-            if target is None:
+            if target_status is None:
                 raise StateError(f"failed run cannot retry task stage {task.stage}")
-            run = self.database.update_run(run.id, target)
         if task.stage == "review":
-            if run.status != RunStatus.REVIEWING:
-                raise StateError(f"review tasks cannot be retried while run is {run.status.value}")
+            if target_status != RunStatus.REVIEWING:
+                raise StateError(f"review tasks cannot be retried while run is {target_status.value}")
         elif task.stage == "revision":
-            if run.status != RunStatus.REVISING:
-                raise StateError(f"revision tasks cannot be retried while run is {run.status.value}")
+            if target_status != RunStatus.REVISING:
+                raise StateError(f"revision tasks cannot be retried while run is {target_status.value}")
         elif task.stage == "verification":
-            if run.status != RunStatus.VERIFYING:
-                raise StateError(f"verification tasks cannot be retried while run is {run.status.value}")
+            if target_status != RunStatus.VERIFYING:
+                raise StateError(f"verification tasks cannot be retried while run is {target_status.value}")
         else:
             raise StateError(f"unknown task stage: {task.stage}")
+        if not self._task_context_is_current(run, task):
+            raise StateError("task context changed; run resume to prepare a new task")
+        if abandon_attempt_id is not None:
+            self.database.finish_attempt(
+                abandon_attempt_id, AttemptStatus.INTERRUPTED, error=f"explicitly abandoned: {reason}"
+            )
         self.database.update_task_status(task.id, TaskStatus.PENDING)
+        if run.status == RunStatus.FAILED:
+            self.database.update_run(run.id, target_status)
         return self.database.get_run(run_id)
+
+    def _task_context_is_current(self, run: Run, task: Task) -> bool:
+        if task.stage == "review":
+            return True
+        confirmed = self.database.list_findings(run.id, [FindingStatus.CONFIRMED])
+        if not confirmed:
+            return False
+        if task.stage == "revision":
+            prompt = self._revision_prompt(run, confirmed, self._rejected_patch_revision_context(run))
+        elif task.stage == "verification":
+            approved = [
+                patch
+                for patch in self.database.list_patches(run.id)
+                if patch.status in {PatchStatus.APPROVED, PatchStatus.VERIFIED}
+            ]
+            if not approved:
+                return False
+            prompt = self._verification_prompt(run, approved[-1], confirmed)
+        else:
+            raise InfrastructureError(f"unsupported external task stage: {task.stage}")
+        metadata = self.database.get_external_task(task.id)
+        return ArtifactStore.digest_bytes(prompt.encode("utf-8")) == metadata["prompt_digest"]
+
+    def invalidate_stale_tasks(self, run_id: str) -> None:
+        run = self.database.get_run(run_id)
+        for task in self.database.list_tasks(run_id):
+            if task.stage not in {"revision", "verification"} or task.status not in {
+                TaskStatus.PENDING,
+                TaskStatus.RUNNING,
+            }:
+                continue
+            if self._task_context_is_current(run, task):
+                continue
+            if task.status == TaskStatus.RUNNING:
+                attempt = self.database.list_attempts(task.id)[-1]
+                self.database.finish_attempt(
+                    attempt.id, AttemptStatus.INTERRUPTED, error="finding decision changed frozen task context"
+                )
+            else:
+                self.database.update_task_status(task.id, TaskStatus.CANCELLED)
 
     @staticmethod
     def require_external_run(run: Run) -> None:
@@ -954,6 +1017,8 @@ class Armarius:
         }.get(task.stage)
         if run.status != expected_status:
             raise StateError(f"task {task_id} cannot be claimed while run is {run.status.value}")
+        if not self._task_context_is_current(run, task):
+            raise StateError("task context changed; run resume to prepare a new task")
         if task.status == TaskStatus.RUNNING:
             attempt = self.database.list_attempts(task.id)[-1]
             if (attempt.external_client, attempt.model, attempt.effort, attempt.thread_id, attempt.session_source) == (
@@ -1013,8 +1078,15 @@ class Armarius:
         task = self.database.get_task(attempt.task_id)
         run = self.database.get_run(task.run_id)
         self.require_external_run(run)
-        if input_digest != task.input_digest:
-            raise StateError("submitted input digest does not match frozen task")
+        if input_digest != digest_json(
+            {
+                "prompt_digest": attempt.prompt_digest,
+                "schema_digest": attempt.schema_digest,
+                "bundle_digest": attempt.bundle_digest,
+            }
+        ):
+            raise StateError("submitted input digest does not match frozen attempt")
+        self._load_prompt_artifact(attempt.prompt_digest)
         if run.status == RunStatus.CANCELLED:
             raise StateError(f"attempt {attempt_id} is no longer active")
         expected_status = {
@@ -1042,6 +1114,8 @@ class Armarius:
         bundle = self._external_bundle(run, metadata)
         if attempt.bundle_digest != metadata["bundle_digest"] or attempt.schema_digest != metadata["schema_digest"]:
             raise InfrastructureError("attempt is not bound to its frozen task")
+        if not self._task_context_is_current(run, task):
+            raise StateError("task context changed; run resume to prepare a new task")
         output_artifact = self._record_text(output_text, "application/json")
         if task.stage == "review":
 
@@ -1574,7 +1648,7 @@ class Armarius:
             self._frozen_prompt_template(run, AgentRole.VERIFICATION),
             {
                 _CONFIRMED_FINDINGS_SLOT: canonical_json(finding_data),
-                _APPROVED_DIFF_SLOT: canonical_json({"diff": diff}),
+                _APPROVED_DIFF_SLOT: canonical_json({"patch_id": patch.id, "diff": diff}),
             },
         )
 

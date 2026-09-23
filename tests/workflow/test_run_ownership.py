@@ -1,6 +1,7 @@
 import asyncio
 import os
 from pathlib import Path
+import threading
 
 import pytest
 
@@ -105,3 +106,26 @@ def test_run_operation_releases_lock_for_all_exit_paths(tmp_path, exception):
                 raise exception
         with service._run_operation(run.id, "run retry"):
             pass
+
+
+def test_cancel_waits_for_in_progress_operation_then_invalidates_claim(tmp_path):
+    repo, run = _started(tmp_path)
+    finished = threading.Event()
+    result = {}
+    with ScriptoriumService(repo, manuscript_manager=PdfBuildingManuscriptManager(repo)) as service:
+        review = claim(service, run.id, AgentRole.SUBSTANTIVE_REVIEW)
+        with service._run_operation(run.id, "slow compile"):
+
+            def cancel():
+                with ScriptoriumService(repo) as contender:
+                    result["run"] = contender.cancel_run(run.id, "stop during compile")["run"]
+                finished.set()
+
+            worker = threading.Thread(target=cancel)
+            worker.start()
+            assert not finished.wait(0.1)
+            assert service.database.get_attempt(review["attempt"].id).status.value == "running"
+        worker.join(timeout=5)
+        assert finished.is_set()
+        assert result["run"].status == RunStatus.CANCELLED
+        assert service.database.get_attempt(review["attempt"].id).status.value == "interrupted"

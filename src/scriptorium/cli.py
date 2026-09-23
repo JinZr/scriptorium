@@ -57,6 +57,8 @@ def build_parser() -> argparse.ArgumentParser:
     retry_parser = run_commands.add_parser("retry", help="retry one task")
     retry_parser.add_argument("run_id")
     retry_parser.add_argument("--task", required=True, dest="task_id")
+    retry_parser.add_argument("--abandon-attempt")
+    retry_parser.add_argument("--reason")
     retry_parser.add_argument("--route")
 
     cancel_parser = run_commands.add_parser("cancel", help="cancel a run")
@@ -215,7 +217,9 @@ def _dispatch_run(service: Any, arguments: argparse.Namespace) -> tuple[Any, int
     if arguments.run_command == "retry":
         if arguments.route is not None:
             raise ConfigurationError("--route belongs to the retired internal model runner")
-        result = asyncio.run(service.retry_task(arguments.run_id, arguments.task_id))
+        result = asyncio.run(
+            service.retry_task(arguments.run_id, arguments.task_id, arguments.abandon_attempt, arguments.reason)
+        )
         return result, 0, None
     if arguments.run_command == "cancel":
         return service.cancel_run(arguments.run_id, arguments.reason), 0, None
