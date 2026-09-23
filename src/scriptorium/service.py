@@ -297,6 +297,7 @@ class ScriptoriumService:
         reject_legacy_local_config(self.repo)
         run_id = new_id("run")
         with self._run_operation(run_id, "run start"):
+            self._storage(self.database.ensure_external_schema)
             await self.armarius.start_run(revision, profile, run_id=run_id)
             return self.get_run(run_id)
 

@@ -64,7 +64,7 @@ Human finding decisions, patch approval, and patch application remain separate o
 - Scriptorium never switches branches, commits, pushes, approves its own patch, or silently changes models.
 - Patch application checks the approved base and worktree again; stale edits are rejected.
 - The external client controls model calls and costs. Unknown token usage and cost are reported as unknown. Scriptorium does not enforce a spending cap or restrict the host's unrelated filesystem tools.
-- Runs made by the removed internal SDK executor remain readable with `run status`, `run report`, and `run gate`; execution requires the original version.
+- Runs made by the removed internal SDK executor remain readable with `run status`, `run report`, and `run gate`; these commands leave an existing legacy database at its old schema version so the original version can still execute the run. Starting a new external run upgrades the database only after all historical runs are completed or cancelled.
 
 See [configuration](docs/configuration.md), [architecture](docs/architecture.md), and [operations](docs/operations.md). The optional PeerReviewBench example prepares external review tasks and collects their validated results under `egs/peerreviewbench/`.
 
