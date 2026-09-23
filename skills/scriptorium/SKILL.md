@@ -5,7 +5,7 @@ description: Use Scriptorium's shared JSON CLI to review a frozen Git-managed La
 
 # Scriptorium
 
-You are the reviewer in the current client conversation. Use the model selected by this Codex, Claude Code, or Antigravity host. Scriptorium supplies frozen material and workflow state; it does not call another model. Use the installed `scriptorium --json` CLI. Never edit `.scriptorium/`, its SQLite database, artifacts, snapshot, bundle, or generated patch directly.
+You are the reviewer in the current client conversation. Use the model selected by this Codex, Claude Code, or Antigravity host. Do not create or invoke subagents, delegate a role, or call another model; review each role yourself in this conversation. Scriptorium supplies frozen material and workflow state; it does not call another model. Use the installed `scriptorium --json` CLI. Never edit `.scriptorium/`, its SQLite database, artifacts, snapshot, bundle, or generated patch directly.
 
 ## Start or resume
 
