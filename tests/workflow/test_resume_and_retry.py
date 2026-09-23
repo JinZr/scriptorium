@@ -75,6 +75,25 @@ def test_corrupt_attempt_prompt_blocks_submission(tmp_path):
         assert service.list_findings(run.id) == []
 
 
+@pytest.mark.parametrize("damage", ["missing", "corrupt"])
+def test_missing_or_corrupt_attempt_schema_blocks_submission(tmp_path, damage):
+    repo = make_repository(tmp_path, roles=("substantive_review",))
+    with ScriptoriumService(repo, manuscript_manager=PdfBuildingManuscriptManager(repo)) as service:
+        run = asyncio.run(service.start_run("HEAD", "quick"))["run"]
+        review = claim(service, run.id, AgentRole.SUBSTANTIVE_REVIEW)
+        path = service.artifacts.path_for(review["attempt"].schema_digest)
+        if damage == "missing":
+            path.unlink()
+        else:
+            path.write_bytes(b"corrupt")
+        with pytest.raises(InfrastructureError, match="schema artifact"):
+            service.show_task(review["attempt"].id)
+        with pytest.raises(InfrastructureError, match="schema artifact"):
+            submit(service, review, {"summary": "Reviewed the text.", "findings": []})
+        assert service.database.get_attempt(review["attempt"].id).status == AttemptStatus.RUNNING
+        assert service.list_findings(run.id) == []
+
+
 def test_explicit_abandonment_retries_only_the_named_running_attempt(tmp_path):
     repo = make_repository(tmp_path, roles=("substantive_review",))
     with ScriptoriumService(repo, manuscript_manager=PdfBuildingManuscriptManager(repo)) as service:

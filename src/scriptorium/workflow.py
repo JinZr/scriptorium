@@ -890,6 +890,21 @@ class Armarius:
         except (ArtifactError, StorageError, UnicodeDecodeError) as exc:
             raise InfrastructureError(f"attempt prompt artifact is missing or corrupt: {digest}") from exc
 
+    def _load_schema_artifact(self, run: Run, schema_kind: str, digest: str) -> dict[str, Any]:
+        try:
+            artifact = self.database.get_artifact(digest)
+            if artifact.media_type != "application/schema+json":
+                raise InfrastructureError(f"attempt schema {digest} has an invalid media type")
+            contents = self.artifacts.get_bytes(digest)
+            schema = run.frozen_config["schemas"][schema_kind]["content"]
+            if contents != canonical_json(schema).encode("utf-8"):
+                raise InfrastructureError(f"attempt schema {digest} differs from the frozen run")
+            return schema
+        except InfrastructureError:
+            raise
+        except (ArtifactError, StorageError, KeyError, TypeError) as exc:
+            raise InfrastructureError(f"attempt schema artifact is missing or corrupt: {digest}") from exc
+
     @staticmethod
     def _validation_error_summary(report: ValidationReport) -> str:
         first = report.issues[0]
@@ -1087,6 +1102,10 @@ class Armarius:
         ):
             raise StateError("submitted input digest does not match frozen attempt")
         self._load_prompt_artifact(attempt.prompt_digest)
+        metadata = self.database.get_external_task(task.id)
+        if attempt.bundle_digest != metadata["bundle_digest"] or attempt.schema_digest != metadata["schema_digest"]:
+            raise InfrastructureError("attempt is not bound to its frozen task")
+        self._load_schema_artifact(run, metadata["schema_kind"], attempt.schema_digest)
         if run.status == RunStatus.CANCELLED:
             raise StateError(f"attempt {attempt_id} is no longer active")
         expected_status = {
@@ -1110,10 +1129,7 @@ class Armarius:
             raise StateError(f"attempt {attempt_id} is no longer active")
         if run.status == RunStatus.CANCELLED or task.status != TaskStatus.RUNNING:
             raise StateError(f"attempt {attempt_id} is no longer active")
-        metadata = self.database.get_external_task(task.id)
         bundle = self._external_bundle(run, metadata)
-        if attempt.bundle_digest != metadata["bundle_digest"] or attempt.schema_digest != metadata["schema_digest"]:
-            raise InfrastructureError("attempt is not bound to its frozen task")
         if not self._task_context_is_current(run, task):
             raise StateError("task context changed; run resume to prepare a new task")
         output_artifact = self._record_text(output_text, "application/json")

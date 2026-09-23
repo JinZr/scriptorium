@@ -365,9 +365,11 @@ class ScriptoriumService:
         run = self._storage(self.database.get_run, task.run_id)
         self.armarius.require_external_run(run)
         metadata = self._storage(self.database.get_external_task, task.id)
+        if attempt.schema_digest != metadata["schema_digest"]:
+            raise InfrastructureError("attempt is not bound to its frozen task")
         bundle = self.armarius._external_bundle(run, metadata)
         prompt = self.armarius._load_prompt_artifact(attempt.prompt_digest)
-        schema_bytes = self.artifacts.get_bytes(metadata["schema_digest"])
+        schema = self.armarius._load_schema_artifact(run, metadata["schema_kind"], attempt.schema_digest)
         self._record_access(
             run.id,
             attempt.id,
@@ -383,7 +385,7 @@ class ScriptoriumService:
             "task": task,
             "attempt": attempt,
             "prompt": prompt,
-            "schema": json.loads(schema_bytes),
+            "schema": schema,
             "input_digest": digest_json(
                 {
                     "prompt_digest": attempt.prompt_digest,
