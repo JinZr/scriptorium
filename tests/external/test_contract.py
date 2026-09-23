@@ -326,6 +326,32 @@ def test_search_paging_long_line_and_bundle_path_boundary(tmp_path: Path) -> Non
             service.read_task(attempt_id, "../scriptorium.toml", 1, 1, 0, 8000)
 
 
+def test_read_prefers_canonical_source_path_over_colliding_bundle_alias(tmp_path: Path) -> None:
+    repo = _repo(tmp_path / "paper")
+    nested = repo / "sources" / "supplement.tex"
+    nested.parent.mkdir()
+    nested.write_text("Canonical nested source.\n", encoding="utf-8")
+    main = repo / "main.tex"
+    main.write_text(
+        main.read_text(encoding="utf-8").replace("\\end{document}", "\\input{sources/supplement}\\end{document}"),
+        encoding="utf-8",
+    )
+    subprocess.run(
+        ["git", "-C", str(repo), "add", "main.tex", "sources/supplement.tex"], check=True, capture_output=True
+    )
+    subprocess.run(
+        ["git", "-C", str(repo), "-c", "user.name=Test", "-c", "user.email=test@example.org", "commit", "-m", "nested"],
+        check=True,
+        capture_output=True,
+    )
+    _, task_id = _start(repo)
+    with ScriptoriumService(repo) as service:
+        attempt = service.claim_task(task_id, "codex", "model", "max", "session", "host")["attempt"]
+        assert service.read_task(attempt.id, "sources/supplement.tex", 1, 1, 0, 8000)["lines"][0]["text"] == (
+            "Canonical nested source."
+        )
+
+
 def test_frozen_navigation_damage_blocks_claim_before_any_attempt(tmp_path: Path) -> None:
     repo = _repo(tmp_path / "paper")
     run_id, task_id = _start(repo)

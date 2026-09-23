@@ -424,7 +424,9 @@ class ScriptoriumService:
         attempt, task, bundle = self._readable_task(attempt_id)
         if start_line < 1 or not 1 <= max_lines <= 100 or offset < 0 or not 1 <= max_chars <= 8000:
             raise ConfigurationError("invalid read range or size")
-        source = next((item for item in bundle.anchor_map.sources if path in {item.source_path, item.read_path}), None)
+        source = next((item for item in bundle.anchor_map.sources if item.source_path == path), None)
+        if source is None:
+            source = next((item for item in bundle.anchor_map.sources if item.read_path == path), None)
         if path in {"manifest.json", "navigation.json", "source-map.json"}:
             read_path = bundle.workspace / path
             source_digest = ArtifactStore.digest_file(read_path)
