@@ -10,7 +10,7 @@ import sys
 import pytest
 
 from scriptorium.domain import AttemptStatus, RunStatus, TaskStatus
-from scriptorium.errors import StateError
+from scriptorium.errors import InfrastructureError, StateError
 from scriptorium.service import ScriptoriumService
 
 pytestmark = pytest.mark.skipif(
@@ -68,6 +68,10 @@ def test_each_host_uses_the_same_frozen_task_contract(tmp_path: Path, client: st
         supplement = service.search_task(attempt_id, "explains", None, 0, 1)
         assert supplement["matches"][0]["path"] == "supplement.tex"
         assert service.read_task(attempt_id, "supplement.tex", 1, 1, 0, 15)["next_offset"] == 15
+        assert service.read_task(attempt_id, "sources/supplement.tex", 1, 1, 0, 8000)["lines"][0]["text"].startswith(
+            "The supplement"
+        )
+        assert service.read_task(attempt_id, "manifest.json", 1, 1, 0, 8000)["lines"]
         assert len(service.page_task(attempt_id, 1)["digest"]) == 64
         result = asyncio.run(
             service.submit_task(
@@ -244,3 +248,67 @@ def test_json_cli_reads_and_submits_from_stdin_across_processes(tmp_path: Path) 
     assert submitted["data"]["attempt"]["status"] == "completed"
     assert submitted["data"]["attempt"]["estimated_cost_usd"] is None
     assert command("task", "list", run_id)["data"]["run_status"] == "awaiting_decision"
+
+
+def test_frozen_navigation_damage_blocks_claim_before_any_attempt(tmp_path: Path) -> None:
+    repo = _repo(tmp_path / "paper")
+    run_id, task_id = _start(repo)
+    with ScriptoriumService(repo) as service:
+        navigation = repo / ".scriptorium" / "runs" / run_id / "bundle" / "navigation.json"
+        navigation.write_text("{}\n", encoding="utf-8")
+        with pytest.raises(InfrastructureError, match="navigation"):
+            service.claim_task(task_id, "codex", "model", "max", "session", "host")
+        assert service.database.list_attempts(task_id) == []
+
+
+def test_wrong_evidence_is_rejected_as_a_whole_output(tmp_path: Path) -> None:
+    repo = _repo(tmp_path / "paper")
+    run_id, task_id = _start(repo)
+    with ScriptoriumService(repo) as service:
+        claim = service.claim_task(task_id, "claude_code", "sonnet", "max", "session", "host")
+        source = claim["source_map"]["sources"][0]
+        candidate = {
+            "category": "claim",
+            "severity": "moderate",
+            "title": "Concern",
+            "claim": "This claim needs review.",
+            "evidence": [
+                {
+                    "source_path": source["source_path"],
+                    "start_line": 1,
+                    "end_line": 1,
+                    "source_digest": source["source_digest"],
+                    "quoted_text": "not in the source",
+                }
+            ],
+            "explanation": "Explanation.",
+            "suggested_action": "Recheck.",
+            "confidence": 0.5,
+        }
+        result = asyncio.run(
+            service.submit_task(
+                claim["attempt"].id,
+                claim["input_digest"],
+                json.dumps({"summary": "Examined the manuscript.", "findings": [candidate]}),
+            )
+        )
+        assert result["attempt"].status == AttemptStatus.FAILED
+        assert result["validation_report"]
+        assert service.list_findings(run_id) == []
+
+
+def test_completed_attempt_replays_after_process_exit(tmp_path: Path) -> None:
+    repo = _repo(tmp_path / "paper")
+    run_id, task_id = _start(repo)
+    with ScriptoriumService(repo) as service:
+        claim = service.claim_task(task_id, "antigravity", "model", "high", "session", "host")
+        service.armarius.submit_task(
+            claim["attempt"].id,
+            claim["input_digest"],
+            json.dumps({"summary": "Reviewed the manuscript.", "findings": []}),
+        )
+        assert service.database.get_run(run_id).status == RunStatus.REVIEWING
+    with ScriptoriumService(repo) as service:
+        asyncio.run(service.resume_run(run_id))
+        assert service.database.get_run(run_id).status == RunStatus.AWAITING_DECISION
+        assert len(service.database.list_attempts(task_id)) == 1

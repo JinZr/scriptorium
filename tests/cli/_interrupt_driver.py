@@ -9,7 +9,7 @@ class BlockingService:
     def __init__(self, ready_path: Path) -> None:
         self.ready_path = ready_path
 
-    async def start_run(self, revision, profile, budget_usd):
+    async def start_run(self, revision, profile):
         self.ready_path.write_text("ready\n", encoding="utf-8")
         await asyncio.Event().wait()
 
