@@ -503,6 +503,7 @@ class ScriptoriumService:
         for source_path, read_path, source_digest in search_items:
             with read_path.open(encoding="utf-8") as source_file:
                 for number, line in enumerate(source_file, 1):
+                    line = line.removesuffix("\n")
                     folded = line.casefold()
                     position = folded.find(folded_query)
                     while position >= 0:
