@@ -29,6 +29,7 @@ from .domain import (
     PatchStatus,
     Run,
     RunStatus,
+    Task,
     TaskStatus,
     VerificationResult,
     new_id,
@@ -393,7 +394,7 @@ class ScriptoriumService:
         task = self._storage(self.database.get_task, attempt.task_id)
         with self._run_operation(task.run_id, "task submit"):
             finished = self._storage(self.armarius.submit_task, attempt_id, input_digest, output_text)
-            if finished.status == AttemptStatus.COMPLETED:
+            if attempt.status == AttemptStatus.RUNNING and finished.status == AttemptStatus.COMPLETED:
                 await self.armarius.resume_run(task.run_id)
             report = None
             if finished.validation_report_artifact_digest:
@@ -952,6 +953,8 @@ def _plain(value: Any) -> Any:
             "reasoning_tokens": None,
             "estimated_cost_usd": None,
         }
+    if isinstance(value, Task) and value.route == "":
+        return {key: _plain(item) for key, item in asdict(value).items() if key != "route"}
     if is_dataclass(value) and not isinstance(value, type):
         return {key: _plain(item) for key, item in asdict(value).items()}
     if isinstance(value, dict):

@@ -1,6 +1,6 @@
 {
   "name": "scriptorium",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Operate Scriptorium manuscript review, revision, and verification workflows through its CLI.",
   "author": {
     "name": "Scriptorium contributors"

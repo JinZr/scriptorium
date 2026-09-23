@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 import shutil
 import subprocess
+import sys
 
 import pytest
 
@@ -122,7 +123,8 @@ def test_cancel_rejects_late_submission(tmp_path: Path) -> None:
             service.armarius.submit_task(claim["attempt"].id, claim["input_digest"], "{}")
 
 
-def test_revision_requires_human_gates_and_independent_verification(tmp_path: Path) -> None:
+@pytest.mark.parametrize("stale", [False, True])
+def test_revision_requires_human_gates_and_independent_verification(tmp_path: Path, stale: bool) -> None:
     repo = _repo(tmp_path / "paper")
     run_id, review_task_id = _start(repo)
     with ScriptoriumService(repo) as service:
@@ -199,6 +201,46 @@ def test_revision_requires_human_gates_and_independent_verification(tmp_path: Pa
         accepted = asyncio.run(service.submit_task(verifier["attempt"].id, verifier["input_digest"], output))
         assert accepted["run_status"] == RunStatus.READY_TO_APPLY
         assert not service.evaluate_gate(run_id)["passed"]
-        service.apply_patch(patch.id)
-        assert service.evaluate_gate(run_id)["passed"]
-        assert "A scoped result" in (repo / "main.tex").read_text(encoding="utf-8")
+        if stale:
+            (repo / "main.tex").write_text("changed after approval\n", encoding="utf-8")
+            assert service.apply_patch(patch.id).status.value == "stale"
+            assert not service.evaluate_gate(run_id)["passed"]
+        else:
+            service.apply_patch(patch.id)
+            assert service.evaluate_gate(run_id)["passed"]
+            assert "A scoped result" in (repo / "main.tex").read_text(encoding="utf-8")
+
+
+def test_json_cli_reads_and_submits_from_stdin_across_processes(tmp_path: Path) -> None:
+    repo = _repo(tmp_path / "paper")
+    run_id, task_id = _start(repo)
+    with ScriptoriumService(repo) as service:
+        claim = service.claim_task(task_id, "codex", "selected-model", "max", "host-session", "host")
+    attempt_id = claim["attempt"].id
+
+    def command(*args: str, input_text: str | None = None):
+        result = subprocess.run(
+            [sys.executable, "-m", "scriptorium", "--json", *args],
+            cwd=repo,
+            input=input_text,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        return json.loads(result.stdout)
+
+    searched = command("task", "search", attempt_id, "--query", "explains")
+    assert searched["ok"] and searched["data"]["matches"][0]["path"] == "supplement.tex"
+    submitted = command(
+        "task",
+        "submit",
+        attempt_id,
+        "--input-digest",
+        claim["input_digest"],
+        "--file",
+        "-",
+        input_text=json.dumps({"summary": "Read the supplement.", "findings": []}),
+    )
+    assert submitted["data"]["attempt"]["status"] == "completed"
+    assert submitted["data"]["attempt"]["estimated_cost_usd"] is None
+    assert command("task", "list", run_id)["data"]["run_status"] == "awaiting_decision"

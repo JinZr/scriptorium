@@ -1,10 +1,6 @@
 # Configuration
 
-Scriptorium separates reviewable manuscript configuration from machine-local provider routing.
-
-## Manuscript configuration
-
-Commit `scriptorium.toml` with the paper:
+`scriptorium.toml` is committed with the manuscript. It names the LaTeX entrypoint, engine, and review roles. A run reads this file from the selected Git commit, never from uncommitted work.
 
 ```toml
 [manuscript]
@@ -15,113 +11,11 @@ engine = "pdflatex"
 roles = ["substantive_review", "copyedit"]
 
 [profiles.full]
-roles = [
-  "substantive_review",
-  "copyedit",
-  "consistency",
-  "figure_review",
-]
+roles = ["substantive_review", "copyedit", "consistency", "figure_review"]
 ```
 
-Stable role keys for new runs are `substantive_review`, `copyedit`, `consistency`, `figure_review`, `revision`, and `verification`. `workflow` identifies deterministic Armarius activity and is not a model role. Classical role names are display labels only; configuration, storage, APIs, and logs use the stable keys. Historical state may still contain the retired `visual_transcription` role, but new runs never select it.
+Supported engines are `pdflatex`, `xelatex`, and `lualatex`. Review roles are `substantive_review`, `copyedit`, `consistency`, and `figure_review`. Revision and verification tasks are prepared later by the workflow. `scriptorium init` writes a starter file and adds `.scriptorium/` to `.gitignore`.
 
-## Local routing
+The selected Codex, Claude Code, or Antigravity CLI session owns model choice, effort, authentication, and spending. Supply its actual selection when claiming a task. Scriptorium stores this as external provenance; it cannot verify provider billing. `--budget-usd`, `--route`, and `.scriptorium/config.toml` belonged to the removed internal runner. Remove the old local config before starting a new run. The CLI rejects those old options or configuration with a migration error.
 
-Keep route selection and pricing in the Git-ignored `.scriptorium/config.toml`:
-
-```toml
-max_concurrency = 2
-
-[roles]
-substantive_review = "primary"
-copyedit = "primary"
-consistency = "primary"
-figure_review = "primary"
-revision = "primary"
-verification = "primary"
-
-[routes.primary]
-runtime = "codex"
-model_provider = "openai"
-model = "USER_CONFIGURED_MODEL"
-input_usd_per_million = 0
-output_usd_per_million = 0
-reasoning_effort = "high"
-```
-
-Replace every model placeholder before a paid run. Scriptorium does not choose a concrete model or silently fall back to another route. Use `run retry --route ROUTE` when an operator explicitly wants a different route after failure.
-An older local file may still contain a `visual_transcription` mapping or an otherwise unused visual route. It remains ordinary parseable configuration but is not frozen, checked, invoked, or billed by a new run. Additional named routes can be added when figure review or verification should use a different model.
-
-`runtime` defaults to `codex` so existing Codex-only local configurations remain valid. Native routes are explicit:
-
-```toml
-[routes.claude]
-runtime = "claude_code"
-model_provider = "anthropic"
-model = "CLAUDE_MODEL_NAME"
-input_usd_per_million = 0
-output_usd_per_million = 0
-
-[routes.gemini]
-runtime = "antigravity"
-model_provider = "gemini"
-model = "GEMINI_MODEL_NAME"
-input_usd_per_million = 0
-output_usd_per_million = 0
-```
-
-Claude Code routes require `model_provider = "anthropic"`. Antigravity routes require `model_provider = "gemini"` and use only `GEMINI_API_KEY`; Vertex or other Google credential modes are not accepted. Unknown runtime names and mismatched providers are configuration errors.
-
-Do not set `runtime_version` in `.scriptorium/config.toml`. It is written only by run freezing. At run start, Scriptorium freezes the resolved revision, both configuration layers, role-to-route mapping, runtime name and exact SDK version per route, model/provider, prompts and schemas with digests, source manifest and file digests, and budget/pricing snapshot.
-
-The pinned versions are:
-
-- `codex`: `openai-codex==0.156.1` (base installation)
-- `claude_code`: `claude-agent-sdk==0.2.158` (`scriptorium[claude]`)
-- `antigravity`: `google-antigravity==0.1.18` (`scriptorium[antigravity]`)
-
-The dependency refresh moves Codex from 0.144.4 to 0.156.1, Claude Code from
-0.2.128 to 0.2.158, and Antigravity from 0.1.8 to 0.1.18. Runs frozen with the
-previous versions cannot resume under the new adapter pins; use a separate
-environment with the matching Scriptorium revision and SDKs to resume them, or
-start a new run. Do not edit frozen version metadata.
-
-Changing an installed SDK version does not rewrite a frozen run. Resume requires the frozen runtime, exact SDK version, provider, and model. A historical frozen configuration without a route-level runtime continues to use its original top-level Codex runtime without modifying the stored configuration.
-
-## Runtime authentication
-
-Secrets belong in native user configuration or environment variables, never in `scriptorium.toml`, `.scriptorium/config.toml`, SQLite, or the manuscript bundle.
-
-- Codex endpoints and credentials remain in Codex user configuration. OpenAI-compatible and laboratory gateways can still be configured as Codex providers.
-- Claude Code uses the official SDK's bundled Claude harness. Authentication may come from its native login or API configuration; a live smoke test is the authoritative authentication check.
-- Antigravity reads `GEMINI_API_KEY` only.
-
-Run:
-
-```bash
-scriptorium doctor --revision COMMIT
-```
-
-before starting work. Doctor reads `scriptorium.toml`, the selected profile, and manuscript inputs from a snapshot of that revision, so uncommitted project changes do not affect the result. The ignored `.scriptorium/config.toml` remains machine-local and is read from the current repository. Doctor checks only the runtimes referenced by the selected review, revision, and verification routes. Each required SDK must be installed at the exact pinned version. Doctor also checks `GEMINI_API_KEY` for Antigravity; Claude Code authentication is exercised only by the explicitly enabled live smoke test.
-
-Doctor rejects unresolved model placeholders. When a dollar budget is requested, missing route prices are also a configuration error. An explicitly configured zero price is accepted for an OSS or laboratory-gateway route; Scriptorium does not infer billing from the provider name.
-
-## Budget semantics
-
-Token usage comes from the selected native runtime. Scriptorium normalizes it before estimating cost with the local input/output prices frozen on the route:
-
-- Claude input includes ordinary input, cache-create, and cache-read tokens; cached input is the cache-read subset.
-- Antigravity output includes candidate and thought tokens; reasoning output is the thought subset.
-
-Input and output totals are priced once. Cached input and reasoning output remain separately auditable subdivisions and are not added to those totals again. Native usage and cost details stay in the NDJSON trace.
-
-Scriptorium checks recorded estimated cost before starting each new task. A task already in progress can make the estimate slightly exceed the requested budget, after which the run enters `waiting_budget`.
-
-This is a local scheduling gate and audit estimate, not a provider-level billing cap.
-
-For Codex, doctor additionally checks the bundled native process can initialize
-and read synthetic configuration in a temporary, credential-free home. The
-`codex_startup` diagnostic is not authentication or route validation: selected
-provider settings and existing native sessions are not read or changed by the
-probe. This does not change start/resume configuration or frozen run metadata.
-See [operations](operations.md) for the timeout, cleanup, and acceptance boundary.
+`doctor` checks the frozen project configuration, Git revision, dependency closure, local LaTeX tools, and compilation. It does not call a model. New runs freeze the project config, source identities, navigation, prompts, output schemas, and evidence contract. A frozen task's `input_digest` binds its prompt, schema, and bundle.

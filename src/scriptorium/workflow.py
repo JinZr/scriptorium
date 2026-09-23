@@ -947,6 +947,13 @@ class Armarius:
         run = self.database.get_run(task.run_id)
         self.require_external_run(run)
         self.require_evidence_anchor_contract(run.id)
+        expected_status = {
+            "review": RunStatus.REVIEWING,
+            "revision": RunStatus.REVISING,
+            "verification": RunStatus.VERIFYING,
+        }.get(task.stage)
+        if run.status != expected_status:
+            raise StateError(f"task {task_id} cannot be claimed while run is {run.status.value}")
         if task.status == TaskStatus.RUNNING:
             attempt = self.database.list_attempts(task.id)[-1]
             if (attempt.external_client, attempt.model, attempt.effort, attempt.thread_id, attempt.session_source) == (
@@ -1010,6 +1017,13 @@ class Armarius:
             raise StateError("submitted input digest does not match frozen task")
         if run.status == RunStatus.CANCELLED:
             raise StateError(f"attempt {attempt_id} is no longer active")
+        expected_status = {
+            "review": RunStatus.REVIEWING,
+            "revision": RunStatus.REVISING,
+            "verification": RunStatus.VERIFYING,
+        }.get(task.stage)
+        if run.status != expected_status and attempt.status == AttemptStatus.RUNNING:
+            raise StateError(f"attempt {attempt_id} cannot submit while run is {run.status.value}")
         output_digest = ArtifactStore.digest_bytes(output_text.encode("utf-8"))
         if attempt.status != AttemptStatus.RUNNING:
             latest = self.database.list_attempts(task.id)[-1]
