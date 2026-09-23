@@ -53,6 +53,7 @@ Runtime-native session state stays under the stable run session directory, outsi
 - `domain`: entities, enums, invariants, and state transitions.
 - `runtime/base.py`: runtime-neutral DTOs and `AgentRuntime`.
 - `runtime/codex.py`: the Codex adapter.
+- `runtime/codex_preflight.py`: bounded, credential-free native startup diagnostics for doctor; no thread or model invocation.
 - `runtime/claude_code.py` and `runtime/antigravity.py`: optional, lazily imported native harness adapters.
 - `workflow`: the deterministic `Armarius` scheduler, budgets, recovery, approval gates, and release gate.
 - `storage`: `sqlite3` migrations, transactions, and queries.
@@ -95,9 +96,9 @@ class AgentRuntime(Protocol):
 
 Each adapter is bound to one exact native harness version:
 
-- `CodexAgentRuntime`: `openai-codex==0.144.4`; start and resume both reapply the bundle cwd, role instructions, output schema, read-only sandbox, and deny-all approval policy.
-- `ClaudeCodeAgentRuntime`: `claude-agent-sdk==0.2.128`; uses the bundled Claude harness with only `Read`, `Glob`, and `Grep`. A `PreToolUse` guard rejects reads outside the bundle or through path traversal. Bash, edits, writes, web, Agent, Skill, MCP, plugins, and external settings are disabled.
-- `AntigravityAgentRuntime`: `google-antigravity==0.1.8`; uses `LocalAgentConfig` with only directory listing, search, find, view, and finish. Commands, writes, web access, and subagents are disabled, and resume uses the original conversation ID in strict `RESUME` mode.
+- `CodexAgentRuntime`: `openai-codex==0.156.1`; start and resume both reapply the bundle cwd, role instructions, output schema, read-only sandbox, and deny-all approval policy.
+- `ClaudeCodeAgentRuntime`: `claude-agent-sdk==0.2.158`; uses the bundled Claude harness with only `Read`, `Glob`, and `Grep`. A `PreToolUse` guard rejects reads outside the bundle or through path traversal. Bash, edits, writes, web, Agent, Skill, MCP, plugins, and external settings are disabled.
+- `AntigravityAgentRuntime`: `google-antigravity==0.1.18`; uses `LocalAgentConfig` with only directory listing, search, find, view, and finish. Commands, writes, web access, and subagents are disabled, and resume uses the original conversation ID in strict `RESUME` mode.
 
 The optional SDKs are imported only inside their adapters and only when selected. Claude Code accepts `structured_output` and persists SDK messages as NDJSON. Antigravity accepts structured output and persists the current turn's incremental steps as NDJSON. Cancellation first requests native session cancellation; adapters then normalize completion, failure, or interruption.
 

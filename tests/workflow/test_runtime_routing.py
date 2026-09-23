@@ -15,7 +15,7 @@ def test_default_runtime_composition_uses_per_attempt_containment(tmp_path):
     with ScriptoriumService(repo, manuscript_manager=PdfBuildingManuscriptManager(repo)) as service:
         route = replace(
             service.local_config.route_for_role(AgentRole.SUBSTANTIVE_REVIEW.value),
-            runtime_version="0.144.4",
+            runtime_version="0.156.1",
         )
         runtime = service.armarius.runtime_factory(route)
 
@@ -27,7 +27,7 @@ def test_runtime_provenance_mismatch_is_not_accepted_as_a_completed_attempt(tmp_
     repo = make_repository(tmp_path)
     runtime = FakeAgentRuntime(
         runtime_name="claude_code",
-        runtime_version="0.2.128",
+        runtime_version="0.2.158",
         model="fake-model",
         provider="ollama",
     )
@@ -93,15 +93,15 @@ def test_mixed_native_routes_freeze_and_record_per_route_runtime(tmp_path):
         routes = started["run"].frozen_config["local"]["routes"]
         assert (routes["primary"]["runtime"], routes["primary"]["runtime_version"]) == (
             "codex",
-            "0.144.4",
+            "0.156.1",
         )
         assert (routes["claude"]["runtime"], routes["claude"]["runtime_version"]) == (
             "claude_code",
-            "0.2.128",
+            "0.2.158",
         )
         assert (routes["gemini"]["runtime"], routes["gemini"]["runtime_version"]) == (
             "antigravity",
-            "0.1.8",
+            "0.1.18",
         )
         attempts = [attempt for item in started["tasks"] for attempt in item["attempts"]]
         assert {attempt.runtime_name for attempt in attempts} == {"claude_code", "antigravity"}

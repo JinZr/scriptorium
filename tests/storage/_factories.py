@@ -29,7 +29,7 @@ def create_completed_attempt(database: Database, run: Run) -> tuple[Task, Attemp
             task_id=task.id,
             ordinal=1,
             runtime_name="codex",
-            runtime_version="0.144.4",
+            runtime_version="0.156.1",
             model="test-model",
             model_provider="openai",
         )

@@ -346,7 +346,7 @@ class AntigravityAgentRuntime:
 async def _cancel_active(agent: Any) -> str | None:
     try:
         if agent is not None and agent.is_started:
-            # google-antigravity 0.1.8 may mark the response done before external
+            # google-antigravity 0.1.18 may mark the response done before external
             # cancellation, making response.cancel() a no-op; conversation owns the turn.
             await agent.conversation.cancel()
     except asyncio.CancelledError as exc:

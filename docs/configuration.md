@@ -76,9 +76,15 @@ Do not set `runtime_version` in `.scriptorium/config.toml`. It is written only b
 
 The pinned versions are:
 
-- `codex`: `openai-codex==0.144.4` (base installation)
-- `claude_code`: `claude-agent-sdk==0.2.128` (`scriptorium[claude]`)
-- `antigravity`: `google-antigravity==0.1.8` (`scriptorium[antigravity]`)
+- `codex`: `openai-codex==0.156.1` (base installation)
+- `claude_code`: `claude-agent-sdk==0.2.158` (`scriptorium[claude]`)
+- `antigravity`: `google-antigravity==0.1.18` (`scriptorium[antigravity]`)
+
+The dependency refresh moves Codex from 0.144.4 to 0.156.1, Claude Code from
+0.2.128 to 0.2.158, and Antigravity from 0.1.8 to 0.1.18. Runs frozen with the
+previous versions cannot resume under the new adapter pins; use a separate
+environment with the matching Scriptorium revision and SDKs to resume them, or
+start a new run. Do not edit frozen version metadata.
 
 Changing an installed SDK version does not rewrite a frozen run. Resume requires the frozen runtime, exact SDK version, provider, and model. A historical frozen configuration without a route-level runtime continues to use its original top-level Codex runtime without modifying the stored configuration.
 
@@ -112,3 +118,10 @@ Input and output totals are priced once. Cached input and reasoning output remai
 Scriptorium checks recorded estimated cost before starting each new task. A task already in progress can make the estimate slightly exceed the requested budget, after which the run enters `waiting_budget`.
 
 This is a local scheduling gate and audit estimate, not a provider-level billing cap.
+
+For Codex, doctor additionally checks the bundled native process can initialize
+and read synthetic configuration in a temporary, credential-free home. The
+`codex_startup` diagnostic is not authentication or route validation: selected
+provider settings and existing native sessions are not read or changed by the
+probe. This does not change start/resume configuration or frozen run metadata.
+See [operations](operations.md) for the timeout, cleanup, and acceptance boundary.

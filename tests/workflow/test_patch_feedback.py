@@ -160,7 +160,7 @@ def test_rejected_patch_correction_recovers_context_after_terminal_attempt(tmp_p
     revision = RecordingRevisionRuntime(
         correction_status_once=terminal_status,
         runtime_name="claude_code",
-        runtime_version="0.2.128",
+        runtime_version="0.2.158",
         model="claude-test",
         provider="anthropic",
     )

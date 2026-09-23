@@ -179,7 +179,7 @@ class ClaudeCodeAgentRuntime:
             messages: list[Any] = []
             result_message: Any = None
             current_thread_id = thread_id
-            # Claude 0.2.128's top-level query() cannot interrupt a live turn;
+            # Claude 0.2.158's top-level query() cannot interrupt a live turn;
             # the public persistent client provides interrupt and ordered disconnect.
             client = self._client_type(options=options)
             receive_task: asyncio.Task[Any] | None = None

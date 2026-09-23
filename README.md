@@ -34,8 +34,8 @@ python -m pip install .
 Install native harnesses only when their routes are used:
 
 ```bash
-python -m pip install '.[claude]'       # claude-agent-sdk==0.2.128
-python -m pip install '.[antigravity]'  # google-antigravity==0.1.8
+python -m pip install '.[claude]'       # claude-agent-sdk==0.2.158
+python -m pip install '.[antigravity]'  # google-antigravity==0.1.18
 python -m pip install '.[all]'          # both optional runtimes
 ```
 

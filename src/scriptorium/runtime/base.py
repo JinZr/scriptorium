@@ -10,9 +10,9 @@ from typing import Literal, Protocol, runtime_checkable
 from ..domain import ROLE_CATALOG, AgentRole
 
 AgentStatus = Literal["completed", "failed", "interrupted"]
-CODEX_SDK_VERSION = "0.144.4"
-CLAUDE_SDK_VERSION = "0.2.128"
-ANTIGRAVITY_SDK_VERSION = "0.1.8"
+CODEX_SDK_VERSION = "0.156.1"
+CLAUDE_SDK_VERSION = "0.2.158"
+ANTIGRAVITY_SDK_VERSION = "0.1.18"
 RUNTIME_SDK_VERSIONS = {
     "codex": CODEX_SDK_VERSION,
     "claude_code": CLAUDE_SDK_VERSION,
