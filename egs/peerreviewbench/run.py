@@ -18,7 +18,7 @@ from typing import Any
 from urllib.parse import unquote, urlparse
 import uuid
 
-import fitz
+import pymupdf as fitz
 
 import scriptorium
 from scriptorium.config import ManuscriptConfig

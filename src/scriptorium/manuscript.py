@@ -14,7 +14,7 @@ import sys
 import tarfile
 from typing import Iterable, Iterator
 
-import fitz
+import pymupdf as fitz
 
 from .config import ManuscriptConfig
 from .errors import InfrastructureError, StateError
