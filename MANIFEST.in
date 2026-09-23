@@ -1,5 +1,6 @@
 recursive-include .codex-plugin *
-recursive-include docs *.md
+recursive-exclude docs *
+include docs/architecture.md docs/configuration.md docs/operations.md
 recursive-include skills *.md *.yaml
 recursive-include tests *.md *.py
 include tests/manuscript/fixtures/retrieval_cases.json

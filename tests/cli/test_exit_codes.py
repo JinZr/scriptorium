@@ -38,7 +38,7 @@ def test_stale_patch_is_a_domain_exit(monkeypatch, capsys) -> None:
 
 def test_doctor_reports_configuration_failure(monkeypatch, capsys) -> None:
     service = FakeService()
-    service.doctor_result = {"ok": False, "checks": ["model is not configured"]}
+    service.doctor_result = {"ok": False, "checks": ["profile is not configured"]}
     install_fake_service(monkeypatch, service)
 
     assert cli.main(["doctor", "--json"]) == 2
@@ -47,7 +47,7 @@ def test_doctor_reports_configuration_failure(monkeypatch, capsys) -> None:
         "ok": False,
         "error": {
             "code": "configuration_error",
-            "message": "model is not configured",
+            "message": "profile is not configured",
         },
     }
 
@@ -65,12 +65,12 @@ def test_known_and_unexpected_errors_map_to_exit_codes(monkeypatch, capsys) -> N
     service = FakeService()
     install_fake_service(monkeypatch, service)
 
-    service.error = ConfigurationError("bad route")
+    service.error = ConfigurationError("bad profile")
     assert cli.main(["--json", "run", "status", "run_1"]) == 2
     known = json.loads(capsys.readouterr().out)
     assert known == {
         "ok": False,
-        "error": {"code": "configuration_error", "message": "bad route"},
+        "error": {"code": "configuration_error", "message": "bad profile"},
     }
 
     service.error = RuntimeError("database unavailable")

@@ -5,7 +5,7 @@ from scriptorium import cli
 from ._fake_service import FakeService, install_fake_service
 
 
-def test_start_emits_json_and_passes_route_inputs(monkeypatch, capsys) -> None:
+def test_start_emits_json_and_passes_frozen_inputs(monkeypatch, capsys) -> None:
     service = FakeService()
     install_fake_service(monkeypatch, service)
 
@@ -17,14 +17,12 @@ def test_start_emits_json_and_passes_route_inputs(monkeypatch, capsys) -> None:
             "abc123",
             "--profile",
             "quick",
-            "--budget-usd",
-            "3.5",
             "--json",
         ]
     )
 
     assert exit_code == 0
-    assert service.calls == [("start_run", "abc123", "quick", 3.5)]
+    assert service.calls == [("start_run", "abc123", "quick")]
     output = json.loads(capsys.readouterr().out)
     assert output == {
         "ok": True,
@@ -37,9 +35,9 @@ def test_doctor_passes_default_and_explicit_revision(monkeypatch, capsys) -> Non
     install_fake_service(monkeypatch, service)
 
     assert cli.main(["doctor"]) == 0
-    assert service.calls[-1] == ("doctor", None, None, "HEAD")
+    assert service.calls[-1] == ("doctor", None, "HEAD")
     assert cli.main(["doctor", "--revision", "abc123", "--profile", "quick"]) == 0
-    assert service.calls[-1] == ("doctor", "quick", None, "abc123")
+    assert service.calls[-1] == ("doctor", "quick", "abc123")
     capsys.readouterr()
 
 
@@ -51,8 +49,8 @@ def test_run_commands_dispatch_to_service(monkeypatch, capsys) -> None:
         (["run", "status", "run_1"], ("get_run", "run_1")),
         (["run", "resume", "run_1"], ("resume_run", "run_1")),
         (
-            ["run", "retry", "run_1", "--task", "task_1", "--route", "other"],
-            ("retry_task", "run_1", "task_1", "other"),
+            ["run", "retry", "run_1", "--task", "task_1"],
+            ("retry_task", "run_1", "task_1"),
         ),
         (["run", "cancel", "run_1", "--reason", "stop"], ("cancel_run", "run_1", "stop")),
     ]

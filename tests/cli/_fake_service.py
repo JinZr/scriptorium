@@ -27,14 +27,13 @@ class FakeService:
     def doctor(
         self,
         profile: str | None = None,
-        budget_usd: float | None = None,
         revision: str = "HEAD",
     ) -> dict:
-        self.calls.append(("doctor", profile, budget_usd, revision))
+        self.calls.append(("doctor", profile, revision))
         return self.doctor_result
 
-    async def start_run(self, revision: str, profile: str, budget_usd: float | None) -> Result:
-        return self._record("start_run", revision, profile, budget_usd)
+    async def start_run(self, revision: str, profile: str) -> Result:
+        return self._record("start_run", revision, profile)
 
     def get_run(self, run_id: str) -> Result:
         return self._record("get_run", run_id)
@@ -42,8 +41,8 @@ class FakeService:
     async def resume_run(self, run_id: str) -> Result:
         return self._record("resume_run", run_id)
 
-    async def retry_task(self, run_id: str, task_id: str, route: str | None = None) -> Result:
-        return self._record("retry_task", run_id, task_id, route)
+    async def retry_task(self, run_id: str, task_id: str) -> Result:
+        return self._record("retry_task", run_id, task_id)
 
     def cancel_run(self, run_id: str, reason: str) -> Result:
         return self._record("cancel_run", run_id, reason)
