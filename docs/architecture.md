@@ -8,11 +8,13 @@ Scriptorium is a single-user modular monolith. It has no server, queue, or model
 - `manuscript.py` creates the frozen source, navigation, source map, PDF, and page-image bundle. Retrieval checks the requested source or page against its frozen digest; result submission validates the complete bundle.
 - `workflow.py` prepares review, revision, and verification tasks. It validates whole structured submissions and advances only after the required prior stage and human decision.
 - `storage.py` owns SQLite migrations, tasks, attempts, decisions, and events. `artifacts.py` publishes immutable SHA-256 content.
-- `service.py` provides short, per-run mutations under an OS file lock. A task claim persists across CLI processes. `cli.py` provides the shared JSON interface.
+- `service.py` serializes per-run mutations and retrieval under an OS file lock. A task claim persists across CLI processes. `cli.py` provides the shared JSON interface.
 
 `run start` freezes inputs, compiles the base bundle, and creates review tasks. Task preparation stores a content-addressed file index for the bundle. `task claim` records the external client, model, effort, and session ID on a durable attempt. The claim returns its prompt, schema, input digest, navigation digest, and source map. `task read`, `task search`, and `task page` check the indexed metadata and requested files without loading unrelated sources or pages, then return bounded frozen material and append access events. Read events record the source digest, exact returned line and character-offset ranges, and continuation cursor. `task submit` stores the raw result, validates it against the frozen schema and evidence map, and records a complete or failed attempt. An accepted result is replayed into findings, a candidate patch, or verification. Repeating a completed submission returns the same receipt; a different or superseded result is rejected.
 
 A CLI process ending does not interrupt an external attempt. Only explicit abandonment, retry, or cancellation changes that claim. An invalid result creates a durable validation report; retry must be requested explicitly. Each attempt binds its own prompt, schema, and bundle digest, including correction prompts. A later finding waiver interrupts an active revision or verification task whose frozen prompt no longer matches the decision context; `run resume` prepares a new task. On recovery, completed output is read from the artifact store and validated again before domain records are materialized. Missing or corrupt frozen material is an infrastructure failure.
+
+Read, search, and page operations hold the run lock through their access event, so cancellation or submission cannot terminalize an attempt between its active-status check and the returned material. The external-schema upgrade rechecks the database version inside a SQLite write transaction, allowing concurrent new runs to share one migration.
 
 ## Evidence and gates
 

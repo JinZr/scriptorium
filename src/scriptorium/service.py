@@ -422,6 +422,13 @@ class ScriptoriumService:
                 "run_status": self._storage(self.database.get_run, task.run_id).status,
             }
 
+    @contextmanager
+    def _retrieval_operation(self, attempt_id: str, operation: str) -> Iterator[None]:
+        attempt = self._storage(self.database.get_attempt, attempt_id)
+        task = self._storage(self.database.get_task, attempt.task_id)
+        with self._run_operation(task.run_id, operation, wait=True):
+            yield
+
     def _readable_task(self, attempt_id: str):
         attempt = self._storage(self.database.get_attempt, attempt_id)
         task = self._storage(self.database.get_task, attempt.task_id)
@@ -434,6 +441,10 @@ class ScriptoriumService:
         return attempt, task, bundle, files
 
     def read_task(self, attempt_id: str, path: str, start_line: int, max_lines: int, offset: int, max_chars: int):
+        with self._retrieval_operation(attempt_id, "task read"):
+            return self._read_task(attempt_id, path, start_line, max_lines, offset, max_chars)
+
+    def _read_task(self, attempt_id: str, path: str, start_line: int, max_lines: int, offset: int, max_chars: int):
         attempt, task, bundle, files = self._readable_task(attempt_id)
         if start_line < 1 or not 1 <= max_lines <= 100 or offset < 0 or not 1 <= max_chars <= 8000:
             raise ConfigurationError("invalid read range or size")
@@ -480,6 +491,10 @@ class ScriptoriumService:
         }
 
     def search_task(self, attempt_id: str, query: str, path: str | None, cursor: int, limit: int):
+        with self._retrieval_operation(attempt_id, "task search"):
+            return self._search_task(attempt_id, query, path, cursor, limit)
+
+    def _search_task(self, attempt_id: str, query: str, path: str | None, cursor: int, limit: int):
         attempt, task, bundle, files = self._readable_task(attempt_id)
         if not query or len(query) > 200 or cursor < 0 or not 1 <= limit <= 50:
             raise ConfigurationError("invalid search query, cursor, or limit")
@@ -539,6 +554,10 @@ class ScriptoriumService:
         return {"matches": matches, "total_matches": total_matches, "next_cursor": next_cursor}
 
     def page_task(self, attempt_id: str, page_number: int):
+        with self._retrieval_operation(attempt_id, "task page"):
+            return self._page_task(attempt_id, page_number)
+
+    def _page_task(self, attempt_id: str, page_number: int):
         attempt, task, bundle, files = self._readable_task(attempt_id)
         page = next((item for item in bundle.anchor_map.compiled_pdf.pages if item.page == page_number), None)
         if page is None:
