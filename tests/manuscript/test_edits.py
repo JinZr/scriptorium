@@ -68,3 +68,34 @@ def test_exact_edits_reject_mismatched_and_overlapping_replacements(tmp_path: Pa
                 ExactEdit(**common, finding_ids=["f2"], before="The value is 1.", after="The value is 3."),
             ],
         )
+
+
+@pytest.mark.parametrize("outside", [False, True])
+def test_patch_copy_preserves_internal_links_and_rejects_external_write(tmp_path, outside):
+    from scriptorium.errors import InfrastructureError
+
+    snapshot = tmp_path / "snapshot"
+    snapshot.mkdir()
+    target = (tmp_path if outside else snapshot) / "text.tex"
+    target.write_text("Before.\n")
+    (snapshot / "main.tex").symlink_to(target if outside else Path("text.tex"))
+    edit = ExactEdit(
+        finding_ids=["f1"],
+        path="main.tex" if outside else "text.tex",
+        source_digest=sha256(target.read_bytes()).hexdigest(),
+        start_line=1,
+        end_line=1,
+        before="Before.",
+        after="After.",
+        rationale="Correct text.",
+    )
+    manager = ManuscriptManager(tmp_path)
+    patched = tmp_path / "patched"
+    if outside:
+        with pytest.raises(InfrastructureError, match="leaves the snapshot"):
+            manager.apply_edits(snapshot, patched, [edit])
+    else:
+        manager.apply_edits(snapshot, patched, [edit])
+        assert (patched / "main.tex").is_symlink()
+        assert (patched / "main.tex").read_text() == "After.\n"
+    assert target.read_text() == "Before.\n"

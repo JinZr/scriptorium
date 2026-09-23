@@ -144,6 +144,46 @@ proof of complete compiler-input coverage. Scanner fixes apply to newly created
 runs; existing runs retain their frozen source lists and must be restarted as a
 new run if an incomplete list prevents progress.
 
+Build and patch copies preserve internal relative symlinks so source identities
+remain consistent with the snapshot; patch writes still require a target inside
+the copied tree. Every native LaTeX build forces recorder generation in a
+disposable copy. It
+removes copied recorder/PDF state and standard auxiliary files before invoking
+`latexmk -g -recorder`. A fresh `.fls` must identify the build directory, main
+input, and engine output (PDF, or XDV for XeLaTeX followed by PDF conversion). Missing or malformed recorder evidence is an infrastructure
+failure even when the compiler exits successfully. Paths are normalized against
+the recorded working directory, with the existing snapshot and forbidden-path
+checks still enforced. External installation inputs are recognized through
+`kpsewhich`'s expanded `TEXMF`/`TEXMFCNF`/`TEXMFCACHE` paths (including
+installation cache outputs); external font files are build
+resources. Other external content inputs are rejected.
+
+Actual snapshot inputs are classified before a model can start:
+
+- Manuscript text/data (`.tex`, `.ltx`, `.bib`, `.bbl`, `.txt`, `.csv`, `.tsv`,
+  `.dat`) and supported graphics (`.pdf`, `.png`, `.jpg`, `.jpeg`, `.eps`, `.svg`)
+  must match the corresponding review source paths and SHA-256 digests.
+- Local template resources (`.cls`, `.sty`, `.bst`, `.clo`, `.def`, `.cfg`, `.fd`,
+  `.enc`, `.map`) and fonts (`.tfm`, `.vf`, `.pfb`, `.pfa`, `.otf`, `.ttf`, `.ttc`)
+  are recorded with snapshot digests as build-only inputs. They are not claimed
+  to have been scientifically reviewed. Content hidden in template macros
+  remains outside this coverage guarantee.
+- Fresh auxiliary outputs (`.aux`, `.toc`, `.out`, `.lof`, `.lot`, `.nav`, `.snm`,
+  `.vrb`) and newly generated `.bbl` files do not become editable evidence. A
+  pre-existing tracked `.bbl` remains a review input, preserving the bibliography
+  fallback contract. The static bibliography scan is still required because
+  BibTeX/Biber inputs need not appear in the TeX recorder.
+- Unknown local input types, generated manuscript content without a snapshot
+  source, and changed snapshot inputs block the build instead of expanding the
+  frozen source set.
+
+Doctor, initial preparation, patch compilation, and verification use this same
+coverage comparison. Initial preparation uses the run's already frozen sources;
+patch and verification builds compare against the corresponding patched source
+closure. Existing build-log artifacts contain normalized recorder inputs/outputs
+and classified snapshot identities, including build-only inputs. Synthetic
+non-LaTeX builders do not claim recorder evidence and need not fabricate it.
+
 The bundle becomes the selected runtime's workspace. Repository-level `.codex/`, `AGENTS.md`, source code, scripts, unrelated files, and uncommitted changes are excluded.
 
 `source-map.json` is the per-bundle authority for evidence anchors. It separates the runtime read namespace from the durable output namespace: a source is read at `sources/<relative-path>` but cited and edited as the bare `<relative-path>`, while a rendered page is read at the map's exact `pages/page-0001.png`-style path but cited as `source_path="manuscript.pdf"` plus a 1-based page number. Read paths are not aliases and are never normalized into durable anchors. The map also records source digests, line counts, text-anchor eligibility, compiled page count, and page-image digests, and is checked against the bundle manifest before a provider starts.

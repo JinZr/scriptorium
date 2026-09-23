@@ -321,8 +321,7 @@ class Armarius:
     ) -> None:
         run_dir = self._run_dir(run.id)
         snapshot = run_dir / "snapshot"
-        build = self._build_copy(snapshot, run_dir / "build" / "base", project.manuscript)
-        self._record_text(build.log, "text/plain; charset=utf-8")
+        build = self._build_copy(snapshot, run_dir / "build" / "base", project.manuscript, sources)
         self._record_file(build.pdf_path, "application/pdf")
         bundle = self.manuscript.create_bundle(
             snapshot,
@@ -536,13 +535,12 @@ class Armarius:
         )
         if not changed_paths:
             raise StateError("the revision contains no manuscript changes")
-        build = self._build_copy(
+        self._build_copy(
             candidate,
             self._run_dir(run.id) / "build" / "patch-candidate",
             self._manuscript_config(run),
         )
         diff_artifact = self._record_text(diff, "text/x-diff; charset=utf-8")
-        self._record_text(build.log, "text/plain; charset=utf-8")
         patch = Patch(
             run_id=run.id,
             base_commit=run.commit_sha,
@@ -2128,11 +2126,22 @@ class Armarius:
         path.mkdir(parents=True, exist_ok=True)
         return path
 
-    def _build_copy(self, source: Path, destination: Path, manuscript: ManuscriptConfig) -> BuildResult:
+    def _build_copy(
+        self,
+        source: Path,
+        destination: Path,
+        manuscript: ManuscriptConfig,
+        sources: tuple[SourceFile, ...] | None = None,
+    ) -> BuildResult:
+        if sources is None:
+            sources = self.manuscript.scan_sources(source, manuscript.main)
         if destination.exists():
             shutil.rmtree(destination)
-        shutil.copytree(source, destination)
-        return self.manuscript.build(destination, manuscript)
+        shutil.copytree(source, destination, symlinks=True)
+        build = self.manuscript.build(destination, manuscript)
+        self._record_text(build.log, "text/plain; charset=utf-8")
+        self.manuscript.validate_build_sources(build, sources)
+        return build
 
     def _run_dir(self, run_id: str) -> Path:
         return self.runs_dir / run_id

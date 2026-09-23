@@ -21,7 +21,7 @@ Scriptorium intentionally has no LangGraph layer, HTTP service, or background qu
 
 - Python 3.10 or newer
 - Git
-- `latexmk` and a supported LaTeX engine (`pdflatex`, `xelatex`, or `lualatex`)
+- `latexmk`, `kpsewhich`, and a supported LaTeX engine (`pdflatex`, `xelatex`, or `lualatex`)
 - PDF rendering support for review bundles
 - Credentials or native login for every runtime referenced by the selected routes
 

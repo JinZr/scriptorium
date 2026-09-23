@@ -447,3 +447,27 @@ def test_doctor_cleans_temporary_build_after_keyboard_interrupt(
 
     assert len(manager.build_workspaces) == 1
     assert not manager.build_workspaces[0].exists()
+
+
+def test_doctor_reports_compiler_source_omission(tmp_path, monkeypatch):
+    from dataclasses import replace
+
+    from scriptorium.manuscript import CompilerInput
+
+    class UncoveredBuildManager(DoctorManuscriptManager):
+        def build(self, workspace, manuscript):
+            return replace(
+                super().build(workspace, manuscript),
+                compiler_inputs=(CompilerInput("hidden.tex", "missing", "review"),),
+            )
+
+    repo = make_repository(tmp_path, "codex", "openai")
+    prepare_doctor(monkeypatch)
+    monkeypatch.setattr("scriptorium.service.metadata.version", lambda package: "0.144.4")
+    with ScriptoriumService(repo, manuscript_manager=UncoveredBuildManager(repo)) as service:
+        result = service.doctor(profile="quick")
+        assert service.database.list_runs() == []
+    assert result["exit_code"] == 3
+    check = next(item for item in result["checks"] if item["name"] == "manuscript_compile")
+    assert not check["ok"]
+    assert "hidden.tex" in check["message"]

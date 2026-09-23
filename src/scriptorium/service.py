@@ -260,8 +260,9 @@ class ScriptoriumService:
                 build_workspace = temporary_root / "build"
                 try:
                     # Compile a copy so generated LaTeX files cannot mutate the frozen snapshot.
-                    shutil.copytree(snapshot, build_workspace)
+                    shutil.copytree(snapshot, build_workspace, symlinks=True)
                     build = self.manuscript.build(build_workspace, project.manuscript)
+                    self.manuscript.validate_build_sources(build, sources)
                     if not build.pdf_path.is_file():
                         raise InfrastructureError(f"LaTeX build did not create {build.pdf_path.name}")
                 except (InfrastructureError, OSError) as exc:
@@ -270,7 +271,11 @@ class ScriptoriumService:
                     check(
                         "manuscript_compile",
                         True,
-                        f"compiled {project.manuscript.main} from {frozen_revision.commit_sha}",
+                        f"compiled {project.manuscript.main} from {frozen_revision.commit_sha}; build-only inputs: "
+                        + (
+                            ", ".join(item.path for item in (build.compiler_inputs or ()) if item.kind == "build")
+                            or "none"
+                        ),
                     )
 
         if project is None:
