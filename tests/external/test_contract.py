@@ -387,3 +387,21 @@ def test_completed_attempt_replays_after_process_exit(tmp_path: Path) -> None:
         asyncio.run(service.resume_run(run_id))
         assert service.database.get_run(run_id).status == RunStatus.AWAITING_DECISION
         assert len(service.database.list_attempts(task_id)) == 1
+
+
+def test_corrupt_completed_output_cannot_be_replayed_or_pass_the_gate(tmp_path: Path) -> None:
+    repo = _repo(tmp_path / "paper")
+    run_id, task_id = _start(repo)
+    with ScriptoriumService(repo) as service:
+        claim = service.claim_task(task_id, "codex", "model", "max", "session", "host")
+        attempt = service.armarius.submit_task(
+            claim["attempt"].id,
+            claim["input_digest"],
+            json.dumps({"summary": "Reviewed the manuscript.", "findings": []}),
+        )
+        service.artifacts.path_for(attempt.output_artifact_digest).write_text("corrupt", encoding="utf-8")
+    with ScriptoriumService(repo) as service:
+        with pytest.raises(InfrastructureError, match="unreadable output"):
+            asyncio.run(service.resume_run(run_id))
+        assert service.list_findings(run_id) == []
+        assert not service.evaluate_gate(run_id)["passed"]
