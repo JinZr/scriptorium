@@ -27,7 +27,8 @@ def test_running_attempt_is_durable_across_service_restarts(tmp_path):
         assert receipt["run_status"] == RunStatus.AWAITING_DECISION
 
 
-def test_partial_review_continues_across_processes_without_replacing_findings(tmp_path):
+@pytest.mark.parametrize("artifact_damage", ["missing", "corrupt"])
+def test_partial_review_continues_across_processes_without_replacing_findings(tmp_path, artifact_damage):
     repo = make_repository(tmp_path, roles=("substantive_review",))
     with ScriptoriumService(repo, manuscript_manager=PdfBuildingManuscriptManager(repo)) as service:
         run = asyncio.run(service.start_run("HEAD", "quick"))["run"]
@@ -90,6 +91,16 @@ def test_partial_review_continues_across_processes_without_replacing_findings(tm
         assert attempts[0].output_artifact_digest == first_receipt["output_digest"]
         service.decide_finding(original_finding.id, "reject", "No revision needed after review")
         assert service.database.get_finding(original_finding.id).status.value == "rejected"
+        asyncio.run(service.resume_run(run.id))
+        assert service.evaluate_gate(run.id)["passed"]
+        earlier_output = service.artifacts.path_for(first_receipt["output_digest"])
+        if artifact_damage == "missing":
+            earlier_output.unlink()
+        else:
+            earlier_output.write_text("corrupt", encoding="utf-8")
+        gate = service.evaluate_gate(run.id)
+        assert not gate["conditions"]["review_artifacts_valid"]
+        assert first["attempt"].id in gate["errors"][0]
 
 
 def test_partial_review_invalid_continuation_preserves_prior_output_and_diagnostics(tmp_path):

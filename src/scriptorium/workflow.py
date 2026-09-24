@@ -1072,25 +1072,27 @@ class Armarius:
         return TaskOutcome(task, completed, output)
 
     def completed_review_output(self, task: Task) -> tuple[Attempt, ReviewOutput] | None:
-        completed = next(
-            (item for item in reversed(self.database.list_attempts(task.id)) if item.status == AttemptStatus.COMPLETED),
-            None,
-        )
-        if completed is None:
+        completed_attempts = [
+            item for item in self.database.list_attempts(task.id) if item.status == AttemptStatus.COMPLETED
+        ]
+        if not completed_attempts:
             return None
         run = self.database.get_run(task.run_id)
-        schema = self._load_schema_artifact(run, "review", completed.schema_digest)
-        model = self._output_model_for_schema(run, "review", schema)
-        if completed.output_artifact_digest is None:
-            raise InfrastructureError(f"completed review attempt {completed.id} has no output artifact")
-        try:
-            output_text = self.artifacts.get_bytes(completed.output_artifact_digest).decode("utf-8")
-        except (ArtifactError, UnicodeDecodeError) as exc:
-            raise InfrastructureError(f"completed review attempt {completed.id} has unreadable output") from exc
-        output, issues = self._parse_and_validate_output(model, output_text, lambda _: [])
-        if output is None or issues:
-            raise InfrastructureError(f"completed review attempt {completed.id} has invalid output")
-        return completed, output
+        latest = None
+        for completed in completed_attempts:
+            schema = self._load_schema_artifact(run, "review", completed.schema_digest)
+            model = self._output_model_for_schema(run, "review", schema)
+            if completed.output_artifact_digest is None:
+                raise InfrastructureError(f"completed review attempt {completed.id} has no output artifact")
+            try:
+                output_text = self.artifacts.get_bytes(completed.output_artifact_digest).decode("utf-8")
+            except (ArtifactError, UnicodeDecodeError) as exc:
+                raise InfrastructureError(f"completed review attempt {completed.id} has unreadable output") from exc
+            output, issues = self._parse_and_validate_output(model, output_text, lambda _: [])
+            if output is None or issues:
+                raise InfrastructureError(f"completed review attempt {completed.id} has invalid output")
+            latest = (completed, output)
+        return latest
 
     def review_completion(self, task: Task) -> str | None:
         accepted = self.completed_review_output(task)
