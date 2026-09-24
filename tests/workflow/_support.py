@@ -53,7 +53,7 @@ def submit(service, claim_data, output):
     if claim_data["task"].stage == "review" and "scope" not in output:
         output = {
             **output,
-            "scope": {"completion": "unknown", "checked": [], "outstanding": [], "limitations": []},
+            "scope": {"completion": "complete", "checked": [], "outstanding": [], "limitations": []},
         }
     return asyncio.run(
         service.submit_task(

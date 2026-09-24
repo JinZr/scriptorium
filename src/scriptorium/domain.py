@@ -153,7 +153,9 @@ RUN_TRANSITIONS: Mapping[RunStatus, frozenset[RunStatus]] = {
     RunStatus.REVIEWING: frozenset(
         {RunStatus.AWAITING_DECISION, RunStatus.WAITING_BUDGET, RunStatus.FAILED, RunStatus.CANCELLED}
     ),
-    RunStatus.AWAITING_DECISION: frozenset({RunStatus.REVISING, RunStatus.COMPLETED, RunStatus.CANCELLED}),
+    RunStatus.AWAITING_DECISION: frozenset(
+        {RunStatus.REVIEWING, RunStatus.REVISING, RunStatus.COMPLETED, RunStatus.CANCELLED}
+    ),
     RunStatus.REVISING: frozenset(
         {
             RunStatus.AWAITING_PATCH_APPROVAL,
@@ -193,7 +195,7 @@ TASK_TRANSITIONS: Mapping[TaskStatus, frozenset[TaskStatus]] = {
     ),
     TaskStatus.INTERRUPTED: frozenset({TaskStatus.PENDING, TaskStatus.RUNNING, TaskStatus.CANCELLED}),
     TaskStatus.FAILED: frozenset({TaskStatus.PENDING, TaskStatus.RUNNING, TaskStatus.CANCELLED}),
-    TaskStatus.COMPLETED: frozenset(),
+    TaskStatus.COMPLETED: frozenset({TaskStatus.PENDING}),
     TaskStatus.CANCELLED: frozenset(),
 }
 

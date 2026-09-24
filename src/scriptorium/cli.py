@@ -61,6 +61,10 @@ def build_parser() -> argparse.ArgumentParser:
     retry_parser.add_argument("--reason")
     retry_parser.add_argument("--route")
 
+    continue_parser = run_commands.add_parser("continue", help="continue an accepted partial review")
+    continue_parser.add_argument("run_id")
+    continue_parser.add_argument("--task", required=True, dest="task_id")
+
     cancel_parser = run_commands.add_parser("cancel", help="cancel a run")
     cancel_parser.add_argument("run_id")
     cancel_parser.add_argument("--reason", required=True, type=_nonempty)
@@ -221,6 +225,8 @@ def _dispatch_run(service: Any, arguments: argparse.Namespace) -> tuple[Any, int
             service.retry_task(arguments.run_id, arguments.task_id, arguments.abandon_attempt, arguments.reason)
         )
         return result, 0, None
+    if arguments.run_command == "continue":
+        return asyncio.run(service.continue_review(arguments.run_id, arguments.task_id)), 0, None
     if arguments.run_command == "cancel":
         return service.cancel_run(arguments.run_id, arguments.reason), 0, None
     if arguments.run_command == "report":
