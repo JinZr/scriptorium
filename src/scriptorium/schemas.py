@@ -3,7 +3,7 @@ from __future__ import annotations
 from enum import Enum
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from .domain import digest_json
 
@@ -235,6 +235,13 @@ class ReviewScopeArea(StrictModel):
     start_line: int | None = Field(default=None, ge=1, strict=True)
     end_line: int | None = Field(default=None, ge=1, strict=True)
     page: int | None = Field(default=None, ge=1, strict=True)
+
+    @field_validator("start_line", "end_line", "page", mode="before")
+    @classmethod
+    def accept_integral_number(cls, value: Any) -> Any:
+        if isinstance(value, float) and value.is_integer():
+            return int(value)
+        return value
 
     @model_validator(mode="before")
     @classmethod

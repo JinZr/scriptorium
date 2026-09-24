@@ -121,15 +121,30 @@ def test_review_scope_schema_exposes_location_and_completion_constraints() -> No
     [
         {"source_path": "manuscript.pdf", "page": "1"},
         {"source_path": "manuscript.pdf", "page": True},
+        {"source_path": "manuscript.pdf", "page": 1.5},
         {"source_path": "main.tex", "start_line": "1", "end_line": 1},
         {"source_path": "main.tex", "start_line": True, "end_line": 1},
+        {"source_path": "main.tex", "start_line": 1.5, "end_line": 2},
         {"source_path": "main.tex", "start_line": 1, "end_line": "1"},
         {"source_path": "main.tex", "start_line": 1, "end_line": True},
+        {"source_path": "main.tex", "start_line": 1, "end_line": 1.5},
     ],
 )
 def test_review_scope_coordinates_require_integers(area) -> None:
     with pytest.raises(ValidationError):
         ReviewScopeArea.model_validate(area)
+
+
+@pytest.mark.parametrize(
+    ("area", "field"),
+    [
+        ({"source_path": "manuscript.pdf", "page": 1.0}, "page"),
+        ({"source_path": "main.tex", "start_line": 1.0, "end_line": 1}, "start_line"),
+        ({"source_path": "main.tex", "start_line": 1, "end_line": 1.0}, "end_line"),
+    ],
+)
+def test_review_scope_accepts_integral_json_numbers(area, field) -> None:
+    assert getattr(ReviewScopeArea.model_validate(area), field) == 1
 
 
 def test_output_schema_uses_the_supplied_frozen_contract() -> None:

@@ -122,6 +122,28 @@ def test_invalid_review_scope_rejects_whole_result(tmp_path, scope, code, path):
         assert service.list_findings(run.id) == []
 
 
+def test_integral_json_number_scope_is_accepted(tmp_path):
+    repo = make_repository(tmp_path, roles=("substantive_review",))
+    with ScriptoriumService(repo, manuscript_manager=PdfBuildingManuscriptManager(repo)) as service:
+        run = asyncio.run(service.start_run("HEAD", "quick"))["run"]
+        review = claim(service, run.id, AgentRole.SUBSTANTIVE_REVIEW)
+        result = submit(
+            service,
+            review,
+            {
+                "summary": "Reviewed the manuscript.",
+                "findings": [],
+                "scope": {
+                    "completion": "complete",
+                    "checked": [{"source_path": "manuscript.pdf", "page": 1.0}],
+                    "outstanding": [],
+                    "limitations": [],
+                },
+            },
+        )
+        assert result["attempt"].status == AttemptStatus.COMPLETED
+
+
 def test_old_frozen_review_schema_replays_without_scope(tmp_path, monkeypatch):
     repo = make_repository(tmp_path, roles=("substantive_review",))
     original = Armarius._freeze_config
