@@ -58,6 +58,36 @@ from ._support import PdfBuildingManuscriptManager, claim, make_repository, subm
         ),
         (
             {
+                "completion": "unknown",
+                "checked": [{"source_path": "manuscript.pdf", "page": 1, "start_line": None}],
+                "outstanding": [],
+                "limitations": [],
+            },
+            "schema.cross_field",
+            "/scope/checked/0",
+        ),
+        (
+            {
+                "completion": "unknown",
+                "checked": [{"source_path": "main.tex", "page": None}],
+                "outstanding": [],
+                "limitations": [],
+            },
+            "schema.cross_field",
+            "/scope/checked/0",
+        ),
+        (
+            {
+                "completion": "unknown",
+                "checked": [{"source_path": "main.tex", "start_line": None, "end_line": None}],
+                "outstanding": [],
+                "limitations": [],
+            },
+            "schema.cross_field",
+            "/scope/checked/0",
+        ),
+        (
+            {
                 "completion": "complete",
                 "checked": [],
                 "outstanding": [{"source_path": "main.tex"}],

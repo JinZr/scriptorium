@@ -236,6 +236,22 @@ class ReviewScopeArea(StrictModel):
     end_line: int | None = Field(default=None, ge=1)
     page: int | None = Field(default=None, ge=1)
 
+    @model_validator(mode="before")
+    @classmethod
+    def validate_field_presence(cls, value: Any) -> Any:
+        if not isinstance(value, dict):
+            return value
+        if value.get("source_path") == "manuscript.pdf":
+            if {"start_line", "end_line"}.intersection(value):
+                raise ValueError("compiled PDF scope cannot include line fields")
+        else:
+            if "page" in value:
+                raise ValueError("source scope cannot include a page field")
+            lines = {"start_line", "end_line"}.intersection(value)
+            if lines and (len(lines) != 2 or any(value[line] is None for line in lines)):
+                raise ValueError("source scope requires both non-null line endpoints or neither")
+        return value
+
     @model_validator(mode="after")
     def validate_location(self) -> "ReviewScopeArea":
         if self.source_path == "manuscript.pdf":
