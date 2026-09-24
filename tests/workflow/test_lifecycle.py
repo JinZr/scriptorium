@@ -79,6 +79,7 @@ def test_task_list_handoffs_patch_approval_and_replays_verification(tmp_path):
             {"command": "patch show", "patch_id": patch.id, "requires_human_decision": True}
         ]
         service.decide_patch(patch.id, "approve", "Verify the exact edit.")
+        assert service.list_tasks(run.id)["next_actions"] == [{"command": "run resume", "run_id": run.id}]
         asyncio.run(service.resume_run(run.id))
         verifier = claim(service, run.id, AgentRole.VERIFICATION, session="independent-session")
         service.armarius.submit_task(

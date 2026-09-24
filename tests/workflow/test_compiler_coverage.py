@@ -40,6 +40,9 @@ def test_compiler_coverage_gates_each_external_build_stage(tmp_path, fail_at):
             run = service.database.list_runs()[0]
             assert run.status == RunStatus.FAILED
             assert service.database.list_tasks(run.id) == []
+            assert service.list_tasks(run.id)["next_actions"] == [{"command": "run resume", "run_id": run.id}]
+            manager.fail_at = None
+            assert asyncio.run(service.resume_run(run.id))["run"].status == RunStatus.REVIEWING
             return
         run = asyncio.run(service.start_run("HEAD", "quick"))["run"]
         if fail_at == 2:
@@ -57,4 +60,9 @@ def test_compiler_coverage_gates_each_external_build_stage(tmp_path, fail_at):
                 assert view["run"].status == RunStatus.VERIFYING
         if fail_at:
             assert service.get_run(run.id)["run"].status == RunStatus.FAILED
+            assert service.list_tasks(run.id)["next_actions"] == [{"command": "run resume", "run_id": run.id}]
+            manager.fail_at = None
+            recovered = asyncio.run(service.resume_run(run.id))
+            expected = RunStatus.AWAITING_PATCH_APPROVAL if fail_at == 2 else RunStatus.VERIFYING
+            assert recovered["run"].status == expected
         assert (repo / "main.tex").read_text() == MANUSCRIPT

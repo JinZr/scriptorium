@@ -1,7 +1,9 @@
 import asyncio
 import json
 
-from scriptorium.domain import AgentRole, AttemptStatus, digest_json
+import pytest
+
+from scriptorium.domain import AgentRole, AttemptStatus, RunStatus, digest_json
 from scriptorium.schemas import output_schema
 from scriptorium.service import ScriptoriumService
 from scriptorium.workflow import Armarius
@@ -56,6 +58,42 @@ def test_review_scope_is_reported_separately_from_tool_returns(tmp_path):
         assert "## Observed review task-tool returns" in markdown
         assert "read 1, search 0, page 0" in markdown
         assert "Scope is model-declared; tool returns do not prove inspection" in markdown
+
+
+@pytest.mark.parametrize("completion", ["partial", "unknown"])
+def test_finalized_scoped_run_keeps_prior_gate_result(tmp_path, monkeypatch, completion):
+    repo = make_repository(tmp_path, roles=("substantive_review",))
+    with ScriptoriumService(repo, manuscript_manager=PdfBuildingManuscriptManager(repo)) as service:
+        run = asyncio.run(service.start_run("HEAD", "quick"))["run"]
+        review = claim(service, run.id, AgentRole.SUBSTANTIVE_REVIEW)
+        with monkeypatch.context() as prior_release:
+            prior_release.setattr(service.armarius, "review_completion", lambda task: "complete")
+            receipt = asyncio.run(
+                service.submit_task(
+                    review["attempt"].id,
+                    review["input_digest"],
+                    json.dumps(
+                        {
+                            "summary": "Reviewed available material.",
+                            "findings": [],
+                            "scope": {
+                                "completion": completion,
+                                "checked": [],
+                                "outstanding": [],
+                                "limitations": ["Some material remains unchecked."],
+                            },
+                        }
+                    ),
+                )
+            )
+            asyncio.run(service.resume_run(run.id))
+        assert service.database.get_run(run.id).status == RunStatus.COMPLETED
+        assert service.armarius.review_completion(review["task"]) == completion
+        assert service.evaluate_gate(run.id)["passed"]
+        service.artifacts.path_for(receipt["output_digest"]).write_text("corrupt", encoding="utf-8")
+        gate = service.evaluate_gate(run.id)
+        assert not gate["passed"]
+        assert not gate["conditions"]["review_artifacts_valid"]
 
 
 def test_old_review_report_marks_scope_as_unreported(tmp_path, monkeypatch):

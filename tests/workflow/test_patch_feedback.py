@@ -12,6 +12,7 @@ def test_rejected_patch_creates_external_revision_with_human_feedback(tmp_path):
         run = asyncio.run(service.start_run("HEAD", "quick"))["run"]
         first_patch, finding_id = prepare_patch(service, run.id)
         service.decide_patch(first_patch.id, "reject", "Use more precise wording.")
+        assert service.list_tasks(run.id)["next_actions"] == [{"command": "run resume", "run_id": run.id}]
         resumed = asyncio.run(service.resume_run(run.id))
         assert resumed["run"].status == RunStatus.REVISING
         tasks = [task for task in service.database.list_tasks(run.id) if task.role == AgentRole.REVISION]
