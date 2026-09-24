@@ -373,16 +373,35 @@ class ScriptoriumService:
                 next_actions.append({"command": "run continue", "run_id": run_id, "task_id": task.id})
             elif task.status in {TaskStatus.FAILED, TaskStatus.INTERRUPTED}:
                 next_actions.append({"command": "run retry", "run_id": run_id, "task_id": task.id})
-        if view["run"].status == RunStatus.AWAITING_DECISION and not next_actions:
+        if (
+            view["run"].status
+            in {
+                RunStatus.PREPARING,
+                RunStatus.REVIEWING,
+                RunStatus.REVISING,
+                RunStatus.VERIFYING,
+            }
+            and not next_actions
+        ):
+            next_actions.append({"command": "run resume", "run_id": run_id})
+        elif view["run"].status == RunStatus.AWAITING_DECISION and not next_actions:
             findings = self._storage(self.database.list_findings, run_id)
             if any(item.status == FindingStatus.PENDING for item in findings):
                 next_actions.append({"command": "finding list", "run_id": run_id, "requires_human_decision": True})
             else:
                 next_actions.append({"command": "run resume", "run_id": run_id})
-        elif view["run"].status in {RunStatus.AWAITING_PATCH_APPROVAL, RunStatus.READY_TO_APPLY}:
+        elif view["run"].status == RunStatus.AWAITING_PATCH_APPROVAL:
             next_actions.append(
                 {
                     "command": "patch show",
+                    "patch_id": view["patch_ids"][-1],
+                    "requires_human_decision": True,
+                }
+            )
+        elif view["run"].status == RunStatus.READY_TO_APPLY:
+            next_actions.append(
+                {
+                    "command": "patch apply",
                     "patch_id": view["patch_ids"][-1],
                     "requires_human_decision": True,
                 }
