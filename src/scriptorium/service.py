@@ -677,8 +677,15 @@ class ScriptoriumService:
         findings = self._storage(self.database.list_findings, run_id)
         patches = self._storage(self.database.list_patches, run_id)
         events = self._storage(self.database.list_events, run_id)
+        external_run = run_view["run"].frozen_config.get("execution") == "external"
+        access_counts = {}
+        for event in events:
+            if event.event_type in {"tool.read", "tool.search", "tool.page"}:
+                counts = access_counts.setdefault(event.entity_id, {"read": 0, "search": 0, "page": 0})
+                counts[event.event_type.removeprefix("tool.")] += 1
         validation_reports = []
         review_scopes = []
+        review_tool_access = []
         for item in run_view["tasks"]:
             task = item["task"]
             schema_kind = {
@@ -689,9 +696,23 @@ class ScriptoriumService:
                 "verification_transcription": "visual_transcription",
             }.get(task.stage)
             for attempt in item["attempts"]:
+                if task.stage == "review":
+                    review_tool_access.append(
+                        {
+                            "task_id": task.id,
+                            "attempt_id": attempt.id,
+                            "role": task.role.value,
+                            "status": attempt.status.value,
+                            "returns": (
+                                access_counts.get(attempt.id, {"read": 0, "search": 0, "page": 0})
+                                if external_run
+                                else None
+                            ),
+                        }
+                    )
                 if task.stage == "review" and attempt.status == AttemptStatus.COMPLETED:
                     scope = None
-                    if run_view["run"].frozen_config.get("execution") == "external":
+                    if external_run:
                         metadata = self._storage(self.database.get_external_task, task.id)
                         schema = self.armarius._load_schema_artifact(
                             run_view["run"], metadata["schema_kind"], attempt.schema_digest
@@ -755,6 +776,7 @@ class ScriptoriumService:
             "events": events,
             "validation_reports": validation_reports,
             "review_scopes": review_scopes,
+            "review_tool_access": review_tool_access,
             "gate": self.evaluate_gate(run_id),
         }
         if format == "json":
@@ -977,21 +999,14 @@ class ScriptoriumService:
             )
         lines.extend(["", "## Reviewer-declared scope", ""])
         if plain["review_scopes"]:
-            access_counts = {}
-            for event in plain["events"]:
-                if event["event_type"] in {"tool.read", "tool.search", "tool.page"}:
-                    counts = access_counts.setdefault(event["entity_id"], {"read": 0, "search": 0, "page": 0})
-                    counts[event["event_type"].removeprefix("tool.")] += 1
             for item in plain["review_scopes"]:
                 scope = item["scope"]
                 if scope is None:
                     lines.append(f"- `{item['attempt_id']}` / {item['role']}: scope not reported by frozen contract")
                     continue
-                counts = access_counts.get(item["attempt_id"], {"read": 0, "search": 0, "page": 0})
                 lines.append(
                     f"- `{item['attempt_id']}` / {item['role']}: declared `{scope['completion']}`; "
-                    f"checked {len(scope['checked'])}, outstanding {len(scope['outstanding'])}; "
-                    f"tool returns: read {counts['read']}, search {counts['search']}, page {counts['page']}"
+                    f"checked {len(scope['checked'])}, outstanding {len(scope['outstanding'])}"
                 )
                 for group in ("checked", "outstanding"):
                     for area in scope[group]:
@@ -1003,9 +1018,22 @@ class ScriptoriumService:
                         lines.append(f"  - {group}: `{location}`")
                 for limitation in scope["limitations"]:
                     lines.append(f"  - limitation: {limitation}")
-            lines.append("Model declarations are not verified reading; tool returns do not prove inspection.")
         else:
             lines.append("- None")
+        lines.extend(["", "## Observed review task-tool returns", ""])
+        if plain["review_tool_access"]:
+            for item in plain["review_tool_access"]:
+                counts = item["returns"]
+                if counts is None:
+                    lines.append(f"- `{item['attempt_id']}` / {item['status']}: unavailable for legacy execution")
+                else:
+                    lines.append(
+                        f"- `{item['attempt_id']}` / {item['status']}: "
+                        f"read {counts['read']}, search {counts['search']}, page {counts['page']}"
+                    )
+        else:
+            lines.append("- None")
+        lines.append("Scope is model-declared; tool returns do not prove inspection.")
         lines.extend(["", "## Validation failures", ""])
         if plain["validation_reports"]:
             for item in plain["validation_reports"]:
