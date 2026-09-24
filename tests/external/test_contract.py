@@ -561,6 +561,7 @@ def test_completed_attempt_replays_after_process_exit(tmp_path: Path) -> None:
             _review_json("Reviewed the manuscript."),
         )
         assert service.database.get_run(run_id).status == RunStatus.REVIEWING
+        assert service.list_tasks(run_id)["next_actions"] == [{"command": "run resume", "run_id": run_id}]
     with ScriptoriumService(repo) as service:
         asyncio.run(service.resume_run(run_id))
         assert service.database.get_run(run_id).status == RunStatus.AWAITING_DECISION
