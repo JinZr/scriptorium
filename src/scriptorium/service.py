@@ -333,6 +333,13 @@ class ScriptoriumService:
             await self.armarius.retry_task(run.id, task_id, abandon_attempt_id, reason)
             return self.get_run(run.id)
 
+    async def continue_review(self, run_id: str, task_id: str) -> dict[str, Any]:
+        run = self._storage(self.database.get_run, run_id)
+        self.armarius.require_external_run(run)
+        with self._run_operation(run.id, "run continue"):
+            await self.armarius.continue_review(run_id, task_id)
+            return self.list_tasks(run_id)
+
     def cancel_run(self, run_id: str, reason: str) -> dict[str, Any]:
         run = self._storage(self.database.get_run, run_id)
         self.armarius.require_external_run(run)
@@ -343,7 +350,44 @@ class ScriptoriumService:
     def list_tasks(self, run_id: str) -> dict[str, Any]:
         view = self.get_run(run_id)
         self.armarius.require_external_run(view["run"])
-        return {"run_id": run_id, "run_status": view["run"].status, "tasks": view["tasks"]}
+        tasks = []
+        next_actions = []
+        active_stage = {
+            RunStatus.REVIEWING: "review",
+            RunStatus.REVISING: "revision",
+            RunStatus.VERIFYING: "verification",
+        }.get(view["run"].status)
+        for item in view["tasks"]:
+            task = item["task"]
+            completion = self._storage(self.armarius.review_completion, task) if task.stage == "review" else None
+            tasks.append({**item, "review_completion": completion})
+            if task.stage != active_stage and not (
+                task.stage == "review" and view["run"].status == RunStatus.AWAITING_DECISION
+            ):
+                continue
+            if task.status == TaskStatus.PENDING:
+                next_actions.append({"command": "task claim", "task_id": task.id})
+            elif task.status == TaskStatus.RUNNING:
+                next_actions.append({"command": "task show", "attempt_id": item["attempts"][-1].id})
+            elif task.status == TaskStatus.COMPLETED and completion in {"partial", "unknown"}:
+                next_actions.append({"command": "run continue", "run_id": run_id, "task_id": task.id})
+            elif task.status in {TaskStatus.FAILED, TaskStatus.INTERRUPTED}:
+                next_actions.append({"command": "run retry", "run_id": run_id, "task_id": task.id})
+        if view["run"].status == RunStatus.AWAITING_DECISION and not next_actions:
+            findings = self._storage(self.database.list_findings, run_id)
+            if any(item.status == FindingStatus.PENDING for item in findings):
+                next_actions.append({"command": "finding list", "run_id": run_id, "requires_human_decision": True})
+            else:
+                next_actions.append({"command": "run resume", "run_id": run_id})
+        elif view["run"].status in {RunStatus.AWAITING_PATCH_APPROVAL, RunStatus.READY_TO_APPLY}:
+            next_actions.append(
+                {
+                    "command": "patch show",
+                    "patch_id": view["patch_ids"][-1],
+                    "requires_human_decision": True,
+                }
+            )
+        return {"run_id": run_id, "run_status": view["run"].status, "tasks": tasks, "next_actions": next_actions}
 
     def claim_task(
         self, task_id: str, client: str, model: str, effort: str, session_id: str, session_source: str
@@ -422,6 +466,7 @@ class ScriptoriumService:
                 "output_digest": finished.output_artifact_digest,
                 "validation_report": report,
                 "run_status": self._storage(self.database.get_run, task.run_id).status,
+                "next_actions": self.list_tasks(task.run_id)["next_actions"],
             }
 
     @contextmanager
@@ -789,9 +834,21 @@ class ScriptoriumService:
         findings = self._storage(self.database.list_findings, run_id)
         patches = self._storage(self.database.list_patches, run_id)
         required_roles = set(run.frozen_config["profile_roles"])
-        completed_roles = {
-            task.role.value for task in tasks if task.stage == "review" and task.status == TaskStatus.COMPLETED
-        }
+        completed_roles = set()
+        review_errors = []
+        for task in tasks:
+            if task.stage != "review" or task.status != TaskStatus.COMPLETED:
+                continue
+            if run.frozen_config.get("execution") != "external":
+                completed_roles.add(task.role.value)
+                continue
+            try:
+                completion = self._storage(self.armarius.review_completion, task)
+            except InfrastructureError as exc:
+                review_errors.append(str(exc))
+                continue
+            if completion in {"complete", "unreported"}:
+                completed_roles.add(task.role.value)
         pending_high = [
             finding.id
             for finding in findings
@@ -811,6 +868,7 @@ class ScriptoriumService:
         )
         conditions = {
             "required_reviews_completed": required_roles.issubset(completed_roles),
+            "review_artifacts_valid": not review_errors,
             "all_findings_decided": not pending_findings,
             "no_unhandled_blocker_or_major": not pending_high,
             "confirmed_findings_covered": confirmed_ids.issubset(covered_ids) if confirmed_ids else True,
@@ -831,6 +889,7 @@ class ScriptoriumService:
             "passed": not reasons,
             "conditions": conditions,
             "reasons": reasons,
+            "errors": review_errors,
         }
 
     @contextmanager

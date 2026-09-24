@@ -1,6 +1,7 @@
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
+import json
 import threading
 
 import pytest
@@ -24,6 +25,241 @@ def test_running_attempt_is_durable_across_service_restarts(tmp_path):
             claim(service, run.id, AgentRole.SUBSTANTIVE_REVIEW, session="other-session")
         receipt = submit(service, repeated, {"summary": "Reviewed the frozen text.", "findings": []})
         assert receipt["run_status"] == RunStatus.AWAITING_DECISION
+
+
+def test_partial_review_continues_across_processes_without_replacing_findings(tmp_path):
+    repo = make_repository(tmp_path, roles=("substantive_review",))
+    with ScriptoriumService(repo, manuscript_manager=PdfBuildingManuscriptManager(repo)) as service:
+        run = asyncio.run(service.start_run("HEAD", "quick"))["run"]
+        first = claim(service, run.id, AgentRole.SUBSTANTIVE_REVIEW, session="first-session")
+        task_id = first["task"].id
+        finding = review_finding(first)
+        partial = {
+            "summary": "The text has a typo; the page still needs inspection.",
+            "findings": [finding],
+            "scope": {
+                "completion": "partial",
+                "checked": [{"source_path": "main.tex", "start_line": 1, "end_line": 4}],
+                "outstanding": [{"source_path": "manuscript.pdf", "page": 1}],
+                "limitations": ["Rendered page not inspected."],
+            },
+        }
+        first_receipt = submit(service, first, partial)
+        assert first_receipt["run_status"] == RunStatus.REVIEWING
+        assert first_receipt["next_actions"] == [{"command": "run continue", "run_id": run.id, "task_id": task_id}]
+        assert submit(service, first, partial)["output_digest"] == first_receipt["output_digest"]
+        assert not service.evaluate_gate(run.id)["conditions"]["required_reviews_completed"]
+        original_finding = service.list_findings(run.id)[0]
+        asyncio.run(service.continue_review(run.id, task_id))
+        assert service.database.get_task(task_id).status == TaskStatus.PENDING
+        with pytest.raises(StateError, match="superseded"):
+            submit(service, first, partial)
+
+    with ScriptoriumService(repo, manuscript_manager=PdfBuildingManuscriptManager(repo)) as service:
+        second = claim(service, run.id, AgentRole.SUBSTANTIVE_REVIEW, session="second-session")
+        assert second["attempt"].ordinal == 2
+        assert second["input_digest"] != first["input_digest"]
+        assert "manuscript.pdf" in second["prompt"]
+        assert original_finding.id in second["prompt"]
+        assert service.page_task(second["attempt"].id, 1)["page"] == 1
+        finished = submit(
+            service,
+            second,
+            {
+                "summary": "Reviewed the remaining page; the typo remains.",
+                "findings": [finding],
+                "scope": {
+                    "completion": "complete",
+                    "checked": [
+                        {"source_path": "main.tex", "start_line": 1, "end_line": 4},
+                        {"source_path": "manuscript.pdf", "page": 1},
+                    ],
+                    "outstanding": [],
+                    "limitations": [],
+                },
+            },
+        )
+        assert finished["run_status"] == RunStatus.AWAITING_DECISION
+        assert service.evaluate_gate(run.id)["conditions"]["required_reviews_completed"]
+        assert finished["next_actions"] == [
+            {"command": "finding list", "run_id": run.id, "requires_human_decision": True}
+        ]
+        assert service.list_findings(run.id) == [original_finding]
+        attempts = service.database.list_attempts(task_id)
+        assert [attempt.status for attempt in attempts] == [AttemptStatus.COMPLETED, AttemptStatus.COMPLETED]
+        assert attempts[0].output_artifact_digest == first_receipt["output_digest"]
+        service.decide_finding(original_finding.id, "reject", "No revision needed after review")
+        assert service.database.get_finding(original_finding.id).status.value == "rejected"
+
+
+def test_partial_review_invalid_continuation_preserves_prior_output_and_diagnostics(tmp_path):
+    repo = make_repository(tmp_path, roles=("substantive_review",))
+    with ScriptoriumService(repo, manuscript_manager=PdfBuildingManuscriptManager(repo)) as service:
+        run = asyncio.run(service.start_run("HEAD", "quick"))["run"]
+        first = claim(service, run.id, AgentRole.SUBSTANTIVE_REVIEW)
+        task_id = first["task"].id
+        submit(
+            service,
+            first,
+            {
+                "summary": "Review incomplete.",
+                "findings": [review_finding(first)],
+                "scope": {"completion": "unknown", "checked": [], "outstanding": [], "limitations": ["Page unread."]},
+            },
+        )
+        asyncio.run(service.continue_review(run.id, task_id))
+        second = claim(service, run.id, AgentRole.SUBSTANTIVE_REVIEW, session="second-session")
+        failed = submit(
+            service,
+            second,
+            {
+                "summary": "Invalid continuation.",
+                "findings": [],
+                "scope": {
+                    "completion": "complete",
+                    "checked": [{"source_path": "missing.tex"}],
+                    "outstanding": [],
+                    "limitations": [],
+                },
+            },
+        )
+        assert failed["attempt"].status == AttemptStatus.FAILED
+        assert len(service.list_findings(run.id)) == 1
+        asyncio.run(service.retry_task(run.id, task_id))
+        third = claim(service, run.id, AgentRole.SUBSTANTIVE_REVIEW, session="third-session")
+        assert third["attempt"].ordinal == 3
+        assert "Page unread" in third["prompt"]
+        assert "scope.path_unknown" in third["prompt"]
+        submit(
+            service,
+            third,
+            {
+                "summary": "Review complete.",
+                "findings": [],
+                "scope": {"completion": "complete", "checked": [], "outstanding": [], "limitations": []},
+            },
+        )
+        assert service.database.get_run(run.id).status == RunStatus.AWAITING_DECISION
+        assert len(service.list_findings(run.id)) == 1
+
+
+def test_prior_decision_survives_continuing_a_review_from_decision_stage(tmp_path):
+    repo = make_repository(tmp_path, roles=("substantive_review",))
+    with ScriptoriumService(repo, manuscript_manager=PdfBuildingManuscriptManager(repo)) as service:
+        run = asyncio.run(service.start_run("HEAD", "quick"))["run"]
+        first = claim(service, run.id, AgentRole.SUBSTANTIVE_REVIEW)
+        task_id = first["task"].id
+        submit(
+            service,
+            first,
+            {
+                "summary": "Text checked, page outstanding.",
+                "findings": [review_finding(first)],
+                "scope": {
+                    "completion": "partial",
+                    "checked": [{"source_path": "main.tex"}],
+                    "outstanding": [{"source_path": "manuscript.pdf", "page": 1}],
+                    "limitations": [],
+                },
+            },
+        )
+        original = service.list_findings(run.id)[0]
+        service.database.update_run(run.id, RunStatus.AWAITING_DECISION)
+        service.decide_finding(original.id, "confirm", "The text needs correction")
+        reopened = asyncio.run(service.continue_review(run.id, task_id))
+        assert reopened["run_status"] == RunStatus.REVIEWING
+        assert service.database.get_finding(original.id).status.value == "confirmed"
+        second = claim(service, run.id, AgentRole.SUBSTANTIVE_REVIEW, session="continued-session")
+        submit(
+            service,
+            second,
+            {
+                "summary": "Page checked; issue still stands.",
+                "findings": [],
+                "scope": {"completion": "complete", "checked": [], "outstanding": [], "limitations": []},
+            },
+        )
+        assert service.database.get_run(run.id).status == RunStatus.AWAITING_DECISION
+        assert service.database.get_finding(original.id).status.value == "confirmed"
+        with pytest.raises(StateError, match="no incomplete accepted review"):
+            asyncio.run(service.continue_review(run.id, task_id))
+
+
+def test_resume_does_not_advance_older_incomplete_decision_stage(tmp_path):
+    repo = make_repository(tmp_path, roles=("substantive_review",))
+    with ScriptoriumService(repo, manuscript_manager=PdfBuildingManuscriptManager(repo)) as service:
+        run = asyncio.run(service.start_run("HEAD", "quick"))["run"]
+        first = claim(service, run.id, AgentRole.SUBSTANTIVE_REVIEW)
+        submit(
+            service,
+            first,
+            {
+                "summary": "Review scope uncertain.",
+                "findings": [],
+                "scope": {"completion": "unknown", "checked": [], "outstanding": [], "limitations": []},
+            },
+        )
+        service.database.update_run(run.id, RunStatus.AWAITING_DECISION)
+        resumed = asyncio.run(service.resume_run(run.id))
+        assert resumed["run"].status == RunStatus.REVIEWING
+        assert resumed["tasks"][0]["task"].status == TaskStatus.COMPLETED
+        assert service.list_tasks(run.id)["next_actions"] == [
+            {"command": "run continue", "run_id": run.id, "task_id": first["task"].id}
+        ]
+
+
+def test_continue_replays_accepted_findings_before_reopening_after_crash(tmp_path):
+    repo = make_repository(tmp_path, roles=("substantive_review",))
+    with ScriptoriumService(repo, manuscript_manager=PdfBuildingManuscriptManager(repo)) as service:
+        run = asyncio.run(service.start_run("HEAD", "quick"))["run"]
+        first = claim(service, run.id, AgentRole.SUBSTANTIVE_REVIEW)
+        service.armarius.submit_task(
+            first["attempt"].id,
+            first["input_digest"],
+            json.dumps(
+                {
+                    "summary": "Found a typo; page outstanding.",
+                    "findings": [review_finding(first)],
+                    "scope": {
+                        "completion": "partial",
+                        "checked": [{"source_path": "main.tex"}],
+                        "outstanding": [{"source_path": "manuscript.pdf", "page": 1}],
+                        "limitations": [],
+                    },
+                }
+            ),
+        )
+        assert service.list_findings(run.id) == []
+
+    with ScriptoriumService(repo, manuscript_manager=PdfBuildingManuscriptManager(repo)) as service:
+        asyncio.run(service.continue_review(run.id, first["task"].id))
+        assert service.database.get_task(first["task"].id).status == TaskStatus.PENDING
+        assert len(service.list_findings(run.id)) == 1
+        assert service.list_findings(run.id)[0].attempt_id == first["attempt"].id
+
+
+def test_cancelled_continuation_rejects_late_submission_and_keeps_accepted_result(tmp_path):
+    repo = make_repository(tmp_path, roles=("substantive_review",))
+    with ScriptoriumService(repo, manuscript_manager=PdfBuildingManuscriptManager(repo)) as service:
+        run = asyncio.run(service.start_run("HEAD", "quick"))["run"]
+        first = claim(service, run.id, AgentRole.SUBSTANTIVE_REVIEW)
+        accepted = submit(
+            service,
+            first,
+            {
+                "summary": "Initial review incomplete.",
+                "findings": [review_finding(first)],
+                "scope": {"completion": "partial", "checked": [], "outstanding": [], "limitations": []},
+            },
+        )
+        asyncio.run(service.continue_review(run.id, first["task"].id))
+        second = claim(service, run.id, AgentRole.SUBSTANTIVE_REVIEW, session="later-session")
+        service.cancel_run(run.id, "Stop this run")
+        with pytest.raises(StateError, match="no longer active"):
+            submit(service, second, {"summary": "Too late.", "findings": []})
+        assert service.database.list_attempts(first["task"].id)[0].output_artifact_digest == accepted["output_digest"]
+        assert len(service.list_findings(run.id)) == 1
+        assert not service.evaluate_gate(run.id)["passed"]
 
 
 @pytest.mark.parametrize("with_finding", [False, True])

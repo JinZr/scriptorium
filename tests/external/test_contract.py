@@ -56,7 +56,7 @@ def _review_json(summary: str, findings: list | None = None) -> str:
         {
             "summary": summary,
             "findings": findings or [],
-            "scope": {"completion": "unknown", "checked": [], "outstanding": [], "limitations": []},
+            "scope": {"completion": "complete", "checked": [], "outstanding": [], "limitations": []},
         }
     )
 
