@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from decimal import Decimal
 from enum import Enum
 from typing import Any, Literal
 
@@ -239,6 +240,10 @@ class ReviewScopeArea(StrictModel):
     @field_validator("start_line", "end_line", "page", mode="before")
     @classmethod
     def accept_integral_number(cls, value: Any) -> Any:
+        if isinstance(value, Decimal):
+            if value.is_finite() and value == value.to_integral_value():
+                return int(value)
+            return value
         if isinstance(value, float) and value.is_integer():
             return int(value)
         return value

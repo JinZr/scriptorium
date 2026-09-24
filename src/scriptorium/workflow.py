@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
+from decimal import Decimal
 import difflib
 import hashlib
 from importlib import resources
@@ -704,7 +705,7 @@ class Armarius:
                 )
             ]
         try:
-            data = json.loads(value)
+            data = json.loads(value, parse_float=Decimal if model is ScopedReviewOutput else float)
         except json.JSONDecodeError as exc:
             start = max(0, exc.pos - 120)
             end = min(len(value), exc.pos + 120)
@@ -815,6 +816,8 @@ class Armarius:
                 "truncated": True,
                 "original_codepoints": len(value),
             }
+        if isinstance(value, Decimal):
+            return str(value)
         if isinstance(value, dict):
             return {str(key): cls._bounded_diagnostic(item) for key, item in value.items()}
         if isinstance(value, (list, tuple)):
