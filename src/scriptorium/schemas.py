@@ -230,6 +230,37 @@ class ReviewOutput(StrictModel):
     findings: list[FindingCandidate]
 
 
+class ReviewScopeArea(StrictModel):
+    source_path: str = Field(min_length=1)
+    start_line: int | None = Field(default=None, ge=1)
+    end_line: int | None = Field(default=None, ge=1)
+    page: int | None = Field(default=None, ge=1)
+
+    @model_validator(mode="after")
+    def validate_location(self) -> "ReviewScopeArea":
+        if self.source_path == "manuscript.pdf":
+            if self.page is None or self.start_line is not None or self.end_line is not None:
+                raise ValueError("compiled PDF scope requires only a page")
+        elif self.page is not None or (self.start_line is None) != (self.end_line is None):
+            raise ValueError("source scope requires both line endpoints or neither")
+        elif self.start_line is not None and self.end_line < self.start_line:
+            raise ValueError("end_line cannot precede start_line")
+        return self
+
+
+class ReviewScope(StrictModel):
+    completion: Literal["complete", "partial", "unknown"]
+    checked: list[ReviewScopeArea]
+    outstanding: list[ReviewScopeArea]
+    limitations: list[str]
+
+
+class ScopedReviewOutput(ReviewOutput):
+    model_config = ConfigDict(extra="forbid", title="ReviewOutput")
+
+    scope: ReviewScope
+
+
 # Historical runs still deserialize these persisted outputs, but new runs never schedule this role.
 class VisualTranscriptionPage(StrictModel):
     page: int = Field(ge=1)
@@ -312,7 +343,7 @@ class ValidationReport(StrictModel):
 
 
 SCHEMA_MODELS: dict[str, type[StrictModel]] = {
-    "review": ReviewOutput,
+    "review": ScopedReviewOutput,
     "visual_transcription": VisualTranscriptionOutput,
     "revision": RevisionOutput,
     "verification": VerificationOutput,
@@ -322,8 +353,11 @@ SCHEMA_MODELS: dict[str, type[StrictModel]] = {
 def output_schema(
     kind: str,
     contract: EvidenceAnchorContract = DEFAULT_EVIDENCE_ANCHOR_CONTRACT,
+    *,
+    legacy_review: bool = False,
 ) -> dict[str, Any]:
-    schema = SCHEMA_MODELS[kind].model_json_schema()
+    model = ReviewOutput if kind == "review" and legacy_review else SCHEMA_MODELS[kind]
+    schema = model.model_json_schema()
     if kind in {"review", "verification"}:
         evidence = schema["$defs"]["Evidence"]
         evidence["properties"]["source_path"]["description"] = (

@@ -50,7 +50,9 @@ from .schemas import (
     ExactEdit,
     ReviewOutput,
     RevisionOutput,
+    ScopedReviewOutput,
     SourceAnchorRecord,
+    StrictModel,
     ValidationIssue,
     ValidationReport,
     VerificationOutput,
@@ -684,7 +686,7 @@ class Armarius:
 
     def _parse_and_validate_output(
         self,
-        schema_kind: str,
+        model: type[StrictModel],
         value: str | None,
         validator: Callable[[Any], list[ValidationIssue]],
     ) -> tuple[
@@ -721,7 +723,7 @@ class Armarius:
                 )
             ]
         try:
-            output = SCHEMA_MODELS[schema_kind].model_validate(data)
+            output = model.model_validate(data)
         except ValidationError as exc:
             issues = [self._pydantic_issue(item, data) for item in exc.errors(include_url=False, include_input=False)]
             return None, issues
@@ -906,6 +908,15 @@ class Armarius:
         except (ArtifactError, StorageError, KeyError, TypeError) as exc:
             raise InfrastructureError(f"attempt schema artifact is missing or corrupt: {digest}") from exc
 
+    def _output_model_for_schema(self, run: Run, schema_kind: str, schema: dict[str, Any]) -> type[StrictModel]:
+        contract = self._evidence_anchor_contract_for_run(run, allow_missing=False)
+        assert contract is not None
+        if schema == output_schema(schema_kind, contract):
+            return SCHEMA_MODELS[schema_kind]
+        if schema_kind == "review" and schema == output_schema("review", contract, legacy_review=True):
+            return ReviewOutput
+        raise InfrastructureError(f"run {run.id} has an unsupported frozen {schema_kind} output schema")
+
     @staticmethod
     def _validation_error_summary(report: ValidationReport) -> str:
         first = report.issues[0]
@@ -977,6 +988,7 @@ class Armarius:
         validator: Callable[[Any], list[ValidationIssue]],
     ) -> TaskOutcome | None:
         schema = dict(run.frozen_config["schemas"][schema_kind]["content"])
+        output_model = self._output_model_for_schema(run, schema_kind, schema)
         prompt_artifact = self._record_text(prompt, "text/markdown; charset=utf-8")
         schema_artifact = self._record_text(canonical_json(schema), "application/schema+json")
         files = self._directory_records(base_bundle.workspace)
@@ -1010,7 +1022,7 @@ class Armarius:
             output_text = self.artifacts.get_bytes(completed.output_artifact_digest).decode("utf-8")
         except (ArtifactError, UnicodeDecodeError) as exc:
             raise InfrastructureError(f"completed attempt {completed.id} has unreadable output") from exc
-        output, issues = self._parse_and_validate_output(schema_kind, output_text, validator)
+        output, issues = self._parse_and_validate_output(output_model, output_text, validator)
         if output is None or issues:
             raise InfrastructureError(f"completed attempt {completed.id} is incompatible with its validator")
         return TaskOutcome(task, completed, output)
@@ -1184,7 +1196,8 @@ class Armarius:
         metadata = self.database.get_external_task(task.id)
         if attempt.bundle_digest != metadata["bundle_digest"] or attempt.schema_digest != metadata["schema_digest"]:
             raise InfrastructureError("attempt is not bound to its frozen task")
-        self._load_schema_artifact(run, metadata["schema_kind"], attempt.schema_digest)
+        schema = self._load_schema_artifact(run, metadata["schema_kind"], attempt.schema_digest)
+        output_model = self._output_model_for_schema(run, metadata["schema_kind"], schema)
         if run.status == RunStatus.CANCELLED:
             raise StateError(f"attempt {attempt_id} is no longer active")
         expected_status = {
@@ -1244,7 +1257,7 @@ class Armarius:
 
         else:
             raise InfrastructureError(f"unsupported external task stage: {task.stage}")
-        parsed, issues = self._parse_and_validate_output(metadata["schema_kind"], output_text, validator)
+        parsed, issues = self._parse_and_validate_output(output_model, output_text, validator)
         if task.stage == "verification":
             older = [
                 item
@@ -1301,6 +1314,44 @@ class Armarius:
                         f"/findings/{finding_index}/evidence/{evidence_index}",
                     )
                 )
+        if isinstance(output, ScopedReviewOutput):
+            for group in ("checked", "outstanding"):
+                for index, area in enumerate(getattr(output.scope, group)):
+                    path = f"/scope/{group}/{index}"
+                    if area.source_path == "manuscript.pdf":
+                        if area.page > anchor_map.compiled_pdf.page_count:
+                            issues.append(
+                                self._issue(
+                                    "scope.page_out_of_range",
+                                    f"{path}/page",
+                                    "Declared page is outside the frozen PDF.",
+                                    expected={"page_count": anchor_map.compiled_pdf.page_count},
+                                    actual=area.page,
+                                )
+                            )
+                        continue
+                    source = source_index.get(area.source_path)
+                    if source is None:
+                        issues.append(
+                            self._issue(
+                                "scope.path_unknown",
+                                f"{path}/source_path",
+                                "Declared path is outside the frozen source map.",
+                                actual=area.source_path,
+                            )
+                        )
+                    elif area.start_line is not None and (
+                        source.line_count is None or area.end_line > source.line_count
+                    ):
+                        issues.append(
+                            self._issue(
+                                "scope.line_out_of_range",
+                                path,
+                                "Declared line range is outside the frozen text source.",
+                                expected={"line_count": source.line_count},
+                                actual={"start_line": area.start_line, "end_line": area.end_line},
+                            )
+                        )
         return issues
 
     def _validate_revision_output(
@@ -1765,7 +1816,10 @@ class Armarius:
             "colors, markings, or rendering that source text cannot directly support. Figure review "
             "may inspect the exact page-image read_path listed for a page, but that read path is never "
             "the output anchor. Prefer source-line evidence for every textual claim. Do not modify "
-            "files. Return only the ReviewOutput JSON object with no prose before or after it."
+            "files. In scope, declare checked and outstanding frozen source paths with optional inclusive "
+            "line ranges, or manuscript.pdf pages. Mark completion partial or unknown when work remains "
+            "or cannot be assessed, and state limitations. This declaration does not prove inspection; "
+            "findings may be empty. Return only the ReviewOutput JSON object with no prose before or after it."
         )
 
     @staticmethod
