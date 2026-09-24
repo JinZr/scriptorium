@@ -222,6 +222,7 @@ def test_revision_requires_human_gates_and_independent_verification(tmp_path: Pa
             (repo / "main.tex").write_text("changed after approval\n", encoding="utf-8")
             assert service.apply_patch(patch.id).status.value == "stale"
             assert not service.evaluate_gate(run_id)["passed"]
+            assert service.list_tasks(run_id)["next_actions"] == []
         else:
             service.apply_patch(patch.id)
             assert service.evaluate_gate(run_id)["passed"]

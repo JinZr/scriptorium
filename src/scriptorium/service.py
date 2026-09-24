@@ -391,13 +391,11 @@ class ScriptoriumService:
             else:
                 next_actions.append({"command": "run resume", "run_id": run_id})
         elif view["run"].status == RunStatus.AWAITING_PATCH_APPROVAL:
-            next_actions.append(
-                {
-                    "command": "patch show",
-                    "patch_id": view["patch_ids"][-1],
-                    "requires_human_decision": True,
-                }
-            )
+            patch = self._storage(self.database.get_patch, view["patch_ids"][-1])
+            if patch.status == PatchStatus.PROPOSED:
+                next_actions.append({"command": "patch show", "patch_id": patch.id, "requires_human_decision": True})
+            else:
+                next_actions.append({"command": "run resume", "run_id": run_id})
         elif view["run"].status == RunStatus.READY_TO_APPLY:
             next_actions.append(
                 {
@@ -406,6 +404,13 @@ class ScriptoriumService:
                     "requires_human_decision": True,
                 }
             )
+        elif view["run"].status == RunStatus.FAILED:
+            try:
+                self.armarius._status_before_failure(run_id)
+            except StateError:
+                pass
+            else:
+                next_actions.append({"command": "run resume", "run_id": run_id})
         return {"run_id": run_id, "run_status": view["run"].status, "tasks": tasks, "next_actions": next_actions}
 
     def claim_task(
@@ -866,7 +871,17 @@ class ScriptoriumService:
             except InfrastructureError as exc:
                 review_errors.append(str(exc))
                 continue
-            if completion in {"complete", "unreported"}:
+            if completion in {"complete", "unreported"} or (
+                completion in {"partial", "unknown"}
+                and run.status
+                in {
+                    RunStatus.REVISING,
+                    RunStatus.AWAITING_PATCH_APPROVAL,
+                    RunStatus.VERIFYING,
+                    RunStatus.READY_TO_APPLY,
+                    RunStatus.COMPLETED,
+                }
+            ):
                 completed_roles.add(task.role.value)
         pending_high = [
             finding.id
