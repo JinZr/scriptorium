@@ -17,7 +17,7 @@ import subprocess
 import tempfile
 from typing import Any, Iterator
 
-from .artifacts import ArtifactStore
+from .artifacts import ArtifactError, ArtifactStore
 from .config import find_repo, load_project_config, reject_legacy_local_config, validate_ready
 from .domain import (
     Attempt,
@@ -38,6 +38,7 @@ from .domain import (
 )
 from .errors import ConfigurationError, InfrastructureError, NotFoundError, StateError
 from .manuscript import ManuscriptManager
+from .schemas import ScopedReviewOutput
 from .storage import ConflictError, Database, NotFoundError as StorageNotFoundError, StorageError
 from .workflow import Armarius
 
@@ -675,7 +676,9 @@ class ScriptoriumService:
         run_view = self.get_run(run_id)
         findings = self._storage(self.database.list_findings, run_id)
         patches = self._storage(self.database.list_patches, run_id)
+        events = self._storage(self.database.list_events, run_id)
         validation_reports = []
+        review_scopes = []
         for item in run_view["tasks"]:
             task = item["task"]
             schema_kind = {
@@ -686,6 +689,30 @@ class ScriptoriumService:
                 "verification_transcription": "visual_transcription",
             }.get(task.stage)
             for attempt in item["attempts"]:
+                if task.stage == "review" and attempt.status == AttemptStatus.COMPLETED:
+                    scope = None
+                    if run_view["run"].frozen_config.get("execution") == "external":
+                        metadata = self._storage(self.database.get_external_task, task.id)
+                        schema = self.armarius._load_schema_artifact(
+                            run_view["run"], metadata["schema_kind"], attempt.schema_digest
+                        )
+                        model = self.armarius._output_model_for_schema(run_view["run"], "review", schema)
+                        if model is ScopedReviewOutput:
+                            try:
+                                output_text = self.artifacts.get_bytes(attempt.output_artifact_digest).decode("utf-8")
+                            except (ArtifactError, UnicodeDecodeError) as exc:
+                                raise InfrastructureError(
+                                    f"completed review attempt {attempt.id} has unreadable output"
+                                ) from exc
+                            output, issues = self.armarius._parse_and_validate_output(model, output_text, lambda _: [])
+                            if output is None or issues:
+                                raise InfrastructureError(
+                                    f"completed review attempt {attempt.id} has invalid scope output"
+                                )
+                            scope = output.scope.model_dump(mode="json", exclude_none=True)
+                    review_scopes.append(
+                        {"task_id": task.id, "attempt_id": attempt.id, "role": task.role.value, "scope": scope}
+                    )
                 digest = attempt.validation_report_artifact_digest
                 if digest is None:
                     continue
@@ -725,8 +752,9 @@ class ScriptoriumService:
                 }
                 for patch in patches
             ],
-            "events": self._storage(self.database.list_events, run_id),
+            "events": events,
             "validation_reports": validation_reports,
+            "review_scopes": review_scopes,
             "gate": self.evaluate_gate(run_id),
         }
         if format == "json":
@@ -947,6 +975,37 @@ class ScriptoriumService:
                 f"- `{task['id']}` — {task['stage']} / {task['role']} / {task['status']} "
                 f"({len(item['attempts'])} attempts)"
             )
+        lines.extend(["", "## Reviewer-declared scope", ""])
+        if plain["review_scopes"]:
+            access_counts = {}
+            for event in plain["events"]:
+                if event["event_type"] in {"tool.read", "tool.search", "tool.page"}:
+                    counts = access_counts.setdefault(event["entity_id"], {"read": 0, "search": 0, "page": 0})
+                    counts[event["event_type"].removeprefix("tool.")] += 1
+            for item in plain["review_scopes"]:
+                scope = item["scope"]
+                if scope is None:
+                    lines.append(f"- `{item['attempt_id']}` / {item['role']}: scope not reported by frozen contract")
+                    continue
+                counts = access_counts.get(item["attempt_id"], {"read": 0, "search": 0, "page": 0})
+                lines.append(
+                    f"- `{item['attempt_id']}` / {item['role']}: declared `{scope['completion']}`; "
+                    f"checked {len(scope['checked'])}, outstanding {len(scope['outstanding'])}; "
+                    f"tool returns: read {counts['read']}, search {counts['search']}, page {counts['page']}"
+                )
+                for group in ("checked", "outstanding"):
+                    for area in scope[group]:
+                        location = area["source_path"]
+                        if "page" in area:
+                            location += f":page {area['page']}"
+                        elif "start_line" in area:
+                            location += f":{area['start_line']}-{area['end_line']}"
+                        lines.append(f"  - {group}: `{location}`")
+                for limitation in scope["limitations"]:
+                    lines.append(f"  - limitation: {limitation}")
+            lines.append("Model declarations are not verified reading; tool returns do not prove inspection.")
+        else:
+            lines.append("- None")
         lines.extend(["", "## Validation failures", ""])
         if plain["validation_reports"]:
             for item in plain["validation_reports"]:
