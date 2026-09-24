@@ -10,6 +10,7 @@ from scriptorium.schemas import (
     EvidenceAnchorContract,
     EvidenceAnchorMap,
     ReviewOutput,
+    ReviewScopeArea,
     VisualTranscriptionOutput,
     evidence_anchor_contract_content,
     evidence_anchor_contract_digest,
@@ -113,6 +114,22 @@ def test_review_scope_schema_exposes_location_and_completion_constraints() -> No
         {"not": {"anyOf": [{"required": ["start_line"]}, {"required": ["end_line"]}]}},
     ]
     assert definitions["ReviewScope"]["allOf"][0]["then"]["properties"]["outstanding"] == {"maxItems": 0}
+
+
+@pytest.mark.parametrize(
+    "area",
+    [
+        {"source_path": "manuscript.pdf", "page": "1"},
+        {"source_path": "manuscript.pdf", "page": True},
+        {"source_path": "main.tex", "start_line": "1", "end_line": 1},
+        {"source_path": "main.tex", "start_line": True, "end_line": 1},
+        {"source_path": "main.tex", "start_line": 1, "end_line": "1"},
+        {"source_path": "main.tex", "start_line": 1, "end_line": True},
+    ],
+)
+def test_review_scope_coordinates_require_integers(area) -> None:
+    with pytest.raises(ValidationError):
+        ReviewScopeArea.model_validate(area)
 
 
 def test_output_schema_uses_the_supplied_frozen_contract() -> None:

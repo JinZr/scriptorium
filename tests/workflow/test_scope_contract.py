@@ -88,6 +88,16 @@ from ._support import PdfBuildingManuscriptManager, claim, make_repository, subm
         ),
         (
             {
+                "completion": "unknown",
+                "checked": [{"source_path": "manuscript.pdf", "page": "1"}],
+                "outstanding": [],
+                "limitations": [],
+            },
+            "schema.type",
+            "/scope/checked/0/page",
+        ),
+        (
+            {
                 "completion": "complete",
                 "checked": [],
                 "outstanding": [{"source_path": "main.tex"}],
