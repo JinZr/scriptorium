@@ -144,22 +144,48 @@ def test_integral_json_number_scope_is_accepted(tmp_path):
         assert result["attempt"].status == AttemptStatus.COMPLETED
 
 
-def test_fractional_coordinate_keeps_raw_json_precision(tmp_path):
+@pytest.mark.parametrize(
+    ("number", "actual"),
+    [
+        ("1.0000000000000001", "1.0000000000000001"),
+        ("1e1000000000", "1E+1000000000"),
+        ("1e-1000000000", "1E-1000000000"),
+    ],
+)
+def test_invalid_coordinate_keeps_raw_json_precision(tmp_path, number, actual):
     repo = make_repository(tmp_path, roles=("substantive_review",))
     with ScriptoriumService(repo, manuscript_manager=PdfBuildingManuscriptManager(repo)) as service:
         run = asyncio.run(service.start_run("HEAD", "quick"))["run"]
         review = claim(service, run.id, AgentRole.SUBSTANTIVE_REVIEW)
         output = (
             '{"summary":"Reviewed.","findings":[],"scope":{"completion":"unknown",'
-            '"checked":[{"source_path":"manuscript.pdf","page":1.0000000000000001}],'
+            f'"checked":[{{"source_path":"manuscript.pdf","page":{number}}}],'
             '"outstanding":[],"limitations":[]}}'
         )
         result = asyncio.run(service.submit_task(review["attempt"].id, review["input_digest"], output))
 
         assert result["attempt"].status == AttemptStatus.FAILED
         assert [(issue["code"], issue["path"], issue["actual"]) for issue in result["validation_report"]["issues"]] == [
-            ("schema.type", "/scope/checked/0/page", "1.0000000000000001")
+            ("schema.type", "/scope/checked/0/page", actual)
         ]
+        assert service.list_findings(run.id) == []
+
+
+@pytest.mark.parametrize("number", ["1e999999999999999999999999", "9" * 5000])
+def test_unparseable_json_number_creates_validation_report(tmp_path, number):
+    repo = make_repository(tmp_path, roles=("substantive_review",))
+    with ScriptoriumService(repo, manuscript_manager=PdfBuildingManuscriptManager(repo)) as service:
+        run = asyncio.run(service.start_run("HEAD", "quick"))["run"]
+        review = claim(service, run.id, AgentRole.SUBSTANTIVE_REVIEW)
+        output = (
+            '{"summary":"Reviewed.","findings":[],"scope":{"completion":"unknown",'
+            f'"checked":[{{"source_path":"manuscript.pdf","page":{number}}}],'
+            '"outstanding":[],"limitations":[]}}'
+        )
+        result = asyncio.run(service.submit_task(review["attempt"].id, review["input_digest"], output))
+
+        assert result["attempt"].status == AttemptStatus.FAILED
+        assert result["validation_report"]["issues"][0]["code"] == "json.invalid"
         assert service.list_findings(run.id) == []
 
 

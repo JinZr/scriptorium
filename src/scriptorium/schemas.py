@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from decimal import Decimal
 from enum import Enum
+import sys
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -241,10 +242,10 @@ class ReviewScopeArea(StrictModel):
     @classmethod
     def accept_integral_number(cls, value: Any) -> Any:
         if isinstance(value, Decimal):
-            if value.is_finite() and value == value.to_integral_value():
+            if value.is_finite() and 1 <= value <= sys.maxsize and value == value.to_integral_value():
                 return int(value)
             return value
-        if isinstance(value, float) and value.is_integer():
+        if isinstance(value, float) and 1 <= value <= sys.maxsize and value.is_integer():
             return int(value)
         return value
 
