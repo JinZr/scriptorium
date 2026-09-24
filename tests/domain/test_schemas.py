@@ -99,6 +99,22 @@ def test_evidence_schema_exposes_mutually_exclusive_contract_shapes() -> None:
         }
 
 
+def test_review_scope_schema_exposes_location_and_completion_constraints() -> None:
+    definitions = output_schema("review")["$defs"]
+    pdf_page, source = definitions["ReviewScopeArea"]["oneOf"]
+
+    assert pdf_page["required"] == ["page"]
+    assert pdf_page["properties"]["source_path"] == {"const": "manuscript.pdf"}
+    assert pdf_page["not"] == {"anyOf": [{"required": ["start_line"]}, {"required": ["end_line"]}]}
+    assert source["properties"]["source_path"] == {"not": {"const": "manuscript.pdf"}}
+    assert source["not"] == {"required": ["page"]}
+    assert source["oneOf"] == [
+        {"required": ["start_line", "end_line"]},
+        {"not": {"anyOf": [{"required": ["start_line"]}, {"required": ["end_line"]}]}},
+    ]
+    assert definitions["ReviewScope"]["allOf"][0]["then"]["properties"]["outstanding"] == {"maxItems": 0}
+
+
 def test_output_schema_uses_the_supplied_frozen_contract() -> None:
     content = evidence_anchor_contract_content()
     content["source_line"]["matching_rule"] = "frozen source match"
