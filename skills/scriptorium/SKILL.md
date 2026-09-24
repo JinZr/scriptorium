@@ -11,7 +11,7 @@ You are the reviewer in the current client conversation. Use the model selected 
 
 Run every command from the manuscript project that owns the run. Inspect `scriptorium --json doctor --revision REVISION --profile PROFILE` before a new run. `scriptorium --json run start --revision REVISION --profile PROFILE` freezes and compiles that commit and returns pending review tasks. It does not spend model tokens by itself. For an existing run, inspect `run status RUN_ID`, then `task list RUN_ID` or `run resume RUN_ID` as appropriate. Use IDs and input digests returned by the CLI, not guessed values. If a run is not found, stop and check the project directory with the caller; do not search other repositories or inspect SQLite directly.
 
-For each task, claim from this current session:
+For each task listed by `task list`, claim from this current session:
 
 ```bash
 scriptorium --json task claim TASK_ID --client CLIENT --model MODEL --effort EFFORT \
@@ -42,6 +42,8 @@ scriptorium --json task submit ATTEMPT_ID --input-digest DIGEST --file answer.js
 ```
 
 `--file -` reads JSON from stdin. An invalid submission returns a durable validation report and produces no partial findings. Inspect the report, then explicitly use `run retry RUN_ID --task TASK_ID` and claim the task again. A claim survives CLI exit; do not retry merely because a command finished.
+
+After every submission, run `task list RUN_ID` and follow its `next_actions`. Continue all authorized review roles, including searches, bounded reads, relevant rendered pages, and supplementary counterevidence. A valid JSON receipt completes only one attempt. If the accepted scope is `partial` or `unknown`, use `run continue RUN_ID --task TASK_ID` and claim that task again. The next frozen attempt includes the prior scope, summary, output digest, and recorded finding IDs. Report cumulative checked and remaining areas in the new scope; prior findings and decisions stay recorded. Keep the run in review until every required role declares `complete`. For an older frozen schema without scope, follow that task's existing contract. Stop at a human decision or patch approval gate and present the relevant findings or patch to the user.
 
 ## Human decisions and reporting
 
