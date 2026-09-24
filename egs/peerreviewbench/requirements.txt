@@ -1,4 +1,4 @@
-litellm==1.83.0
+litellm==1.93.0
 datasets>=2.16
 huggingface_hub>=0.20
 numpy>=1.24
