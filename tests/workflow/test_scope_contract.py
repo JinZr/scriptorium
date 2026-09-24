@@ -1,0 +1,107 @@
+import asyncio
+import json
+
+import pytest
+
+from scriptorium.domain import AgentRole, AttemptStatus, digest_json
+from scriptorium.errors import InfrastructureError
+from scriptorium.schemas import output_schema
+from scriptorium.service import ScriptoriumService
+from scriptorium.workflow import Armarius
+
+from ._support import PdfBuildingManuscriptManager, claim, make_repository
+
+
+@pytest.mark.parametrize(
+    ("scope", "code", "path"),
+    [
+        (None, "schema.missing", "/scope"),
+        (
+            {
+                "completion": "partial",
+                "checked": [{"source_path": "../private.tex"}],
+                "outstanding": [],
+                "limitations": [],
+            },
+            "scope.path_unknown",
+            "/scope/checked/0/source_path",
+        ),
+        (
+            {
+                "completion": "partial",
+                "checked": [{"source_path": "main.tex", "start_line": 1, "end_line": 99}],
+                "outstanding": [],
+                "limitations": [],
+            },
+            "scope.line_out_of_range",
+            "/scope/checked/0",
+        ),
+        (
+            {
+                "completion": "partial",
+                "checked": [],
+                "outstanding": [{"source_path": "manuscript.pdf", "page": 99}],
+                "limitations": [],
+            },
+            "scope.page_out_of_range",
+            "/scope/outstanding/0/page",
+        ),
+        (
+            {
+                "completion": "unknown",
+                "checked": [{"source_path": "main.tex", "start_line": 1}],
+                "outstanding": [],
+                "limitations": [],
+            },
+            "schema.cross_field",
+            "/scope/checked/0",
+        ),
+    ],
+)
+def test_invalid_review_scope_rejects_whole_result(tmp_path, scope, code, path):
+    repo = make_repository(tmp_path, roles=("substantive_review",))
+    with ScriptoriumService(repo, manuscript_manager=PdfBuildingManuscriptManager(repo)) as service:
+        run = asyncio.run(service.start_run("HEAD", "quick"))["run"]
+        review = claim(service, run.id, AgentRole.SUBSTANTIVE_REVIEW)
+        output = {"summary": "Reviewed the manuscript.", "findings": []}
+        if scope is not None:
+            output["scope"] = scope
+        receipt = asyncio.run(service.submit_task(review["attempt"].id, review["input_digest"], json.dumps(output)))
+        assert receipt["attempt"].status == AttemptStatus.FAILED
+        assert [(issue["code"], issue["path"]) for issue in receipt["validation_report"]["issues"]] == [(code, path)]
+        assert service.list_findings(run.id) == []
+
+
+def test_old_frozen_review_schema_replays_without_scope(tmp_path, monkeypatch):
+    repo = make_repository(tmp_path, roles=("substantive_review",))
+    original = Armarius._freeze_config
+
+    def old_freeze(self, *args, **kwargs):
+        frozen = original(self, *args, **kwargs)
+        schema = output_schema("review", legacy_review=True)
+        frozen["schemas"]["review"] = {"digest": digest_json(schema), "content": schema}
+        return frozen
+
+    with monkeypatch.context() as patch:
+        patch.setattr(Armarius, "_freeze_config", old_freeze)
+        with ScriptoriumService(repo, manuscript_manager=PdfBuildingManuscriptManager(repo)) as service:
+            run = asyncio.run(service.start_run("HEAD", "quick"))["run"]
+
+    with ScriptoriumService(repo, manuscript_manager=PdfBuildingManuscriptManager(repo)) as service:
+        review = claim(service, run.id, AgentRole.SUBSTANTIVE_REVIEW)
+        assert "scope" not in review["schema"]["properties"]
+        result = asyncio.run(
+            service.submit_task(
+                review["attempt"].id,
+                review["input_digest"],
+                json.dumps({"summary": "Reviewed the old contract.", "findings": []}),
+            )
+        )
+        assert result["attempt"].status == AttemptStatus.COMPLETED
+
+    with ScriptoriumService(repo, manuscript_manager=PdfBuildingManuscriptManager(repo)) as service:
+        asyncio.run(service.resume_run(run.id))
+        frozen = service.database.get_run(run.id)
+        unsupported = {**frozen.frozen_config["schemas"]["review"]["content"], "title": "OtherReviewOutput"}
+        with pytest.raises(InfrastructureError, match="unsupported frozen review output schema"):
+            service.armarius._output_model_for_schema(frozen, "review", unsupported)

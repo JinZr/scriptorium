@@ -77,7 +77,13 @@ def test_benchmark_prepares_external_tasks_and_collects_validated_reviews(tmp_pa
                 service.submit_task(
                     claim["attempt"].id,
                     claim["input_digest"],
-                    json.dumps({"summary": "Reviewed the frozen paper.", "findings": []}),
+                    json.dumps(
+                        {
+                            "summary": "Reviewed the frozen paper.",
+                            "findings": [],
+                            "scope": {"completion": "unknown", "checked": [], "outstanding": [], "limitations": []},
+                        }
+                    ),
                 )
             )
 

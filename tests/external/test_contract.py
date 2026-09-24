@@ -51,6 +51,16 @@ def _start(repo: Path):
         return view["run"].id, view["tasks"][0]["task"].id
 
 
+def _review_json(summary: str, findings: list | None = None) -> str:
+    return json.dumps(
+        {
+            "summary": summary,
+            "findings": findings or [],
+            "scope": {"completion": "unknown", "checked": [], "outstanding": [], "limitations": []},
+        }
+    )
+
+
 @pytest.mark.parametrize("client", ["codex", "claude_code", "antigravity"])
 def test_each_host_uses_the_same_frozen_task_contract(tmp_path: Path, client: str) -> None:
     repo = _repo(tmp_path / "paper")
@@ -60,6 +70,7 @@ def test_each_host_uses_the_same_frozen_task_contract(tmp_path: Path, client: st
         attempt_id = claim["attempt"].id
         assert claim["input_digest"] == claim["task"].input_digest
         assert claim["schema"]["title"] == "ReviewOutput"
+        assert "scope" in claim["schema"]["required"]
         assert (
             service.claim_task(task_id, client, "selected-model", "max", "session-1", "host")["attempt"].id
             == attempt_id
@@ -79,7 +90,7 @@ def test_each_host_uses_the_same_frozen_task_contract(tmp_path: Path, client: st
             service.submit_task(
                 attempt_id,
                 claim["input_digest"],
-                json.dumps({"summary": "The result and supplementary explanation were checked.", "findings": []}),
+                _review_json("The result and supplementary explanation were checked."),
             )
         )
         assert result["attempt"].status == AttemptStatus.COMPLETED
@@ -88,7 +99,7 @@ def test_each_host_uses_the_same_frozen_task_contract(tmp_path: Path, client: st
             service.submit_task(
                 attempt_id,
                 claim["input_digest"],
-                json.dumps({"summary": "The result and supplementary explanation were checked.", "findings": []}),
+                _review_json("The result and supplementary explanation were checked."),
             )
         )
         assert repeated["output_digest"] == result["output_digest"]
@@ -158,7 +169,7 @@ def test_revision_requires_human_gates_and_independent_verification(tmp_path: Pa
             service.submit_task(
                 review["attempt"].id,
                 review["input_digest"],
-                json.dumps({"summary": "Read the result and supplement.", "findings": [finding]}),
+                _review_json("Read the result and supplement.", [finding]),
             )
         )
         assert service.database.get_run(run_id).status == RunStatus.AWAITING_DECISION
@@ -255,7 +266,7 @@ def test_json_cli_reads_and_submits_from_stdin_across_processes(tmp_path: Path) 
     assert command(*conflict_args, success=False)["error"]["code"] == "invalid_state"
     searched = command("task", "search", attempt_id, "--query", "explains")
     assert searched["ok"] and searched["data"]["matches"][0]["path"] == "supplement.tex"
-    output = json.dumps({"summary": "Read the supplement.", "findings": []})
+    output = _review_json("Read the supplement.")
     submitted = command(
         "task",
         "submit",
@@ -421,7 +432,7 @@ def test_retrieval_rejects_selected_corruption_and_submission_checks_the_whole_b
                 service.submit_task(
                     claim["attempt"].id,
                     claim["input_digest"],
-                    json.dumps({"summary": "Review complete.", "findings": []}),
+                    _review_json("Review complete."),
                 )
             )
         (workspace / "sources/supplement.tex").write_text("also damaged\n", encoding="utf-8")
@@ -531,7 +542,7 @@ def test_wrong_evidence_is_rejected_as_a_whole_output(tmp_path: Path) -> None:
             service.submit_task(
                 claim["attempt"].id,
                 claim["input_digest"],
-                json.dumps({"summary": "Examined the manuscript.", "findings": [candidate]}),
+                _review_json("Examined the manuscript.", [candidate]),
             )
         )
         assert result["attempt"].status == AttemptStatus.FAILED
@@ -547,7 +558,7 @@ def test_completed_attempt_replays_after_process_exit(tmp_path: Path) -> None:
         service.armarius.submit_task(
             claim["attempt"].id,
             claim["input_digest"],
-            json.dumps({"summary": "Reviewed the manuscript.", "findings": []}),
+            _review_json("Reviewed the manuscript."),
         )
         assert service.database.get_run(run_id).status == RunStatus.REVIEWING
     with ScriptoriumService(repo) as service:
@@ -564,7 +575,7 @@ def test_corrupt_completed_output_cannot_be_replayed_or_pass_the_gate(tmp_path: 
         attempt = service.armarius.submit_task(
             claim["attempt"].id,
             claim["input_digest"],
-            json.dumps({"summary": "Reviewed the manuscript.", "findings": []}),
+            _review_json("Reviewed the manuscript."),
         )
         service.artifacts.path_for(attempt.output_artifact_digest).write_text("corrupt", encoding="utf-8")
     with ScriptoriumService(repo) as service:

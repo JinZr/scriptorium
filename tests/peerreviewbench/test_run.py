@@ -97,6 +97,7 @@ def _complete_reviews(service: ScriptoriumService, run_id: str, *, skip: AgentRo
         )
         output = {
             "summary": f"Reviewed the frozen {task.role.value} material.",
+            "scope": {"completion": "unknown", "checked": [], "outstanding": [], "limitations": []},
             "findings": [
                 {
                     "category": task.role.value,

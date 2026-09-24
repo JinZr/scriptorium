@@ -94,11 +94,11 @@ def _finding(identifier):
 def test_invalid_json_and_schema_errors_are_normalized_without_pydantic_noise(tmp_path):
     _, service = _service(tmp_path)
     with service:
-        output, issues = service.armarius._parse_and_validate_output("review", None, lambda value: [])
+        output, issues = service.armarius._parse_and_validate_output(ReviewOutput, None, lambda value: [])
         assert output is None
         assert [(issue.code, issue.path) for issue in issues] == [("response.missing", "")]
 
-        output, issues = service.armarius._parse_and_validate_output("review", '{"summary":\n', lambda value: [])
+        output, issues = service.armarius._parse_and_validate_output(ReviewOutput, '{"summary":\n', lambda value: [])
         assert output is None
         assert issues[0].code == "json.invalid"
         assert issues[0].path == ""
@@ -127,7 +127,7 @@ def test_invalid_json_and_schema_errors_are_normalized_without_pydantic_noise(tm
             ]
         }
         output, issues = service.armarius._parse_and_validate_output(
-            "review",
+            ReviewOutput,
             json.dumps(malformed),
             lambda value: [],
         )
@@ -278,7 +278,7 @@ def test_deepseek_anchor_regressions_have_consistent_schema_and_semantic_feedbac
         reports = []
         for evidence, expected_code in values:
             _, issues = service.armarius._parse_and_validate_output(
-                "review",
+                ReviewOutput,
                 payload(evidence),
                 lambda output: service.armarius._validate_review_output(
                     output,
