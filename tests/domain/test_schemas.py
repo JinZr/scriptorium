@@ -124,14 +124,17 @@ def test_review_scope_schema_exposes_location_and_completion_constraints() -> No
         {"source_path": "manuscript.pdf", "page": True},
         {"source_path": "manuscript.pdf", "page": 1.5},
         {"source_path": "manuscript.pdf", "page": Decimal("1.0000000000000001")},
+        {"source_path": "manuscript.pdf", "page": Decimal("1e1000000000")},
         {"source_path": "main.tex", "start_line": "1", "end_line": 1},
         {"source_path": "main.tex", "start_line": True, "end_line": 1},
         {"source_path": "main.tex", "start_line": 1.5, "end_line": 2},
         {"source_path": "main.tex", "start_line": Decimal("1.0000000000000001"), "end_line": 2},
+        {"source_path": "main.tex", "start_line": Decimal("1e1000000000"), "end_line": 2},
         {"source_path": "main.tex", "start_line": 1, "end_line": "1"},
         {"source_path": "main.tex", "start_line": 1, "end_line": True},
         {"source_path": "main.tex", "start_line": 1, "end_line": 1.5},
         {"source_path": "main.tex", "start_line": 1, "end_line": Decimal("1.0000000000000001")},
+        {"source_path": "main.tex", "start_line": 1, "end_line": Decimal("1e1000000000")},
     ],
 )
 def test_review_scope_coordinates_require_integers(area) -> None:

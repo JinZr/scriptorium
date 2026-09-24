@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 import difflib
 import hashlib
 from importlib import resources
@@ -721,6 +721,16 @@ class Armarius:
                         "message": exc.msg,
                         "context": value[start:end],
                     },
+                )
+            ]
+        except (ValueError, InvalidOperation) as exc:
+            return None, [
+                self._issue(
+                    "json.invalid",
+                    "",
+                    "Final response contains a JSON number that cannot be parsed.",
+                    expected={"response": "one complete JSON object"},
+                    actual={"message": str(exc)},
                 )
             ]
         try:
