@@ -232,9 +232,9 @@ class ReviewOutput(StrictModel):
 
 class ReviewScopeArea(StrictModel):
     source_path: str = Field(min_length=1)
-    start_line: int | None = Field(default=None, ge=1)
-    end_line: int | None = Field(default=None, ge=1)
-    page: int | None = Field(default=None, ge=1)
+    start_line: int | None = Field(default=None, ge=1, strict=True)
+    end_line: int | None = Field(default=None, ge=1, strict=True)
+    page: int | None = Field(default=None, ge=1, strict=True)
 
     @model_validator(mode="before")
     @classmethod
