@@ -909,13 +909,17 @@ class Armarius:
             raise InfrastructureError(f"attempt schema artifact is missing or corrupt: {digest}") from exc
 
     def _output_model_for_schema(self, run: Run, schema_kind: str, schema: dict[str, Any]) -> type[StrictModel]:
-        contract = self._evidence_anchor_contract_for_run(run, allow_missing=False)
-        assert contract is not None
-        if schema == output_schema(schema_kind, contract):
+        if schema_kind != "review":
             return SCHEMA_MODELS[schema_kind]
-        if schema_kind == "review" and schema == output_schema("review", contract, legacy_review=True):
+        properties = schema.get("properties", {})
+        required = schema.get("required", [])
+        if schema.get("type") != "object" or schema.get("additionalProperties") is not False:
+            raise InfrastructureError(f"run {run.id} has an unsupported frozen review output schema")
+        if set(properties) == set(required) == {"summary", "findings", "scope"}:
+            return ScopedReviewOutput
+        if set(properties) == set(required) == {"summary", "findings"}:
             return ReviewOutput
-        raise InfrastructureError(f"run {run.id} has an unsupported frozen {schema_kind} output schema")
+        raise InfrastructureError(f"run {run.id} has an unsupported frozen review output schema")
 
     @staticmethod
     def _validation_error_summary(report: ValidationReport) -> str:

@@ -254,6 +254,12 @@ class ReviewScope(StrictModel):
     outstanding: list[ReviewScopeArea]
     limitations: list[str]
 
+    @model_validator(mode="after")
+    def validate_completion(self) -> "ReviewScope":
+        if self.completion == "complete" and self.outstanding:
+            raise ValueError("complete scope cannot include outstanding areas")
+        return self
+
 
 class ScopedReviewOutput(ReviewOutput):
     model_config = ConfigDict(extra="forbid", title="ReviewOutput")
@@ -366,6 +372,37 @@ def output_schema(
         )
         evidence["properties"]["quoted_text"]["description"] = contract.source_line.matching_rule
         evidence["oneOf"] = _evidence_anchor_schema(contract)
+        if kind == "review" and not legacy_review:
+            schema["$defs"]["ReviewScopeArea"]["oneOf"] = [
+                {
+                    "title": "Compiled PDF page",
+                    "required": ["page"],
+                    "properties": {
+                        "source_path": {"const": "manuscript.pdf"},
+                        "page": {"type": "integer", "minimum": 1},
+                    },
+                    "not": {"anyOf": [{"required": ["start_line"]}, {"required": ["end_line"]}]},
+                },
+                {
+                    "title": "Source path or line range",
+                    "properties": {
+                        "source_path": {"not": {"const": "manuscript.pdf"}},
+                        "start_line": {"type": "integer", "minimum": 1},
+                        "end_line": {"type": "integer", "minimum": 1},
+                    },
+                    "not": {"required": ["page"]},
+                    "oneOf": [
+                        {"required": ["start_line", "end_line"]},
+                        {"not": {"anyOf": [{"required": ["start_line"]}, {"required": ["end_line"]}]}},
+                    ],
+                },
+            ]
+            schema["$defs"]["ReviewScope"]["allOf"] = [
+                {
+                    "if": {"properties": {"completion": {"const": "complete"}}, "required": ["completion"]},
+                    "then": {"properties": {"outstanding": {"maxItems": 0}}},
+                }
+            ]
     elif kind == "revision":
         properties = schema["$defs"]["ExactEdit"]["properties"]
         properties["path"]["description"] = contract.revision_edit.source_path_rule
