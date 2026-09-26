@@ -121,6 +121,24 @@ def test_each_host_uses_the_same_frozen_task_contract(tmp_path: Path, client: st
         }
 
 
+def test_shared_skill_example_passes_frozen_review_validation(tmp_path: Path) -> None:
+    repo = _repo(tmp_path / "paper")
+    run_id, task_id = _start(repo)
+    skill = (Path(__file__).resolve().parents[2] / "skills" / "scriptorium" / "SKILL.md").read_text(encoding="utf-8")
+    example = skill.split("### Example substantive-review output", 1)[1].split("```json\n", 1)[1].split("\n```", 1)[0]
+    with ScriptoriumService(repo) as service:
+        claim = service.claim_task(task_id, "codex", "model", "high", "session", "host")
+        attempt_id = claim["attempt"].id
+        main = next(source for source in claim["source_map"]["sources"] if source["source_path"] == "main.tex")
+        output = example.replace("<MAIN_SOURCE_DIGEST>", main["source_digest"])
+        service.read_task(attempt_id, "main.tex", 3, 3, 0, 8000)
+        service.read_task(attempt_id, "supplement.tex", 1, 1, 0, 8000)
+        result = asyncio.run(service.submit_task(attempt_id, claim["input_digest"], output))
+        assert result["attempt"].status == AttemptStatus.COMPLETED
+        assert result["run_status"] == RunStatus.REVIEWING
+        assert len(service.list_findings(run_id)) == 1
+
+
 def test_invalid_submission_requires_explicit_retry_and_never_creates_findings(tmp_path: Path) -> None:
     repo = _repo(tmp_path / "paper")
     run_id, task_id = _start(repo)
