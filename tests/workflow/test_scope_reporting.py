@@ -3,8 +3,8 @@ import json
 
 import pytest
 
-from scriptorium.domain import AgentRole, AttemptStatus, RunStatus, digest_json
-from scriptorium.schemas import output_schema
+from scriptorium.domain import AgentRole, AttemptStatus, Event, RunStatus, digest_json
+from scriptorium.schemas import SourceAnchorRecord, output_schema
 from scriptorium.service import ScriptoriumService
 from scriptorium.workflow import Armarius
 
@@ -149,6 +149,99 @@ def test_coverage_audit_flags_checked_page_without_task_page_return(tmp_path):
         assert "declared checked without task page return: `manuscript.pdf:page 1`" in service.render_report(
             run.id, "markdown"
         )
+
+
+def test_coverage_audit_prioritizes_canonical_source_paths_over_read_aliases():
+    sources = [
+        SourceAnchorRecord(
+            source_path=path,
+            read_path=f"sources/{path}",
+            source_digest="a" * 64,
+            line_count=2,
+            text_anchorable=True,
+        )
+        for path in ("foo.tex", "sources/foo.tex")
+    ]
+    events = [
+        Event(
+            run_id="run",
+            event_type="tool.read",
+            entity_type="attempt",
+            entity_id="attempt",
+            payload={
+                "path": "sources/foo.tex",
+                "ranges": [{"line": 2, "start_offset": 0, "end_offset": 2}],
+            },
+        ),
+        Event(
+            run_id="run",
+            event_type="tool.search",
+            entity_type="attempt",
+            entity_id="attempt",
+            payload={"matches": [{"path": "sources/foo.tex", "line": 1}]},
+        ),
+    ]
+    scope = {"checked": [{"source_path": "sources/foo.tex", "start_line": 2, "end_line": 2}]}
+    audit = ScriptoriumService._review_coverage_audit(scope, events, sources)
+    assert audit["read_lines"] == [{"source_path": "sources/foo.tex", "ranges": [{"start_line": 2, "end_line": 2}]}]
+    assert audit["search_matches"] == [{"source_path": "sources/foo.tex", "lines": [1]}]
+    assert audit["declared_without_task_read"] == []
+
+
+def test_coverage_audit_does_not_credit_an_empty_read_fragment(tmp_path):
+    repo = make_repository(tmp_path, roles=("substantive_review",))
+    with ScriptoriumService(repo, manuscript_manager=PdfBuildingManuscriptManager(repo)) as service:
+        run = asyncio.run(service.start_run("HEAD", "quick"))["run"]
+        review = claim(service, run.id, AgentRole.SUBSTANTIVE_REVIEW)
+        result = service.read_task(review["attempt"].id, "main.tex", 3, 1, len("The result is teh clear."), 8000)
+        assert result["lines"] == [{"line": 3, "offset": len("The result is teh clear."), "text": ""}]
+        submit(
+            service,
+            review,
+            {
+                "summary": "The line was checked by the host.",
+                "findings": [],
+                "scope": {
+                    "completion": "complete",
+                    "checked": [{"source_path": "main.tex", "start_line": 3, "end_line": 3}],
+                    "outstanding": [],
+                    "limitations": [],
+                },
+            },
+        )
+        audit = service.render_report(run.id, "json")["review_coverage_audit"][0]
+        assert audit["read_lines"] == []
+        assert audit["declared_without_task_read"] == [{"source_path": "main.tex", "start_line": 3, "end_line": 3}]
+
+
+def test_coverage_audit_subtracts_large_whole_file_scope_as_spans():
+    source = SourceAnchorRecord(
+        source_path="large.tex",
+        read_path="sources/large.tex",
+        source_digest="a" * 64,
+        line_count=1_000_000,
+        text_anchorable=True,
+    )
+    event = Event(
+        run_id="run",
+        event_type="tool.read",
+        entity_type="attempt",
+        entity_id="attempt",
+        payload={"path": "large.tex", "ranges": [{"line": 500_000, "start_offset": 0, "end_offset": 1}]},
+    )
+    audit = ScriptoriumService._review_coverage_audit({"checked": [{"source_path": "large.tex"}]}, [event], [source])
+    assert audit["declared_without_task_read"] == [
+        {"source_path": "large.tex", "start_line": 1, "end_line": 499_999},
+        {"source_path": "large.tex", "start_line": 500_001, "end_line": 1_000_000},
+    ]
+
+
+def test_coverage_audit_merges_overlapping_declarations_before_subtraction():
+    assert ScriptoriumService._missing_line_spans([(4, 10), (1, 5), (12, 12)], {2, 6, 12}) == [
+        {"start_line": 1, "end_line": 1},
+        {"start_line": 3, "end_line": 5},
+        {"start_line": 7, "end_line": 10},
+    ]
 
 
 @pytest.mark.parametrize("completion", ["partial", "unknown"])

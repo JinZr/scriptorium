@@ -749,6 +749,30 @@ class ScriptoriumService:
                 spans.append({"start_line": number, "end_line": number})
         return spans
 
+    @staticmethod
+    def _missing_line_spans(declared: list[tuple[int, int]], returned: set[int]) -> list[dict[str, int]]:
+        merged: list[dict[str, int]] = []
+        for start, end in sorted(declared):
+            if merged and start <= merged[-1]["end_line"] + 1:
+                merged[-1]["end_line"] = max(merged[-1]["end_line"], end)
+            else:
+                merged.append({"start_line": start, "end_line": end})
+        missing = []
+        read_lines = iter(sorted(returned))
+        next_read = next(read_lines, None)
+        for span in merged:
+            cursor = span["start_line"]
+            while next_read is not None and next_read < cursor:
+                next_read = next(read_lines, None)
+            while next_read is not None and next_read <= span["end_line"]:
+                if next_read > cursor:
+                    missing.append({"start_line": cursor, "end_line": next_read - 1})
+                cursor = next_read + 1
+                next_read = next(read_lines, None)
+            if cursor <= span["end_line"]:
+                missing.append({"start_line": cursor, "end_line": span["end_line"]})
+        return missing
+
     @classmethod
     def _review_coverage_audit(cls, scope: dict[str, Any], events: list[Event], sources) -> dict[str, Any]:
         source_index = {source.source_path: source for source in sources}
@@ -758,15 +782,18 @@ class ScriptoriumService:
         pages: set[int] = set()
         for event in events:
             if event.event_type == "tool.read":
-                path = read_paths.get(event.payload["path"], event.payload["path"])
-                read_lines.setdefault(path, set()).update(item["line"] for item in event.payload["ranges"])
+                path = event.payload["path"]
+                if path not in source_index:
+                    path = read_paths.get(path, path)
+                read_lines.setdefault(path, set()).update(
+                    item["line"] for item in event.payload["ranges"] if item["end_offset"] > item["start_offset"]
+                )
             elif event.event_type == "tool.search":
                 for match in event.payload["matches"]:
-                    path = read_paths.get(match["path"], match["path"])
-                    search_matches.setdefault(path, set()).add(match["line"])
+                    search_matches.setdefault(match["path"], set()).add(match["line"])
             elif event.event_type == "tool.page":
                 pages.add(event.payload["page"])
-        declared_lines: dict[str, set[int]] = {}
+        declared_lines: dict[str, list[tuple[int, int]]] = {}
         declared_pages: set[int] = set()
         not_comparable = []
         for area in scope["checked"]:
@@ -777,7 +804,7 @@ class ScriptoriumService:
                 source = source_index[path]
                 start = area.get("start_line", 1)
                 end = area.get("end_line", source.line_count)
-                declared_lines.setdefault(path, set()).update(range(start, end + 1))
+                declared_lines.setdefault(path, []).append((start, end))
             else:
                 not_comparable.append(area)
         return {
@@ -793,7 +820,7 @@ class ScriptoriumService:
             "declared_without_task_read": [
                 {"source_path": path, **span}
                 for path, lines in sorted(declared_lines.items())
-                for span in cls._line_spans(lines - read_lines.get(path, set()))
+                for span in cls._missing_line_spans(lines, read_lines.get(path, set()))
             ],
             "declared_without_task_page": sorted(declared_pages - pages),
             "not_comparable": not_comparable,
