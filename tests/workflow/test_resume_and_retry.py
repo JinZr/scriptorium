@@ -62,13 +62,14 @@ def test_partial_review_continues_across_processes_without_replacing_findings(tm
         assert second["input_digest"] != first["input_digest"]
         assert "manuscript.pdf" in second["prompt"]
         assert original_finding.id in second["prompt"]
+        assert "Submit only new findings" in second["prompt"]
         assert service.page_task(second["attempt"].id, 1)["page"] == 1
         finished = submit(
             service,
             second,
             {
                 "summary": "Reviewed the remaining page; the typo remains.",
-                "findings": [finding],
+                "findings": [{**finding, "explanation": "The same typo still obscures the result."}],
                 "scope": {
                     "completion": "complete",
                     "checked": [
@@ -101,6 +102,44 @@ def test_partial_review_continues_across_processes_without_replacing_findings(tm
         gate = service.evaluate_gate(run.id)
         assert not gate["conditions"]["review_artifacts_valid"]
         assert first["attempt"].id in gate["errors"][0]
+
+
+def test_continuation_keeps_a_distinct_finding_on_the_same_evidence(tmp_path):
+    repo = make_repository(tmp_path, roles=("substantive_review",))
+    with ScriptoriumService(repo, manuscript_manager=PdfBuildingManuscriptManager(repo)) as service:
+        run = asyncio.run(service.start_run("HEAD", "quick"))["run"]
+        first = claim(service, run.id, AgentRole.SUBSTANTIVE_REVIEW)
+        finding = review_finding(first)
+        submit(
+            service,
+            first,
+            {
+                "summary": "One concern recorded.",
+                "findings": [finding],
+                "scope": {"completion": "partial", "checked": [], "outstanding": [], "limitations": []},
+            },
+        )
+        original = service.list_findings(run.id)[0]
+        asyncio.run(service.continue_review(run.id, first["task"].id))
+        second = claim(service, run.id, AgentRole.SUBSTANTIVE_REVIEW, session="continued-session")
+        submit(
+            service,
+            second,
+            {
+                "summary": "Review complete.",
+                "findings": [
+                    {**finding, "explanation": "The same typo remains."},
+                    {**finding, "title": "A separate concern about the result sentence"},
+                ],
+            },
+        )
+        findings = service.list_findings(run.id)
+        assert len(findings) == 2
+        assert original in findings
+        assert {item.title for item in findings} == {
+            finding["title"],
+            "A separate concern about the result sentence",
+        }
 
 
 def test_partial_review_invalid_continuation_preserves_prior_output_and_diagnostics(tmp_path):
@@ -186,11 +225,12 @@ def test_prior_decision_survives_continuing_a_review_from_decision_stage(tmp_pat
             second,
             {
                 "summary": "Page checked; issue still stands.",
-                "findings": [],
+                "findings": [{**review_finding(second), "explanation": "The page confirms the same typo."}],
                 "scope": {"completion": "complete", "checked": [], "outstanding": [], "limitations": []},
             },
         )
         assert service.database.get_run(run.id).status == RunStatus.AWAITING_DECISION
+        assert service.list_findings(run.id) == [service.database.get_finding(original.id)]
         assert service.database.get_finding(original.id).status.value == "confirmed"
         with pytest.raises(StateError, match="no incomplete accepted review"):
             asyncio.run(service.continue_review(run.id, task_id))
