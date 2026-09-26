@@ -11,7 +11,7 @@ scriptorium --json task claim TASK_ID --client codex --model MODEL --effort EFFO
 scriptorium --json task show ATTEMPT_ID
 ```
 
-A claimed attempt remains active when the CLI exits. The `input_digest` returned by `task claim` or `task show` for that attempt must accompany submission:
+A claimed attempt remains active when the CLI exits. In a `task show` JSON response, `data.schema` is the frozen output schema, `data.input_digest` is the digest to submit, and `data.source_map.sources` supplies text evidence paths and digests. Inspect the schema's required fields and the frozen prompt before writing an output. The attempt's input digest must accompany submission:
 
 ```bash
 scriptorium --json task search ATTEMPT_ID --query phrase --cursor 0 --limit 20
@@ -24,7 +24,7 @@ scriptorium --json task submit ATTEMPT_ID --input-digest DIGEST --file answer.js
 
 `task submit --file` accepts UTF-8 JSON up to 2 MB from a file or stdin. The CLI rejects larger input before decoding or passing it to the workflow.
 
-For a new review task, include `scope` alongside `summary` and `findings`:
+For a new review task, include `scope` alongside `summary` and `findings`. This minimal partial output illustrates `scope` only; a new `substantive_review` also requires `claim_checks`. See the [shared skill's full JSON example](../skills/scriptorium/SKILL.md#example-substantive-review-output) for a finding, its exact text anchor, and its zero-based claim-check link. The task's frozen `data.schema` takes precedence over either example:
 
 ```json
 {
@@ -55,7 +55,7 @@ scriptorium --json task claim TASK_ID --client CLIENT --model MODEL --effort EFF
 
 Before reopening, Scriptorium replays the accepted output so a crash after submission cannot lose findings. The new claim includes the previous accepted scope, summary, output digest, and finding IDs in its frozen prompt. Its input digest differs from the previous attempt. Continue searching and reading outstanding relevant material, then report cumulative checked and outstanding areas. Prior accepted outputs, findings, and human decisions stay recorded; repeating a superseded attempt's submission is rejected. An invalid continuation uses the ordinary explicit retry and receives both prior scope and validation diagnostics. If an older run already reached `awaiting_decision` with an incomplete scoped review, `run continue` returns it to `reviewing`; `run resume` does not advance it into revision. Completed or cancelled runs cannot be reopened. If an accepted output awaits replay after a process exit, `task list` suggests `run resume`. A `next_actions` entry marked `requires_human_decision` identifies a finding decision, patch approval, or explicit patch application gate.
 
-When output is invalid, inspect the returned validation report. No findings, patch, or verification are accepted from that attempt. Explicitly run `scriptorium --json run retry RUN_ID --task TASK_ID`, then claim again; the next prompt includes the durable diagnostics and has a different input digest. If an active external conversation was abandoned, run `scriptorium --json run retry RUN_ID --task TASK_ID --abandon-attempt ATTEMPT_ID --reason TEXT` to interrupt only that attempt and make the task claimable again. Its late submission is rejected. Repeated identical submissions are idempotent. Different output for a terminal attempt and output for a superseded or cancelled attempt are rejected.
+When output is invalid, inspect every issue in `data.validation_report.issues`. No findings, patch, or verification are accepted from that attempt. Correct the output against the same frozen schema and source map, then explicitly run `scriptorium --json run retry RUN_ID --task TASK_ID`. Claim again, read the new `task show`, and submit with the **new attempt ID and input digest**; the failed attempt cannot accept a corrected output. The next prompt includes the durable diagnostics. If an active external conversation was abandoned, run `scriptorium --json run retry RUN_ID --task TASK_ID --abandon-attempt ATTEMPT_ID --reason TEXT` to interrupt only that attempt and make the task claimable again. Its late submission is rejected. Repeated identical submissions are idempotent. Different output for a terminal attempt and output for a superseded or cancelled attempt are rejected.
 
 After review tasks complete, use `finding list/show/decide` for human decisions, then `run resume`. A confirmed finding prepares a revision task. After submitting revision output, inspect the patch and decide it explicitly; `task list` then suggests `run resume` to advance an approved or rejected decision. An approved patch prepares a verification task. Use a new external conversation and the host's session ID for verification; `--session-source declared` marks identity as unconfirmed and cannot pass the gate. Apply only a verified patch, then inspect `run gate` and `run report`. A failed run suggests `run resume` only when its recorded pre-failure stage is recoverable; repair the prerequisite first.
 
