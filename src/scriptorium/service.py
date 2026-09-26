@@ -739,6 +739,91 @@ class ScriptoriumService:
             self._storage(self.database.update_run, run.id, RunStatus.COMPLETED)
         return applied
 
+    @staticmethod
+    def _line_spans(numbers: set[int]) -> list[dict[str, int]]:
+        spans: list[dict[str, int]] = []
+        for number in sorted(numbers):
+            if spans and number == spans[-1]["end_line"] + 1:
+                spans[-1]["end_line"] = number
+            else:
+                spans.append({"start_line": number, "end_line": number})
+        return spans
+
+    @classmethod
+    def _review_coverage_audit(cls, scope: dict[str, Any], events: list[Event], sources) -> dict[str, Any]:
+        source_index = {source.source_path: source for source in sources}
+        read_paths = {source.read_path: source.source_path for source in sources}
+        read_lines: dict[str, set[int]] = {}
+        search_matches: dict[str, set[int]] = {}
+        pages: set[int] = set()
+        for event in events:
+            if event.event_type == "tool.read":
+                path = read_paths.get(event.payload["path"], event.payload["path"])
+                read_lines.setdefault(path, set()).update(item["line"] for item in event.payload["ranges"])
+            elif event.event_type == "tool.search":
+                for match in event.payload["matches"]:
+                    path = read_paths.get(match["path"], match["path"])
+                    search_matches.setdefault(path, set()).add(match["line"])
+            elif event.event_type == "tool.page":
+                pages.add(event.payload["page"])
+        declared_lines: dict[str, set[int]] = {}
+        declared_pages: set[int] = set()
+        not_comparable = []
+        for area in scope["checked"]:
+            path = area["source_path"]
+            if path == "manuscript.pdf":
+                declared_pages.add(area["page"])
+            elif source_index[path].text_anchorable:
+                source = source_index[path]
+                start = area.get("start_line", 1)
+                end = area.get("end_line", source.line_count)
+                declared_lines.setdefault(path, set()).update(range(start, end + 1))
+            else:
+                not_comparable.append(area)
+        return {
+            "read_lines": [
+                {"source_path": path, "ranges": cls._line_spans(lines)}
+                for path, lines in sorted(read_lines.items())
+                if lines
+            ],
+            "search_matches": [
+                {"source_path": path, "lines": sorted(lines)} for path, lines in sorted(search_matches.items()) if lines
+            ],
+            "pages_returned": sorted(pages),
+            "declared_without_task_read": [
+                {"source_path": path, **span}
+                for path, lines in sorted(declared_lines.items())
+                for span in cls._line_spans(lines - read_lines.get(path, set()))
+            ],
+            "declared_without_task_page": sorted(declared_pages - pages),
+            "not_comparable": not_comparable,
+        }
+
+    def _collect_review_coverage_audits(
+        self, run_view: dict[str, Any], review_scopes: list[dict[str, Any]], events: list[Event]
+    ) -> list[dict[str, Any]]:
+        if not review_scopes:
+            return []
+        sources = self.armarius._bundle_for_run(run_view["run"]).anchor_map.sources
+        audits = []
+        for item in run_view["tasks"]:
+            scopes = [scope for scope in review_scopes if scope["task_id"] == item["task"].id and scope["scope"]]
+            if not scopes:
+                continue
+            latest = scopes[-1]
+            latest_ordinal = next(attempt.ordinal for attempt in item["attempts"] if attempt.id == latest["attempt_id"])
+            attempt_ids = {attempt.id for attempt in item["attempts"] if attempt.ordinal <= latest_ordinal}
+            access_events = [event for event in events if event.entity_id in attempt_ids]
+            audits.append(
+                {
+                    "task_id": item["task"].id,
+                    "attempt_id": latest["attempt_id"],
+                    "role": latest["role"],
+                    **self._review_coverage_audit(latest["scope"], access_events, sources),
+                }
+            )
+        return audits
+
     def render_report(self, run_id: str, format: str) -> str | dict[str, Any]:
         if format not in {"markdown", "json"}:
             raise ConfigurationError("report format must be markdown or json")
@@ -843,6 +928,9 @@ class ScriptoriumService:
         validation_reports.sort(key=lambda item: (item["created_at"], item["attempt_id"]))
         for item in validation_reports:
             item.pop("created_at")
+        review_coverage_audit = (
+            self._collect_review_coverage_audits(run_view, review_scopes, events) if external_run else []
+        )
         payload = {
             **run_view,
             "findings": [
@@ -865,6 +953,7 @@ class ScriptoriumService:
             "review_scopes": review_scopes,
             "review_claim_checks": review_claim_checks,
             "review_tool_access": review_tool_access,
+            "review_coverage_audit": review_coverage_audit,
             "gate": self.evaluate_gate(run_id),
         }
         if format == "json":
@@ -1111,6 +1200,38 @@ class ScriptoriumService:
         return lines
 
     @staticmethod
+    def _markdown_coverage_audit(items: list[dict[str, Any]]) -> list[str]:
+        lines = ["", "## Declared coverage versus task-tool returns", ""]
+        if not items:
+            lines.append("- None")
+        for audit in items:
+            lines.append(f"- `{audit['attempt_id']}` / {audit['role']} (returns through this attempt):")
+            for item in audit["read_lines"]:
+                spans = ", ".join(f"{span['start_line']}-{span['end_line']}" for span in item["ranges"])
+                lines.append(f"  - task read returned line fragments: `{item['source_path']}:{spans}`")
+            for item in audit["search_matches"]:
+                numbers = ", ".join(str(number) for number in item["lines"])
+                lines.append(f"  - task search returned matches: `{item['source_path']}:{numbers}`")
+            if audit["pages_returned"]:
+                numbers = ", ".join(str(number) for number in audit["pages_returned"])
+                lines.append(f"  - task page returned paths: {numbers}")
+            for area in audit["declared_without_task_read"]:
+                lines.append(
+                    f"  - declared checked without task read return: "
+                    f"`{area['source_path']}:{area['start_line']}-{area['end_line']}`"
+                )
+            for page in audit["declared_without_task_page"]:
+                lines.append(f"  - declared checked without task page return: `manuscript.pdf:page {page}`")
+            for area in audit["not_comparable"]:
+                lines.append(f"  - non-text source not comparable to task read: `{area['source_path']}`")
+        lines.append(
+            "Read ranges show lines with returned fragments, not complete lines; exact character offsets remain in "
+            "the tool events. Search excerpts do not count as full reads. Host file or image access is not logged, "
+            "and a returned page path does not prove that an image was viewed."
+        )
+        return lines
+
+    @staticmethod
     def _markdown_report(payload: dict[str, Any]) -> str:
         plain = _plain(payload)
         run = plain["run"]
@@ -1171,6 +1292,7 @@ class ScriptoriumService:
         else:
             lines.append("- None")
         lines.append("Scope is model-declared; tool returns do not prove inspection.")
+        lines.extend(ScriptoriumService._markdown_coverage_audit(plain["review_coverage_audit"]))
         lines.extend(["", "## Validation failures", ""])
         if plain["validation_reports"]:
             for item in plain["validation_reports"]:
