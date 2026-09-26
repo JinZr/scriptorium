@@ -55,6 +55,21 @@ def submit(service, claim_data, output):
             **output,
             "scope": {"completion": "complete", "checked": [], "outstanding": [], "limitations": []},
         }
+    if "claim_checks" in claim_data["schema"]["required"] and "claim_checks" not in output:
+        findings = output.get("findings", [])
+        output = {
+            **output,
+            "claim_checks": [
+                {
+                    "claim": "The reported result is clear.",
+                    "evidence": [{"source_path": "manuscript.pdf", "page": 1}],
+                    "critical_question": "Does the reported result support the conclusion?",
+                    "countercheck": "Checked the frozen manuscript page.",
+                    "assessment": "finding" if findings else "supported",
+                    "finding_indices": list(range(len(findings))),
+                }
+            ],
+        }
     return asyncio.run(
         service.submit_task(
             claim_data["attempt"].id,

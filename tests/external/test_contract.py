@@ -52,11 +52,22 @@ def _start(repo: Path):
 
 
 def _review_json(summary: str, findings: list | None = None) -> str:
+    findings = findings or []
     return json.dumps(
         {
             "summary": summary,
-            "findings": findings or [],
+            "findings": findings,
             "scope": {"completion": "complete", "checked": [], "outstanding": [], "limitations": []},
+            "claim_checks": [
+                {
+                    "claim": "The manuscript reports a result.",
+                    "evidence": [{"source_path": "manuscript.pdf", "page": 1}],
+                    "critical_question": "Does the evidence support the result?",
+                    "countercheck": "Checked the manuscript and supplement.",
+                    "assessment": "finding" if findings else "supported",
+                    "finding_indices": list(range(len(findings))),
+                }
+            ],
         }
     )
 

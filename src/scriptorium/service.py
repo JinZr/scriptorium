@@ -38,7 +38,7 @@ from .domain import (
 )
 from .errors import ConfigurationError, InfrastructureError, NotFoundError, StateError
 from .manuscript import ManuscriptManager
-from .schemas import ScopedReviewOutput
+from .schemas import ScientificReviewOutput, ScopedReviewOutput
 from .storage import ConflictError, Database, NotFoundError as StorageNotFoundError, StorageError
 from .workflow import Armarius
 
@@ -754,6 +754,7 @@ class ScriptoriumService:
                 counts[event.event_type.removeprefix("tool.")] += 1
         validation_reports = []
         review_scopes = []
+        review_claim_checks = []
         review_tool_access = []
         for item in run_view["tasks"]:
             task = item["task"]
@@ -764,6 +765,9 @@ class ScriptoriumService:
                 "verification": "verification",
                 "verification_transcription": "visual_transcription",
             }.get(task.stage)
+            if task.stage == "review" and external_run:
+                metadata = self._storage(self.database.get_external_task, task.id)
+                schema_kind = metadata["schema_kind"]
             for attempt in item["attempts"]:
                 if task.stage == "review":
                     review_tool_access.append(
@@ -782,12 +786,11 @@ class ScriptoriumService:
                 if task.stage == "review" and attempt.status == AttemptStatus.COMPLETED:
                     scope = None
                     if external_run:
-                        metadata = self._storage(self.database.get_external_task, task.id)
                         schema = self.armarius._load_schema_artifact(
                             run_view["run"], metadata["schema_kind"], attempt.schema_digest
                         )
-                        model = self.armarius._output_model_for_schema(run_view["run"], "review", schema)
-                        if model is ScopedReviewOutput:
+                        model = self.armarius._output_model_for_schema(run_view["run"], schema_kind, schema)
+                        if issubclass(model, ScopedReviewOutput):
                             try:
                                 output_text = self.artifacts.get_bytes(attempt.output_artifact_digest).decode("utf-8")
                             except (ArtifactError, UnicodeDecodeError) as exc:
@@ -800,6 +803,17 @@ class ScriptoriumService:
                                     f"completed review attempt {attempt.id} has invalid scope output"
                                 )
                             scope = output.scope.model_dump(mode="json", exclude_none=True)
+                            if isinstance(output, ScientificReviewOutput):
+                                review_claim_checks.append(
+                                    {
+                                        "task_id": task.id,
+                                        "attempt_id": attempt.id,
+                                        "claim_checks": [
+                                            check.model_dump(mode="json", exclude_none=True)
+                                            for check in output.claim_checks
+                                        ],
+                                    }
+                                )
                     review_scopes.append(
                         {"task_id": task.id, "attempt_id": attempt.id, "role": task.role.value, "scope": scope}
                     )
@@ -845,6 +859,7 @@ class ScriptoriumService:
             "events": events,
             "validation_reports": validation_reports,
             "review_scopes": review_scopes,
+            "review_claim_checks": review_claim_checks,
             "review_tool_access": review_tool_access,
             "gate": self.evaluate_gate(run_id),
         }
@@ -1068,6 +1083,28 @@ class ScriptoriumService:
             raise InfrastructureError(f"patched snapshot does not match immutable diff {patch.diff_digest}")
 
     @staticmethod
+    def _markdown_claim_checks(items: list[dict[str, Any]]) -> list[str]:
+        lines = ["", "## Scientific claim checks", ""]
+        if not items:
+            return [*lines, "- None"]
+        for item in items:
+            lines.append(f"- `{item['attempt_id']}`: {len(item['claim_checks'])} checks")
+            for check in item["claim_checks"]:
+                lines.append(
+                    f"  - {check['claim']} — {check['assessment']}; question: {check['critical_question']}; "
+                    f"countercheck: {check['countercheck']}; findings: {check['finding_indices']}"
+                )
+                for evidence in check["evidence"]:
+                    location = evidence["source_path"]
+                    if "page" in evidence:
+                        location += f":page {evidence['page']}"
+                    else:
+                        location += f":{evidence['start_line']}-{evidence['end_line']}"
+                    lines.append(f"    - evidence: `{location}`")
+        lines.append("Claim checks are reviewer declarations; valid anchors do not establish scientific correctness.")
+        return lines
+
+    @staticmethod
     def _markdown_report(payload: dict[str, Any]) -> str:
         plain = _plain(payload)
         run = plain["run"]
@@ -1113,6 +1150,7 @@ class ScriptoriumService:
                     lines.append(f"  - limitation: {limitation}")
         else:
             lines.append("- None")
+        lines.extend(ScriptoriumService._markdown_claim_checks(plain["review_claim_checks"]))
         lines.extend(["", "## Observed review task-tool returns", ""])
         if plain["review_tool_access"]:
             for item in plain["review_tool_access"]:
