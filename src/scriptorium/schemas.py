@@ -3,7 +3,7 @@ from __future__ import annotations
 from decimal import Decimal
 from enum import Enum
 import sys
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -296,6 +296,34 @@ class ScopedReviewOutput(ReviewOutput):
     scope: ReviewScope
 
 
+class ClaimCheck(StrictModel):
+    claim: str = Field(min_length=1)
+    evidence: list[Evidence] = Field(min_length=1)
+    critical_question: str = Field(min_length=1)
+    countercheck: str = Field(min_length=1)
+    assessment: Literal["supported", "unresolved", "finding"]
+    finding_indices: list[Annotated[int, Field(ge=0, strict=True)]]
+
+
+class ScientificReviewOutput(ScopedReviewOutput):
+    claim_checks: list[ClaimCheck]
+
+    @model_validator(mode="after")
+    def validate_claim_checks(self) -> "ScientificReviewOutput":
+        if self.scope.completion == "complete" and not self.claim_checks:
+            raise ValueError("a complete substantive review requires claim checks")
+        linked: set[int] = set()
+        for check in self.claim_checks:
+            if (check.assessment == "finding") != bool(check.finding_indices):
+                raise ValueError("only a retained claim check may link findings")
+            if any(index >= len(self.findings) for index in check.finding_indices):
+                raise ValueError("claim check refers to an unknown finding index")
+            linked.update(check.finding_indices)
+        if linked != set(range(len(self.findings))):
+            raise ValueError("every substantive finding must be linked to a claim check")
+        return self
+
+
 # Historical runs still deserialize these persisted outputs, but new runs never schedule this role.
 class VisualTranscriptionPage(StrictModel):
     page: int = Field(ge=1)
@@ -370,7 +398,7 @@ class ValidationIssue(StrictModel):
 
 
 class ValidationReport(StrictModel):
-    schema_kind: Literal["review", "visual_transcription", "revision", "verification"]
+    schema_kind: Literal["review", "scientific_review", "visual_transcription", "revision", "verification"]
     schema_digest: str = Field(pattern="^[0-9a-f]{64}$")
     bundle_digest: str = Field(pattern="^[0-9a-f]{64}$")
     output_artifact_digest: str | None = Field(default=None, pattern="^[0-9a-f]{64}$")
@@ -379,6 +407,7 @@ class ValidationReport(StrictModel):
 
 SCHEMA_MODELS: dict[str, type[StrictModel]] = {
     "review": ScopedReviewOutput,
+    "scientific_review": ScientificReviewOutput,
     "visual_transcription": VisualTranscriptionOutput,
     "revision": RevisionOutput,
     "verification": VerificationOutput,
@@ -393,7 +422,7 @@ def output_schema(
 ) -> dict[str, Any]:
     model = ReviewOutput if kind == "review" and legacy_review else SCHEMA_MODELS[kind]
     schema = model.model_json_schema()
-    if kind in {"review", "verification"}:
+    if kind in {"review", "scientific_review", "verification"}:
         evidence = schema["$defs"]["Evidence"]
         evidence["properties"]["source_path"]["description"] = (
             f"Source-line evidence uses a {contract.source_line.source_path_rule}; "
@@ -401,7 +430,7 @@ def output_schema(
         )
         evidence["properties"]["quoted_text"]["description"] = contract.source_line.matching_rule
         evidence["oneOf"] = _evidence_anchor_schema(contract)
-        if kind == "review" and not legacy_review:
+        if kind in {"review", "scientific_review"} and not legacy_review:
             schema["$defs"]["ReviewScopeArea"]["oneOf"] = [
                 {
                     "title": "Compiled PDF page",

@@ -231,6 +231,16 @@ def test_continue_replays_accepted_findings_before_reopening_after_crash(tmp_pat
                 {
                     "summary": "Found a typo; page outstanding.",
                     "findings": [review_finding(first)],
+                    "claim_checks": [
+                        {
+                            "claim": "The reported result is clear.",
+                            "evidence": [{"source_path": "manuscript.pdf", "page": 1}],
+                            "critical_question": "Does the wording support the claim?",
+                            "countercheck": "Checked the reported result.",
+                            "assessment": "finding",
+                            "finding_indices": [0],
+                        }
+                    ],
                     "scope": {
                         "completion": "partial",
                         "checked": [{"source_path": "main.tex"}],

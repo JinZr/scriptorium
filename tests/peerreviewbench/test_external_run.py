@@ -82,6 +82,22 @@ def test_benchmark_prepares_external_tasks_and_collects_validated_reviews(tmp_pa
                             "summary": "Reviewed the frozen paper.",
                             "findings": [],
                             "scope": {"completion": "complete", "checked": [], "outstanding": [], "limitations": []},
+                            **(
+                                {
+                                    "claim_checks": [
+                                        {
+                                            "claim": "The paper reports a result.",
+                                            "evidence": [{"source_path": "manuscript.pdf", "page": 1}],
+                                            "critical_question": "Does the paper support the result?",
+                                            "countercheck": "Checked the rendered paper.",
+                                            "assessment": "supported",
+                                            "finding_indices": [],
+                                        }
+                                    ]
+                                }
+                                if item["task"].role.value == "substantive_review"
+                                else {}
+                            ),
                         }
                     ),
                 )

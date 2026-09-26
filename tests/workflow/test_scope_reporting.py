@@ -28,7 +28,7 @@ def test_review_scope_is_reported_separately_from_tool_returns(tmp_path):
             service.submit_task(
                 review["attempt"].id,
                 review["input_digest"],
-                json.dumps({"summary": "Reviewed source text.", "findings": [], "scope": scope}),
+                json.dumps({"summary": "Reviewed source text.", "findings": [], "scope": scope, "claim_checks": []}),
             )
         )
         assert receipt["attempt"].status == AttemptStatus.COMPLETED
@@ -76,6 +76,7 @@ def test_finalized_scoped_run_keeps_prior_gate_result(tmp_path, monkeypatch, com
                         {
                             "summary": "Reviewed available material.",
                             "findings": [],
+                            "claim_checks": [],
                             "scope": {
                                 "completion": completion,
                                 "checked": [],
@@ -104,6 +105,7 @@ def test_old_review_report_marks_scope_as_unreported(tmp_path, monkeypatch):
         frozen = original(self, *args, **kwargs)
         schema = output_schema("review", legacy_review=True)
         frozen["schemas"]["review"] = {"digest": digest_json(schema), "content": schema}
+        frozen["schemas"].pop("scientific_review")
         return frozen
 
     with monkeypatch.context() as patch:

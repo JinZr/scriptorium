@@ -119,6 +119,17 @@ def _complete_reviews(service: ScriptoriumService, run_id: str, *, skip: AgentRo
                 }
             ],
         }
+        if task.role == AgentRole.SUBSTANTIVE_REVIEW:
+            output["claim_checks"] = [
+                {
+                    "claim": "The reported result needs review.",
+                    "evidence": output["findings"][0]["evidence"],
+                    "critical_question": "Does the result support the conclusion?",
+                    "countercheck": "Checked the frozen preprint source.",
+                    "assessment": "finding",
+                    "finding_indices": [0],
+                }
+            ]
         receipt = asyncio.run(service.submit_task(claim["attempt"].id, claim["input_digest"], json.dumps(output)))
         assert receipt["attempt"].status.value == "completed"
 
