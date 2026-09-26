@@ -8,7 +8,7 @@ from scriptorium.schemas import output_schema
 from scriptorium.service import ScriptoriumService
 from scriptorium.workflow import Armarius
 
-from ._support import PdfBuildingManuscriptManager, claim, make_repository
+from ._support import PdfBuildingManuscriptManager, claim, make_repository, submit
 
 
 def test_review_scope_is_reported_separately_from_tool_returns(tmp_path):
@@ -43,6 +43,19 @@ def test_review_scope_is_reported_separately_from_tool_returns(tmp_path):
             }
         ]
         assert [event["event_type"] for event in report["events"]].count("tool.read") == 1
+        assert report["review_coverage_audit"] == [
+            {
+                "task_id": review["task"].id,
+                "attempt_id": review["attempt"].id,
+                "role": "substantive_review",
+                "read_lines": [{"source_path": "main.tex", "ranges": [{"start_line": 1, "end_line": 2}]}],
+                "search_matches": [],
+                "pages_returned": [],
+                "declared_without_task_read": [{"source_path": "main.tex", "start_line": 3, "end_line": 4}],
+                "declared_without_task_page": [],
+                "not_comparable": [],
+            }
+        ]
         assert report["review_tool_access"] == [
             {
                 "task_id": review["task"].id,
@@ -58,6 +71,84 @@ def test_review_scope_is_reported_separately_from_tool_returns(tmp_path):
         assert "## Observed review task-tool returns" in markdown
         assert "read 1, search 0, page 0" in markdown
         assert "Scope is model-declared; tool returns do not prove inspection" in markdown
+        assert "task read returned line fragments: `main.tex:1-2`" in markdown
+        assert "declared checked without task read return: `main.tex:3-4`" in markdown
+
+
+def test_coverage_audit_uses_cumulative_attempt_returns_and_separates_search(tmp_path):
+    repo = make_repository(tmp_path, roles=("substantive_review",))
+    with ScriptoriumService(repo, manuscript_manager=PdfBuildingManuscriptManager(repo)) as service:
+        run = asyncio.run(service.start_run("HEAD", "quick"))["run"]
+        first = claim(service, run.id, AgentRole.SUBSTANTIVE_REVIEW)
+        service.read_task(first["attempt"].id, "main.tex", 1, 2, 0, 8000)
+        service.search_task(first["attempt"].id, "result", None, 0, 10)
+        submit(
+            service,
+            first,
+            {
+                "summary": "First half checked.",
+                "findings": [],
+                "scope": {
+                    "completion": "partial",
+                    "checked": [{"source_path": "main.tex", "start_line": 1, "end_line": 2}],
+                    "outstanding": [{"source_path": "manuscript.pdf", "page": 1}],
+                    "limitations": [],
+                },
+            },
+        )
+        asyncio.run(service.continue_review(run.id, first["task"].id))
+        second = claim(service, run.id, AgentRole.SUBSTANTIVE_REVIEW, session="continued-session")
+        service.read_task(second["attempt"].id, "main.tex", 4, 1, 0, 8000)
+        service.page_task(second["attempt"].id, 1)
+        submit(
+            service,
+            second,
+            {
+                "summary": "Remaining material checked.",
+                "findings": [],
+                "scope": {
+                    "completion": "complete",
+                    "checked": [{"source_path": "main.tex"}, {"source_path": "manuscript.pdf", "page": 1}],
+                    "outstanding": [],
+                    "limitations": [],
+                },
+            },
+        )
+        audit = service.render_report(run.id, "json")["review_coverage_audit"][0]
+        assert audit["attempt_id"] == second["attempt"].id
+        assert audit["read_lines"] == [
+            {"source_path": "main.tex", "ranges": [{"start_line": 1, "end_line": 2}, {"start_line": 4, "end_line": 4}]}
+        ]
+        assert audit["search_matches"] == [{"source_path": "main.tex", "lines": [3]}]
+        assert audit["pages_returned"] == [1]
+        assert audit["declared_without_task_read"] == [{"source_path": "main.tex", "start_line": 3, "end_line": 3}]
+        assert audit["declared_without_task_page"] == []
+
+
+def test_coverage_audit_flags_checked_page_without_task_page_return(tmp_path):
+    repo = make_repository(tmp_path, roles=("substantive_review",))
+    with ScriptoriumService(repo, manuscript_manager=PdfBuildingManuscriptManager(repo)) as service:
+        run = asyncio.run(service.start_run("HEAD", "quick"))["run"]
+        review = claim(service, run.id, AgentRole.SUBSTANTIVE_REVIEW)
+        submit(
+            service,
+            review,
+            {
+                "summary": "The page was checked by the host.",
+                "findings": [],
+                "scope": {
+                    "completion": "complete",
+                    "checked": [{"source_path": "manuscript.pdf", "page": 1}],
+                    "outstanding": [],
+                    "limitations": [],
+                },
+            },
+        )
+        audit = service.render_report(run.id, "json")["review_coverage_audit"][0]
+        assert audit["declared_without_task_page"] == [1]
+        assert "declared checked without task page return: `manuscript.pdf:page 1`" in service.render_report(
+            run.id, "markdown"
+        )
 
 
 @pytest.mark.parametrize("completion", ["partial", "unknown"])
