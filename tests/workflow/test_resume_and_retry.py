@@ -61,7 +61,10 @@ def test_partial_review_continues_across_processes_without_replacing_findings(tm
         assert second["attempt"].ordinal == 2
         assert second["input_digest"] != first["input_digest"]
         assert "manuscript.pdf" in second["prompt"]
-        assert original_finding.id in second["prompt"]
+        assert f'"id":"{original_finding.id}"' in second["prompt"]
+        assert f'"title":"{finding["title"]}"' in second["prompt"]
+        assert f'"category":"{finding["category"]}"' in second["prompt"]
+        assert finding["evidence"][0]["source_digest"] in second["prompt"]
         assert "Submit only new findings" in second["prompt"]
         assert service.page_task(second["attempt"].id, 1)["page"] == 1
         finished = submit(
@@ -152,6 +155,60 @@ def test_continuation_keeps_a_distinct_finding_on_the_same_evidence(tmp_path):
             finding["title"],
             "A separate concern about the result sentence",
         }
+
+
+def test_first_accepted_review_after_retry_keeps_distinct_findings(tmp_path):
+    repo = make_repository(tmp_path, roles=("substantive_review", "copyedit"))
+    with ScriptoriumService(repo, manuscript_manager=PdfBuildingManuscriptManager(repo)) as service:
+        run = asyncio.run(service.start_run("HEAD", "quick"))["run"]
+        first = claim(service, run.id, AgentRole.SUBSTANTIVE_REVIEW)
+        failed = submit(service, first, {"summary": "Invalid output.", "findings": [{"wrong": "shape"}]})
+        assert failed["attempt"].status == AttemptStatus.FAILED
+        asyncio.run(service.retry_task(run.id, first["task"].id))
+        second = claim(service, run.id, AgentRole.SUBSTANTIVE_REVIEW, session="corrected-session")
+        finding = review_finding(second)
+        submit(
+            service,
+            second,
+            {
+                "summary": "Two separate concerns on the same evidence.",
+                "findings": [finding, {**finding, "explanation": "A different concern about that sentence."}],
+            },
+        )
+        findings = service.list_findings(run.id)
+        assert len(findings) == 2
+        asyncio.run(service.resume_run(run.id))
+        assert service.list_findings(run.id) == findings
+
+
+def test_continuation_prefers_an_exact_prior_finding(tmp_path):
+    repo = make_repository(tmp_path, roles=("substantive_review", "copyedit"))
+    with ScriptoriumService(repo, manuscript_manager=PdfBuildingManuscriptManager(repo)) as service:
+        run = asyncio.run(service.start_run("HEAD", "quick"))["run"]
+        first = claim(service, run.id, AgentRole.SUBSTANTIVE_REVIEW)
+        finding = review_finding(first)
+        second_finding = {**finding, "explanation": "A different concern about that sentence."}
+        submit(
+            service,
+            first,
+            {
+                "summary": "Two concerns recorded.",
+                "findings": [finding, second_finding],
+                "scope": {"completion": "partial", "checked": [], "outstanding": [], "limitations": []},
+            },
+        )
+        originals = service.list_findings(run.id)
+        exact = next(item for item in originals if item.explanation == second_finding["explanation"])
+        asyncio.run(service.continue_review(run.id, first["task"].id))
+        second = claim(service, run.id, AgentRole.SUBSTANTIVE_REVIEW, session="continued-session")
+        submit(service, second, {"summary": "The second concern remains.", "findings": [second_finding]})
+        assert service.list_findings(run.id) == originals
+        duplicate_events = [
+            event
+            for event in service.database.list_events(run.id)
+            if event.event_type == "finding.duplicate" and event.payload["attempt_id"] == second["attempt"].id
+        ]
+        assert [event.entity_id for event in duplicate_events] == [exact.id]
 
 
 def test_replayed_continuation_does_not_repeat_duplicate_events(tmp_path):

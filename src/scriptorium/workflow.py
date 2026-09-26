@@ -413,10 +413,13 @@ class Armarius:
             return None
         output = outcome.output
         assert isinstance(output, ReviewOutput)
+        all_findings = self.database.list_findings(run.id)
+        has_prior_review = any(
+            attempt.status == AttemptStatus.COMPLETED and attempt.ordinal < outcome.attempt.ordinal
+            for attempt in self.database.list_attempts(outcome.task.id)
+        )
         previous_findings = (
-            [item for item in self.database.list_findings(run.id) if item.task_id == outcome.task.id]
-            if outcome.attempt.ordinal > 1
-            else []
+            [item for item in all_findings if item.task_id == outcome.task.id] if has_prior_review else []
         )
         for candidate in output.findings:
             evidence = tuple(item.model_dump(mode="json", exclude_none=True) for item in candidate.evidence)
@@ -448,21 +451,24 @@ class Armarius:
                 suggested_action=candidate.suggested_action,
                 confidence=candidate.confidence,
             )
-            stored = next(
-                (
-                    item
-                    for item in previous_findings
-                    if item.category == finding.category
-                    and item.severity == finding.severity
-                    and item.title == finding.title
-                    and item.claim == finding.claim
-                    and sorted(canonical_json(anchor) for anchor in item.evidence) == canonical_evidence
-                ),
-                None,
-            )
+            stored = next((item for item in all_findings if item.fingerprint == fingerprint), None)
+            if stored is None:
+                stored = next(
+                    (
+                        item
+                        for item in previous_findings
+                        if item.category == finding.category
+                        and item.severity == finding.severity
+                        and item.title == finding.title
+                        and item.claim == finding.claim
+                        and sorted(canonical_json(anchor) for anchor in item.evidence) == canonical_evidence
+                    ),
+                    None,
+                )
             if stored is None:
                 stored = self.database.get_or_create_finding(finding)
-                if outcome.attempt.ordinal > 1 and stored.attempt_id == outcome.attempt.id:
+                all_findings.append(stored)
+                if has_prior_review and stored.attempt_id == outcome.attempt.id:
                     previous_findings.append(stored)
             if (
                 stored.id != finding.id
@@ -1182,13 +1188,29 @@ class Armarius:
             prior_attempt, prior_output = accepted
             if not isinstance(prior_output, ScopedReviewOutput):
                 raise StateError("a review without scope cannot be continued")
+            recorded_findings = [
+                finding for finding in self.database.list_findings(run.id) if finding.task_id == task.id
+            ]
             context = {
                 "attempt_id": prior_attempt.id,
                 "output_digest": prior_attempt.output_artifact_digest,
                 "summary": prior_output.summary,
                 "scope": prior_output.scope.model_dump(mode="json", exclude_none=True),
-                "finding_ids": [
-                    finding.id for finding in self.database.list_findings(run.id) if finding.task_id == task.id
+                "finding_ids": [finding.id for finding in recorded_findings],
+                "findings": [
+                    {
+                        "id": finding.id,
+                        "category": finding.category,
+                        "severity": finding.severity.value,
+                        "title": finding.title,
+                        "claim": finding.claim,
+                        "evidence": list(finding.evidence),
+                        "explanation": finding.explanation,
+                        "suggested_action": finding.suggested_action,
+                        "confidence": finding.confidence,
+                        "status": finding.status.value,
+                    }
+                    for finding in recorded_findings
                 ],
             }
             if isinstance(prior_output, ScientificReviewOutput):
