@@ -1,5 +1,6 @@
 import asyncio
 import json
+import subprocess
 
 import pytest
 
@@ -8,7 +9,7 @@ from scriptorium.schemas import SourceAnchorRecord, output_schema
 from scriptorium.service import ScriptoriumService
 from scriptorium.workflow import Armarius
 
-from ._support import PdfBuildingManuscriptManager, claim, make_repository, submit
+from ._support import MANUSCRIPT, PdfBuildingManuscriptManager, claim, make_repository, submit
 
 
 def test_review_scope_is_reported_separately_from_tool_returns(tmp_path):
@@ -81,7 +82,14 @@ def test_coverage_audit_uses_cumulative_attempt_returns_and_separates_search(tmp
         run = asyncio.run(service.start_run("HEAD", "quick"))["run"]
         first = claim(service, run.id, AgentRole.SUBSTANTIVE_REVIEW)
         service.read_task(first["attempt"].id, "main.tex", 1, 2, 0, 8000)
-        service.search_task(first["attempt"].id, "result", None, 0, 10)
+        search = service.search_task(first["attempt"].id, "result", None, 0, 10)
+        search_event = next(
+            event for event in service.database.list_events(run.id) if event.event_type == "tool.search"
+        )
+        assert search_event.payload["matches"] == [
+            {"path": item["path"], "line": item["line"], "source_digest": item["source_digest"]}
+            for item in search["matches"]
+        ]
         submit(
             service,
             first,
@@ -179,7 +187,7 @@ def test_coverage_audit_prioritizes_canonical_source_paths_over_read_aliases():
             event_type="tool.search",
             entity_type="attempt",
             entity_id="attempt",
-            payload={"matches": [{"path": "sources/foo.tex", "line": 1}]},
+            payload={"matches": [{"path": "sources/foo.tex", "line": 1, "source_digest": "a" * 64}]},
         ),
     ]
     scope = {"checked": [{"source_path": "sources/foo.tex", "start_line": 2, "end_line": 2}]}
@@ -220,10 +228,23 @@ def test_coverage_audit_does_not_credit_metadata_with_a_source_name():
                 "ranges": [{"line": 2, "start_offset": 0, "end_offset": 5}],
             },
         ),
+        Event(
+            run_id="run",
+            event_type="tool.search",
+            entity_type="attempt",
+            entity_id="attempt",
+            payload={
+                "matches": [
+                    {"path": "manifest.json", "line": 1, "source_digest": "b" * 64},
+                    {"path": "manifest.json", "line": 2, "source_digest": "a" * 64},
+                ]
+            },
+        ),
     ]
     audit = ScriptoriumService._review_coverage_audit({"checked": [{"source_path": "manifest.json"}]}, events, [source])
     assert audit["read_lines"] == [{"source_path": "manifest.json", "ranges": [{"start_line": 2, "end_line": 2}]}]
     assert audit["declared_without_task_read"] == [{"source_path": "manifest.json", "start_line": 1, "end_line": 1}]
+    assert audit["search_matches"] == [{"source_path": "manifest.json", "lines": [2]}]
 
 
 def test_coverage_audit_does_not_credit_an_empty_read_fragment(tmp_path):
@@ -250,6 +271,35 @@ def test_coverage_audit_does_not_credit_an_empty_read_fragment(tmp_path):
         audit = service.render_report(run.id, "json")["review_coverage_audit"][0]
         assert audit["read_lines"] == []
         assert audit["declared_without_task_read"] == [{"source_path": "main.tex", "start_line": 3, "end_line": 3}]
+
+
+def test_coverage_audit_credits_a_returned_blank_line(tmp_path):
+    repo = make_repository(tmp_path, roles=("substantive_review",))
+    (repo / "main.tex").write_text(MANUSCRIPT.replace("The result", "\nThe result"), encoding="utf-8")
+    subprocess.run(["git", "-C", str(repo), "add", "main.tex"], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(repo), "commit", "-m", "Add blank line"], check=True, capture_output=True)
+    with ScriptoriumService(repo, manuscript_manager=PdfBuildingManuscriptManager(repo)) as service:
+        run = asyncio.run(service.start_run("HEAD", "quick"))["run"]
+        review = claim(service, run.id, AgentRole.SUBSTANTIVE_REVIEW)
+        result = service.read_task(review["attempt"].id, "main.tex", 3, 1, 0, 8000)
+        assert result["lines"] == [{"line": 3, "offset": 0, "text": ""}]
+        submit(
+            service,
+            review,
+            {
+                "summary": "Checked the blank line.",
+                "findings": [],
+                "scope": {
+                    "completion": "complete",
+                    "checked": [{"source_path": "main.tex", "start_line": 3, "end_line": 3}],
+                    "outstanding": [],
+                    "limitations": [],
+                },
+            },
+        )
+        audit = service.render_report(run.id, "json")["review_coverage_audit"][0]
+        assert audit["read_lines"] == [{"source_path": "main.tex", "ranges": [{"start_line": 3, "end_line": 3}]}]
+        assert audit["declared_without_task_read"] == []
 
 
 def test_coverage_audit_subtracts_large_whole_file_scope_as_spans():

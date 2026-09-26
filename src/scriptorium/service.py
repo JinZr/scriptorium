@@ -618,7 +618,10 @@ class ScriptoriumService:
             {
                 "query": query,
                 "path": path,
-                "matches": [{"path": item["path"], "line": item["line"]} for item in matches],
+                "matches": [
+                    {"path": item["path"], "line": item["line"], "source_digest": item["source_digest"]}
+                    for item in matches
+                ],
                 "next_cursor": next_cursor,
             },
         )
@@ -789,10 +792,15 @@ class ScriptoriumService:
                         continue
                     path = source.source_path
                 read_lines.setdefault(path, set()).update(
-                    item["line"] for item in event.payload["ranges"] if item["end_offset"] > item["start_offset"]
+                    item["line"]
+                    for item in event.payload["ranges"]
+                    if item["end_offset"] > item["start_offset"] or item["start_offset"] == 0
                 )
             elif event.event_type == "tool.search":
                 for match in event.payload["matches"]:
+                    source = source_index.get(match["path"])
+                    if source is not None and match["source_digest"] != source.source_digest:
+                        continue
                     search_matches.setdefault(match["path"], set()).add(match["line"])
             elif event.event_type == "tool.page":
                 pages.add(event.payload["page"])
