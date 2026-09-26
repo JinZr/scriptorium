@@ -776,15 +776,18 @@ class ScriptoriumService:
     @classmethod
     def _review_coverage_audit(cls, scope: dict[str, Any], events: list[Event], sources) -> dict[str, Any]:
         source_index = {source.source_path: source for source in sources}
-        read_paths = {source.read_path: source.source_path for source in sources}
+        read_paths = {source.read_path: source for source in sources}
         read_lines: dict[str, set[int]] = {}
         search_matches: dict[str, set[int]] = {}
         pages: set[int] = set()
         for event in events:
             if event.event_type == "tool.read":
                 path = event.payload["path"]
-                if path not in source_index:
-                    path = read_paths.get(path, path)
+                source = source_index.get(path) or read_paths.get(path)
+                if source is not None:
+                    if event.payload["source_digest"] != source.source_digest:
+                        continue
+                    path = source.source_path
                 read_lines.setdefault(path, set()).update(
                     item["line"] for item in event.payload["ranges"] if item["end_offset"] > item["start_offset"]
                 )

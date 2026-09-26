@@ -170,6 +170,7 @@ def test_coverage_audit_prioritizes_canonical_source_paths_over_read_aliases():
             entity_id="attempt",
             payload={
                 "path": "sources/foo.tex",
+                "source_digest": "a" * 64,
                 "ranges": [{"line": 2, "start_offset": 0, "end_offset": 2}],
             },
         ),
@@ -186,6 +187,43 @@ def test_coverage_audit_prioritizes_canonical_source_paths_over_read_aliases():
     assert audit["read_lines"] == [{"source_path": "sources/foo.tex", "ranges": [{"start_line": 2, "end_line": 2}]}]
     assert audit["search_matches"] == [{"source_path": "sources/foo.tex", "lines": [1]}]
     assert audit["declared_without_task_read"] == []
+
+
+def test_coverage_audit_does_not_credit_metadata_with_a_source_name():
+    source = SourceAnchorRecord(
+        source_path="manifest.json",
+        read_path="sources/manifest.json",
+        source_digest="a" * 64,
+        line_count=2,
+        text_anchorable=True,
+    )
+    events = [
+        Event(
+            run_id="run",
+            event_type="tool.read",
+            entity_type="attempt",
+            entity_id="attempt",
+            payload={
+                "path": "manifest.json",
+                "source_digest": "b" * 64,
+                "ranges": [{"line": 1, "start_offset": 0, "end_offset": 5}],
+            },
+        ),
+        Event(
+            run_id="run",
+            event_type="tool.read",
+            entity_type="attempt",
+            entity_id="attempt",
+            payload={
+                "path": "sources/manifest.json",
+                "source_digest": "a" * 64,
+                "ranges": [{"line": 2, "start_offset": 0, "end_offset": 5}],
+            },
+        ),
+    ]
+    audit = ScriptoriumService._review_coverage_audit({"checked": [{"source_path": "manifest.json"}]}, events, [source])
+    assert audit["read_lines"] == [{"source_path": "manifest.json", "ranges": [{"start_line": 2, "end_line": 2}]}]
+    assert audit["declared_without_task_read"] == [{"source_path": "manifest.json", "start_line": 1, "end_line": 1}]
 
 
 def test_coverage_audit_does_not_credit_an_empty_read_fragment(tmp_path):
@@ -227,7 +265,11 @@ def test_coverage_audit_subtracts_large_whole_file_scope_as_spans():
         event_type="tool.read",
         entity_type="attempt",
         entity_id="attempt",
-        payload={"path": "large.tex", "ranges": [{"line": 500_000, "start_offset": 0, "end_offset": 1}]},
+        payload={
+            "path": "large.tex",
+            "source_digest": "a" * 64,
+            "ranges": [{"line": 500_000, "start_offset": 0, "end_offset": 1}],
+        },
     )
     audit = ScriptoriumService._review_coverage_audit({"checked": [{"source_path": "large.tex"}]}, [event], [source])
     assert audit["declared_without_task_read"] == [
