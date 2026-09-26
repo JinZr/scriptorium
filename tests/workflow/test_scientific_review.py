@@ -148,6 +148,7 @@ def test_continuation_preserves_prior_claim_checks_and_accepts_new_checks(tmp_pa
         asyncio.run(service.continue_review(run.id, first["task"].id))
         second = claim(service, run.id, AgentRole.SUBSTANTIVE_REVIEW)
         assert "claim_checks" in second["prompt"]
+        assert "except when a newly assessed claim check must link to an existing concern" in second["prompt"]
         assert second["attempt"].id != first["attempt"].id
         assert (
             submit(

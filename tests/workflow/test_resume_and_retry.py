@@ -105,7 +105,57 @@ def test_partial_review_continues_across_processes_without_replacing_findings(tm
 
 
 def test_continuation_keeps_a_distinct_finding_on_the_same_evidence(tmp_path):
-    repo = make_repository(tmp_path, roles=("substantive_review",))
+    repo = make_repository(tmp_path, roles=("substantive_review", "copyedit"))
+    with ScriptoriumService(repo, manuscript_manager=PdfBuildingManuscriptManager(repo)) as service:
+        run = asyncio.run(service.start_run("HEAD", "quick"))["run"]
+        first = claim(service, run.id, AgentRole.SUBSTANTIVE_REVIEW)
+        finding = review_finding(first)
+        finding["evidence"].append({"source_path": "manuscript.pdf", "page": 1})
+        submit(
+            service,
+            first,
+            {
+                "summary": "One concern recorded.",
+                "findings": [finding],
+                "scope": {"completion": "partial", "checked": [], "outstanding": [], "limitations": []},
+            },
+        )
+        original = service.list_findings(run.id)[0]
+        asyncio.run(service.continue_review(run.id, first["task"].id))
+        second = claim(service, run.id, AgentRole.SUBSTANTIVE_REVIEW, session="continued-session")
+        submit(
+            service,
+            second,
+            {
+                "summary": "Review complete.",
+                "findings": [
+                    {
+                        **finding,
+                        "evidence": list(reversed(finding["evidence"])),
+                        "explanation": "The same typo remains.",
+                    },
+                    {**finding, "title": "A separate concern about the result sentence"},
+                    {
+                        **finding,
+                        "title": "A separate concern about the result sentence",
+                        "explanation": "The second description of that separate concern.",
+                    },
+                ],
+            },
+        )
+        findings = service.list_findings(run.id)
+        asyncio.run(service.resume_run(run.id))
+        assert service.list_findings(run.id) == findings
+        assert len(findings) == 2
+        assert original in findings
+        assert {item.title for item in findings} == {
+            finding["title"],
+            "A separate concern about the result sentence",
+        }
+
+
+def test_replayed_continuation_does_not_repeat_duplicate_events(tmp_path):
+    repo = make_repository(tmp_path, roles=("substantive_review", "copyedit"))
     with ScriptoriumService(repo, manuscript_manager=PdfBuildingManuscriptManager(repo)) as service:
         run = asyncio.run(service.start_run("HEAD", "quick"))["run"]
         first = claim(service, run.id, AgentRole.SUBSTANTIVE_REVIEW)
@@ -126,20 +176,22 @@ def test_continuation_keeps_a_distinct_finding_on_the_same_evidence(tmp_path):
             service,
             second,
             {
-                "summary": "Review complete.",
-                "findings": [
-                    {**finding, "explanation": "The same typo remains."},
-                    {**finding, "title": "A separate concern about the result sentence"},
-                ],
+                "summary": "The same concern remains.",
+                "findings": [{**finding, "explanation": "The same typo remains."}],
             },
         )
-        findings = service.list_findings(run.id)
-        assert len(findings) == 2
-        assert original in findings
-        assert {item.title for item in findings} == {
-            finding["title"],
-            "A separate concern about the result sentence",
-        }
+        assert service.database.get_run(run.id).status == RunStatus.REVIEWING
+        for _ in range(2):
+            asyncio.run(service.resume_run(run.id))
+        duplicate_events = [
+            event
+            for event in service.database.list_events(run.id)
+            if event.event_type == "finding.duplicate"
+            and event.entity_id == original.id
+            and event.payload["attempt_id"] == second["attempt"].id
+        ]
+        assert len(duplicate_events) == 1
+        assert service.list_findings(run.id) == [original]
 
 
 def test_partial_review_invalid_continuation_preserves_prior_output_and_diagnostics(tmp_path):
