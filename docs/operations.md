@@ -41,6 +41,8 @@ For a new review task, include `scope` alongside `summary` and `findings`:
 
 Use bare frozen `source_path` values. For a text source, omit both line endpoints to declare the whole file, or supply both as an inclusive range. For the compiled PDF, use `source_path: "manuscript.pdf"` and a 1-based `page`. `complete` cannot include outstanding areas. Mark incomplete or uncertain work honestly. The report keeps this declaration separate from successful task-tool returns, including returns from failed review attempts; neither is proof that the host opened or understood material. Old runs keep their frozen review schema and report scope as not reported. Historical SDK runs have unknown tool-access counts. For scoped reviews, partial or unknown scope does not satisfy the required-review gate.
 
+For a new `substantive_review` task, also include `claim_checks`. Each entry has `claim`, `evidence` (the same exact source or PDF anchors used by findings), `critical_question`, `countercheck`, `assessment` (`supported`, `unresolved`, or `finding`), and `finding_indices`. The indices are zero-based positions in the submitted `findings` array. Use an empty index list for supported or unresolved checks; a finding check must link at least one finding, and every finding must be linked. A complete review requires at least one claim check; a partial review may submit an empty list. The frozen schema returned by `task show` is authoritative.
+
 After each `task submit`, use `task list RUN_ID` and follow `next_actions`. An accepted scoped review with `partial` or `unknown` is a durable checkpoint: its findings are retained, but the role is not finished and the run remains in `reviewing`. Continue that role explicitly:
 
 ```bash
