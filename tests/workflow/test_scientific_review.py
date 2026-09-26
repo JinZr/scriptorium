@@ -155,7 +155,7 @@ def test_continuation_preserves_prior_claim_checks_and_accepts_new_checks(tmp_pa
                 second,
                 {
                     "summary": "Checked the rendered result.",
-                    "findings": [finding],
+                    "findings": [{**finding, "explanation": "The page confirms the same typo."}],
                     "claim_checks": [_claim_check(assessment="finding", finding_indices=[0])],
                 },
             )["run_status"]
