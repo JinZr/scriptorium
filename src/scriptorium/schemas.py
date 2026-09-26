@@ -304,6 +304,23 @@ class ClaimCheck(StrictModel):
     assessment: Literal["supported", "unresolved", "finding"]
     finding_indices: list[Annotated[int, Field(ge=0, strict=True)]]
 
+    @field_validator("finding_indices", mode="before")
+    @classmethod
+    def accept_integral_indices(cls, value: Any) -> Any:
+        if not isinstance(value, list):
+            return value
+        return [
+            (
+                int(index)
+                if isinstance(index, Decimal)
+                and index.is_finite()
+                and 0 <= index <= sys.maxsize
+                and index == index.to_integral_value()
+                else index
+            )
+            for index in value
+        ]
+
 
 class ScientificReviewOutput(ScopedReviewOutput):
     claim_checks: list[ClaimCheck]

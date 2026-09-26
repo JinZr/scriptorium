@@ -41,9 +41,56 @@ def test_substantive_review_records_anchored_claim_checks_and_links_findings(tmp
         assert len(service.database.list_findings(run.id)) == 1
         report = service.render_report(run.id, "json")
         assert report["review_claim_checks"][0]["claim_checks"][0]["finding_indices"] == [0]
+        assert report["review_claim_checks"][0]["submitted_findings"][0]["title"] == finding["title"]
         markdown = service.render_report(run.id, "markdown")
         assert "Scientific claim checks" in markdown
+        assert "submitted finding [0]: major — Typo obscures the claim" in markdown
         assert "evidence: `manuscript.pdf:page 1`" in markdown
+
+
+@pytest.mark.parametrize(("index", "accepted"), [(0.0, True), (0.5, False), ("0", False)])
+def test_finding_indices_follow_published_integer_schema(tmp_path, index, accepted):
+    repo = make_repository(tmp_path, roles=("substantive_review",))
+    with ScriptoriumService(repo, manuscript_manager=PdfBuildingManuscriptManager(repo)) as service:
+        run = asyncio.run(service.start_run("HEAD", "quick"))["run"]
+        review = claim(service, run.id, AgentRole.SUBSTANTIVE_REVIEW)
+        receipt = submit(
+            service,
+            review,
+            {
+                "summary": "Checked the reported result.",
+                "findings": [review_finding(review)],
+                "claim_checks": [_claim_check(assessment="finding", finding_indices=[index])],
+            },
+        )
+        assert (receipt["attempt"].status == AttemptStatus.COMPLETED) is accepted
+        assert len(service.database.list_findings(run.id)) == int(accepted)
+
+
+def test_report_indices_refer_to_attempt_submission_order(tmp_path):
+    repo = make_repository(tmp_path, roles=("substantive_review",))
+    with ScriptoriumService(repo, manuscript_manager=PdfBuildingManuscriptManager(repo)) as service:
+        run = asyncio.run(service.start_run("HEAD", "quick"))["run"]
+        review = claim(service, run.id, AgentRole.SUBSTANTIVE_REVIEW)
+        minor = {**review_finding(review), "severity": "minor", "title": "Minor concern"}
+        blocker = {**review_finding(review), "severity": "blocker", "title": "Blocking concern"}
+        receipt = submit(
+            service,
+            review,
+            {
+                "summary": "Checked two concerns.",
+                "findings": [minor, blocker],
+                "claim_checks": [_claim_check(assessment="finding", finding_indices=[0, 1])],
+            },
+        )
+        assert receipt["attempt"].status == AttemptStatus.COMPLETED
+        report = service.render_report(run.id, "json")
+        assert [item["finding"]["title"] for item in report["findings"]] == ["Blocking concern", "Minor concern"]
+        submitted = report["review_claim_checks"][0]["submitted_findings"]
+        assert [item["title"] for item in submitted] == ["Minor concern", "Blocking concern"]
+        markdown = service.render_report(run.id, "markdown")
+        assert "submitted finding [0]: minor — Minor concern" in markdown
+        assert "submitted finding [1]: blocker — Blocking concern" in markdown
 
 
 @pytest.mark.parametrize("invalid", ["empty", "unlinked", "bad_anchor"])
@@ -85,10 +132,11 @@ def test_continuation_preserves_prior_claim_checks_and_accepts_new_checks(tmp_pa
     with ScriptoriumService(repo, manuscript_manager=PdfBuildingManuscriptManager(repo)) as service:
         run = asyncio.run(service.start_run("HEAD", "quick"))["run"]
         first = claim(service, run.id, AgentRole.SUBSTANTIVE_REVIEW)
+        finding = review_finding(first)
         partial = {
             "summary": "Checked one claim; a page remains.",
-            "findings": [],
-            "claim_checks": [_claim_check()],
+            "findings": [finding],
+            "claim_checks": [_claim_check(assessment="finding", finding_indices=[0])],
             "scope": {
                 "completion": "partial",
                 "checked": [{"source_path": "main.tex", "start_line": 1, "end_line": 4}],
@@ -107,14 +155,16 @@ def test_continuation_preserves_prior_claim_checks_and_accepts_new_checks(tmp_pa
                 second,
                 {
                     "summary": "Checked the rendered result.",
-                    "findings": [],
-                    "claim_checks": [_claim_check()],
+                    "findings": [finding],
+                    "claim_checks": [_claim_check(assessment="finding", finding_indices=[0])],
                 },
             )["run_status"]
             == RunStatus.AWAITING_DECISION
         )
         report = service.render_report(run.id, "json")
         assert len(report["review_claim_checks"]) == 2
+        assert len(report["findings"]) == 1
+        assert all(item["submitted_findings"][0]["title"] == finding["title"] for item in report["review_claim_checks"])
 
 
 def test_other_review_roles_keep_the_scoped_review_schema(tmp_path):

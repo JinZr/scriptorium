@@ -808,6 +808,10 @@ class ScriptoriumService:
                                     {
                                         "task_id": task.id,
                                         "attempt_id": attempt.id,
+                                        "submitted_findings": [
+                                            finding.model_dump(mode="json", exclude_none=True)
+                                            for finding in output.findings
+                                        ],
                                         "claim_checks": [
                                             check.model_dump(mode="json", exclude_none=True)
                                             for check in output.claim_checks
@@ -1089,10 +1093,12 @@ class ScriptoriumService:
             return [*lines, "- None"]
         for item in items:
             lines.append(f"- `{item['attempt_id']}`: {len(item['claim_checks'])} checks")
+            for index, finding in enumerate(item["submitted_findings"]):
+                lines.append(f"  - submitted finding [{index}]: {finding['severity']} — {finding['title']}")
             for check in item["claim_checks"]:
                 lines.append(
                     f"  - {check['claim']} — {check['assessment']}; question: {check['critical_question']}; "
-                    f"countercheck: {check['countercheck']}; findings: {check['finding_indices']}"
+                    f"countercheck: {check['countercheck']}; submitted finding indices: {check['finding_indices']}"
                 )
                 for evidence in check["evidence"]:
                     location = evidence["source_path"]
