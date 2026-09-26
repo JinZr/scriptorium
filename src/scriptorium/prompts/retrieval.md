@@ -7,6 +7,9 @@ Read the relevant source in bounded ranges. Search alternative terms, abbreviati
 inspect context around matches. Follow definitions and references into other sections, tables, captions, and
 supplementary material. Continue with further ranges or targeted searches after truncated output. An empty search
 or a partial read is not evidence that an issue is absent. The index may omit macros or unsupported commands.
+Raw source searches can also return comments or inactive variants. Check whether a passage belongs to the compiled
+manuscript before treating it as a claim. If the manuscript mentions separate material absent from the frozen
+manifest, describe the missing link in limitations instead of inferring its contents.
 
 Before reporting a suspected issue, actively seek qualifications, definitions, or supplementary explanations that
 would disprove it. For visual claims, open the relevant rendered page and compare the figure/table with its caption,
