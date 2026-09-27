@@ -42,8 +42,7 @@ def review_cli(tmp_path, monkeypatch, capsys, request):
         capsys.readouterr()
 
         def command(arguments, json_output=True):
-            arguments = [argument for argument in arguments if argument != "--json"]
-            assert cli.main((["--json"] if json_output else []) + arguments) == 0
+            assert cli.main(arguments) == 0
             captured = capsys.readouterr()
             assert not captured.err
             assert len(captured.out.encode("utf-8")) <= MAX_TOOL_RESPONSE_BYTES
@@ -58,7 +57,7 @@ def review_cli(tmp_path, monkeypatch, capsys, request):
 def test_cli_input_fragments_reconstruct_frozen_artifacts(review_cli, client, json_output):
     service, task, command, _ = review_cli
     arguments = [
-        "--json",
+        *(["--json"] if json_output else []),
         "task",
         "claim",
         task.id,
@@ -78,17 +77,17 @@ def test_cli_input_fragments_reconstruct_frozen_artifacts(review_cli, client, js
     assert "prompt" not in overview and "schema" not in overview and "source_map" not in overview
     assert overview["attempt"]["external_client"] == client
     for part in ("prompt", "schema"):
-        next_command = overview["inputs"][part]["command"]
+        arguments = [*(["--json"] if json_output else []), "task", "show", overview["attempt"]["id"], "--part", part]
         text = ""
         chunks = []
-        while next_command:
-            response = command(shlex.split(next_command)[1:], json_output)
+        while arguments:
+            response = command(arguments, json_output)
             assert response["offset"] == len(text)
             assert response["input_digest"] == overview["input_digest"]
             assert response["part"] == part
             text += response["text"]
             chunks.append(response)
-            next_command = response["next_command"]
+            arguments = shlex.split(response["next_command"])[1:] if response["next_command"] else None
         assert len(text) == response["total_chars"]
         assert response["next_offset"] is None
         assert text.encode() == service.artifacts.get_bytes(overview["inputs"][part]["digest"])
@@ -157,7 +156,8 @@ def test_cli_read_continuations_preserve_every_character_and_logged_range(review
     service, task, command, text = review_cli
     context = service.claim_task(task.id, "antigravity", "model", "high", "session", "host")
     next_command = (
-        f"scriptorium --json task read {context['attempt'].id} --path main.tex --max-lines 100 --max-chars 8000"
+        f"scriptorium {'--json ' if json_output else ''}task read {context['attempt'].id} "
+        "--path main.tex --max-lines 100 --max-chars 8000"
     )
     returned = {}
     chunks = []
@@ -187,7 +187,7 @@ def test_cli_search_byte_pages_preserve_all_matches_and_log_only_returns(review_
     context = service.claim_task(task.id, "antigravity", "model", "high", "session", "host")
     query = "实验'needle"
     arguments = [
-        "--json",
+        *(["--json"] if json_output else []),
         "task",
         "search",
         context["attempt"].id,
@@ -236,11 +236,12 @@ def test_read_continuation_accepts_an_option_like_source_path(review_cli):
 
 @pytest.mark.parametrize("review_cli", ["-main.tex"], indirect=True)
 @pytest.mark.parametrize("query", ["-needle", "--json", "--help"])
-def test_search_continuation_accepts_option_like_query_and_path(review_cli, query):
+@pytest.mark.parametrize("json_output", [True, False], ids=["json", "plain"])
+def test_search_continuation_accepts_option_like_query_and_path(review_cli, query, json_output):
     service, task, command, text = review_cli
     context = service.claim_task(task.id, "codex", "model", "high", "session", "host")
     arguments = [
-        "--json",
+        *(["--json"] if json_output else []),
         "task",
         "search",
         context["attempt"].id,
@@ -251,7 +252,7 @@ def test_search_continuation_accepts_option_like_query_and_path(review_cli, quer
     ]
     matches = []
     while arguments:
-        response = command(arguments)
+        response = command(arguments, json_output)
         assert response["total_matches"] == 300
         matches.extend(response["matches"])
         arguments = shlex.split(response["next_command"])[1:] if response["next_command"] else None
