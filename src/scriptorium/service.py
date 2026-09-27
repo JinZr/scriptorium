@@ -537,10 +537,11 @@ class ScriptoriumService:
         attempt, task, bundle, files = self._readable_task(attempt_id)
         if start_line < 1 or not 1 <= max_lines <= 100 or offset < 0 or not 1 <= max_chars <= 8000:
             raise ConfigurationError("invalid read range or size")
-        source = next((item for item in bundle.anchor_map.sources if item.source_path == path), None)
+        source = next((item for item in bundle.anchor_map.sources if item.read_path == path), None)
         if source is None:
-            source = next((item for item in bundle.anchor_map.sources if item.read_path == path), None)
+            source = next((item for item in bundle.anchor_map.sources if item.source_path == path), None)
         if path in {"manifest.json", "navigation.json", "source-map.json"}:
+            source = None
             read_path = bundle.workspace / path
             source_digest = files[path]["digest"]
         elif source is not None and source.text_anchorable:
@@ -555,6 +556,7 @@ class ScriptoriumService:
         response = bound_read(
             {
                 "path": path,
+                "source_path": source.source_path if source is not None else None,
                 "source_digest": source_digest,
                 "lines": pieces,
                 "next_line": next_line,
@@ -570,6 +572,7 @@ class ScriptoriumService:
             "read",
             {
                 "path": path,
+                "source_path": response["source_path"],
                 "source_digest": source_digest,
                 "ranges": [
                     {
@@ -595,8 +598,8 @@ class ScriptoriumService:
             raise ConfigurationError("invalid search query, cursor, or limit")
         sources = [item for item in bundle.anchor_map.sources if item.text_anchorable]
         search_items = [(item.source_path, bundle.workspace / item.read_path, item.source_digest) for item in sources]
-        path_items = {source.read_path: item for source, item in zip(sources, search_items)}
-        path_items.update((item[0], item) for item in search_items)
+        path_items = {item[0]: item for item in search_items}
+        path_items.update((source.read_path, item) for source, item in zip(sources, search_items))
         metadata_names = ("manifest.json", "navigation.json", "source-map.json")
         for name in metadata_names:
             read_path = bundle.workspace / name
@@ -608,7 +611,7 @@ class ScriptoriumService:
             if item is None:
                 raise ConfigurationError("path is not a text source in the frozen bundle")
             search_items = [item]
-            if item[0] not in metadata_names:
+            if path_items[item[0]] == item:
                 path = item[0]
         matches = []
         total_matches = 0
@@ -820,7 +823,9 @@ class ScriptoriumService:
         pages: set[int] = set()
         for event in events:
             if event.event_type == "tool.read":
-                path = event.payload["path"]
+                path = event.payload.get("source_path", event.payload["path"])
+                if path is None:
+                    continue
                 source = source_index.get(path) or read_paths.get(path)
                 if source is not None:
                     if event.payload["source_digest"] != source.source_digest:
