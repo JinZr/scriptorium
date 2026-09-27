@@ -14,7 +14,7 @@ from typing import Any
 from .config import find_repo, initialize_project
 from .domain import Attempt, Run, Task
 from .errors import ConfigurationError, InfrastructureError, ScriptoriumError
-from .tool_output import success_json
+from .tool_output import REPORT_PARTS, run_overview, success_json
 
 
 class _UsageError(Exception):
@@ -49,7 +49,7 @@ def build_parser() -> argparse.ArgumentParser:
     start_parser.add_argument("--profile", default="full")
     start_parser.add_argument("--budget-usd")
 
-    status_parser = run_commands.add_parser("status", help="show a run")
+    status_parser = run_commands.add_parser("status", help="show a bounded run overview and next actions")
     status_parser.add_argument("run_id")
 
     resume_parser = run_commands.add_parser("resume", help="resume a run")
@@ -72,7 +72,13 @@ def build_parser() -> argparse.ArgumentParser:
 
     report_parser = run_commands.add_parser("report", help="render a run report")
     report_parser.add_argument("run_id")
-    report_parser.add_argument("--format", choices=("markdown", "json"), default="markdown")
+    report_mode = report_parser.add_mutually_exclusive_group()
+    report_mode.add_argument("--format", choices=("markdown", "json"), default="markdown")
+    report_mode.add_argument(
+        "--part", choices=REPORT_PARTS, help="read a report section as bounded JSON text fragments"
+    )
+    report_parser.add_argument("--offset", type=int, default=0)
+    report_parser.add_argument("--report-digest", help="report digest returned by the previous fragment")
 
     gate_parser = run_commands.add_parser("gate", help="evaluate the release gate")
     gate_parser.add_argument("run_id")
@@ -219,23 +225,31 @@ def _dispatch_run(service: Any, arguments: argparse.Namespace) -> tuple[Any, int
                 profile=arguments.profile,
             )
         )
-        return result, 0, None
+        return run_overview(result), 0, None
     if arguments.run_command == "status":
-        return service.get_run(arguments.run_id), 0, None
+        return service.run_status(arguments.run_id), 0, None
     if arguments.run_command == "resume":
-        return asyncio.run(service.resume_run(arguments.run_id)), 0, None
+        return run_overview(asyncio.run(service.resume_run(arguments.run_id))), 0, None
     if arguments.run_command == "retry":
         if arguments.route is not None:
             raise ConfigurationError("--route belongs to the retired internal model runner")
         result = asyncio.run(
             service.retry_task(arguments.run_id, arguments.task_id, arguments.abandon_attempt, arguments.reason)
         )
-        return result, 0, None
+        return run_overview(result), 0, None
     if arguments.run_command == "continue":
-        return asyncio.run(service.continue_review(arguments.run_id, arguments.task_id)), 0, None
+        return run_overview(asyncio.run(service.continue_review(arguments.run_id, arguments.task_id))), 0, None
     if arguments.run_command == "cancel":
-        return service.cancel_run(arguments.run_id, arguments.reason), 0, None
+        return run_overview(service.cancel_run(arguments.run_id, arguments.reason)), 0, None
     if arguments.run_command == "report":
+        if arguments.part is not None:
+            return (
+                service.read_report(arguments.run_id, arguments.part, arguments.offset, arguments.report_digest),
+                0,
+                None,
+            )
+        if arguments.offset != 0 or arguments.report_digest is not None:
+            raise ConfigurationError("--offset and --report-digest require --part")
         result = service.render_report(arguments.run_id, arguments.format)
         return result, 0, arguments.format
     if arguments.run_command == "gate":

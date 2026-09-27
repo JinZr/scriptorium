@@ -40,7 +40,15 @@ from .errors import ConfigurationError, InfrastructureError, NotFoundError, Stat
 from .manuscript import ManuscriptManager
 from .schemas import ScientificReviewOutput, ScopedReviewOutput
 from .storage import ConflictError, Database, NotFoundError as StorageNotFoundError, StorageError
-from .tool_output import bound_read, bound_search, require_bounded, task_view
+from .tool_output import (
+    REPORT_PARTS,
+    bound_read,
+    bound_search,
+    report_fragment,
+    require_bounded,
+    run_overview,
+    task_view,
+)
 from .workflow import Armarius
 
 
@@ -317,6 +325,14 @@ class ScriptoriumService:
             "patch_ids": [patch.id for patch in patches],
         }
 
+    def run_status(self, run_id: str) -> dict[str, Any]:
+        run = self._storage(self.database.get_run, run_id)
+        with self._run_operation(run.id, "run status"):
+            view = self.get_run(run_id)
+            external = view["run"].frozen_config.get("execution") == "external"
+            next_actions = self.list_tasks(run_id)["next_actions"] if external else []
+            return run_overview(view, next_actions)
+
     async def resume_run(self, run_id: str) -> dict[str, Any]:
         run = self._storage(self.database.get_run, run_id)
         self.armarius.require_external_run(run)
@@ -339,7 +355,7 @@ class ScriptoriumService:
         self.armarius.require_external_run(run)
         with self._run_operation(run.id, "run continue"):
             await self.armarius.continue_review(run_id, task_id)
-            return self.list_tasks(run_id)
+            return self.get_run(run_id)
 
     def cancel_run(self, run_id: str, reason: str) -> dict[str, Any]:
         run = self._storage(self.database.get_run, run_id)
@@ -875,6 +891,14 @@ class ScriptoriumService:
                 }
             )
         return audits
+
+    def read_report(self, run_id: str, part: str, offset: int = 0, report_digest: str | None = None):
+        if part not in REPORT_PARTS:
+            raise ConfigurationError(f"unknown report part: {part}")
+        run = self._storage(self.database.get_run, run_id)
+        with self._run_operation(run.id, "run report"):
+            report = self.render_report(run_id, "json")
+            return report_fragment(run_id, report, part, offset, report_digest)
 
     def render_report(self, run_id: str, format: str) -> str | dict[str, Any]:
         if format not in {"markdown", "json"}:

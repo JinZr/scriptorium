@@ -633,6 +633,10 @@ def test_historical_sdk_run_stays_readable_but_cannot_resume(tmp_path: Path) -> 
     with ScriptoriumService(repo) as service:
         assert service.get_run(run_id)["run"].id == run_id
         assert service.render_report(run_id, "json")["run"]["id"] == run_id
+        status = service.run_status(run_id)
+        assert status["execution"] == "legacy_read_only"
+        assert status["next_actions"] == []
+        assert json.loads(service.read_report(run_id, "gate")["text"])["passed"] is False
         assert not service.evaluate_gate(run_id)["passed"]
         with pytest.raises(StateError, match="retired SDK execution contract"):
             asyncio.run(service.resume_run(run_id))

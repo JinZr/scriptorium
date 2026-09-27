@@ -26,10 +26,9 @@ def test_start_emits_json_and_passes_frozen_inputs(monkeypatch, capsys) -> None:
     assert exit_code == 0
     assert service.calls == [("start_run", "abc123", "quick")]
     output = json.loads(capsys.readouterr().out)
-    assert output == {
-        "ok": True,
-        "data": {"id": "result_1", "status": "reviewing"},
-    }
+    assert output["ok"] is True
+    assert output["data"]["run"] == {"id": "run_1", "status": "preparing", "commit_sha": "abc123"}
+    assert output["data"]["next_actions"] == [{"command": "run status", "run_id": "run_1"}]
 
 
 def test_doctor_passes_default_and_explicit_revision(monkeypatch, capsys) -> None:
@@ -48,7 +47,7 @@ def test_run_commands_dispatch_to_service(monkeypatch, capsys) -> None:
     install_fake_service(monkeypatch, service)
 
     commands = [
-        (["run", "status", "run_1"], ("get_run", "run_1")),
+        (["run", "status", "run_1"], ("run_status", "run_1")),
         (["run", "resume", "run_1"], ("resume_run", "run_1")),
         (["run", "continue", "run_1", "--task", "task_1"], ("continue_review", "run_1", "task_1")),
         (
@@ -63,8 +62,9 @@ def test_run_commands_dispatch_to_service(monkeypatch, capsys) -> None:
     ]
 
     for arguments, expected in commands:
+        service.calls.clear()
         assert cli.main(arguments) == 0
-        assert service.calls[-1] == expected
+        assert service.calls == [expected]
     capsys.readouterr()
 
 
@@ -117,3 +117,36 @@ def test_init_calls_configuration_boundary(monkeypatch, tmp_path, capsys) -> Non
     assert calls == [(tmp_path.resolve(), "paper.tex", "xelatex")]
     output = json.loads(capsys.readouterr().out)
     assert output["data"]["initialized"] is True
+
+
+def test_report_fragments_dispatch_with_continuation_identity(monkeypatch, capsys):
+    service = FakeService()
+    install_fake_service(monkeypatch, service)
+    assert cli.main(["--json", "run", "report", "run_1", "--part", "findings"]) == 0
+    assert service.calls[-1] == ("read_report", "run_1", "findings", 0, None)
+    assert json.loads(capsys.readouterr().out)["data"]["text"] == "[]"
+    assert (
+        cli.main(
+            ["--json", "run", "report", "run_1", "--part", "findings", "--offset", "120", "--report-digest", "abc"]
+        )
+        == 0
+    )
+    assert service.calls[-1] == ("read_report", "run_1", "findings", 120, "abc")
+
+
+@pytest.mark.parametrize(
+    "options",
+    [
+        ["--part", "missing"],
+        ["--offset", "3"],
+        ["--report-digest", "abc"],
+        ["--part", "findings", "--format", "json"],
+        ["--part", "findings", "--format", "markdown"],
+    ],
+)
+def test_report_fragment_options_are_not_silently_ignored(monkeypatch, capsys, options):
+    service = FakeService()
+    install_fake_service(monkeypatch, service)
+    assert cli.main(["--json", "run", "report", "run_1", *options]) == 2
+    assert json.loads(capsys.readouterr().out)["ok"] is False
+    assert service.calls == []
