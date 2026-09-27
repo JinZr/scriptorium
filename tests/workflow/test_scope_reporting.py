@@ -159,7 +159,7 @@ def test_coverage_audit_flags_checked_page_without_task_page_return(tmp_path):
         )
 
 
-def test_coverage_audit_prioritizes_canonical_source_paths_over_read_aliases():
+def test_coverage_audit_preserves_source_path_precedence_for_legacy_read_events():
     sources = [
         SourceAnchorRecord(
             source_path=path,
