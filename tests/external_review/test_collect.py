@@ -112,6 +112,47 @@ def test_collection_seal_detects_raw_artifact_and_file_set_changes(tmp_path):
         verify_seal(root)
 
 
+@pytest.mark.parametrize("reseal", [False, True])
+def test_baseline_cannot_hide_prior_attempts_during_collection(tmp_path, monkeypatch, reseal):
+    root = project(tmp_path)
+    run_id, task_id = start(root)
+    with ScriptoriumService(root) as service:
+        submit(service, task_id)
+    baseline = collect(root, run_id, tmp_path / "baseline", "case", "trial")
+    original = collector.read_json
+
+    def changing_read(path):
+        value = original(path)
+        if path == baseline / "report.json":
+            for item in value["tasks"]:
+                item["attempts"] = []
+            path.write_text(json.dumps(value))
+            if reseal:
+                (baseline / "seal.json").unlink()
+                seal(baseline)
+        return value
+
+    monkeypatch.setattr(collector, "read_json", changing_read)
+    with pytest.raises(ValueError, match="Collection has changed"):
+        collect(root, run_id, tmp_path / "after", "case", "trial", baseline)
+    assert not (tmp_path / "after").exists()
+
+
+@pytest.mark.parametrize("shadow", ["scriptorium.py", "scriptorium/__init__.py", "pydantic.py"])
+def test_manuscript_cannot_shadow_the_collector_cli_or_dependencies(tmp_path, monkeypatch, shadow):
+    root = project(tmp_path)
+    run_id, _ = start(root)
+    module = root / shadow
+    module.parent.mkdir(exist_ok=True)
+    module.write_text(
+        "from pathlib import Path\nPath('shadow-imported').write_text('untrusted code ran')\nraise RuntimeError('project module shadowed CLI')\n"
+    )
+    monkeypatch.setenv("PYTHONPATH", str(root))
+    output = collect(root, run_id, tmp_path / "collection", "case", "trial")
+    assert read_json(output / "report.json")["run"]["id"] == run_id
+    assert not (root / "shadow-imported").exists()
+
+
 def test_run_change_during_collection_rejects_mixed_report(tmp_path, monkeypatch):
     root = project(tmp_path)
     run_id, task_id = start(root)
