@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import argparse
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from datetime import datetime, timezone
 from enum import Enum
 from hashlib import sha256
@@ -138,6 +138,10 @@ class PeerReviewBenchManuscriptManager(ManuscriptManager):
                 )
             )
         return tuple(sources)
+
+    def build_project(self, snapshot: Path, destination: Path, manuscript: ManuscriptConfig) -> BuildResult:
+        # The synthetic benchmark.tex is scaffolding, not a reviewed LaTeX entrypoint.
+        return replace(super().build_project(snapshot, destination, manuscript), documents=())
 
     def build(self, workspace: Path, manuscript: ManuscriptConfig) -> BuildResult:
         markdown_path = workspace / "preprint" / "preprint.md"

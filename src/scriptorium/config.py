@@ -24,6 +24,11 @@ REVIEW_ROLES = {"substantive_review", "copyedit", "consistency", "figure_review"
 class ManuscriptConfig:
     main: str
     engine: str
+    supplements: tuple[str, ...] = ()
+
+    @property
+    def entrypoints(self) -> tuple[str, ...]:
+        return (self.main, *self.supplements)
 
 
 @dataclass(frozen=True)
@@ -64,6 +69,18 @@ def load_project_config(repo: Path) -> ProjectConfig:
         raise ConfigurationError("manuscript.main must be a LaTeX .tex file")
     if engine not in SUPPORTED_ENGINES:
         raise ConfigurationError(f"manuscript.engine must be one of {sorted(SUPPORTED_ENGINES)}")
+    supplements = manuscript.get("supplements", [])
+    if not isinstance(supplements, list) or any(not isinstance(item, str) for item in supplements):
+        raise ConfigurationError("manuscript.supplements must be a list of relative LaTeX .tex paths")
+    main = Path(main).as_posix()
+    normalized = []
+    for item in supplements:
+        path = Path(item)
+        if not item.strip() or path.is_absolute() or ".." in path.parts or path.suffix.lower() != ".tex":
+            raise ConfigurationError("manuscript.supplements must contain relative LaTeX .tex paths")
+        normalized.append(path.as_posix())
+    if len(set([main, *normalized])) != len(normalized) + 1:
+        raise ConfigurationError("manuscript main and supplements must have distinct entrypoints")
     profiles: dict[str, tuple[str, ...]] = {}
     for name, profile in data.get("profiles", {}).items():
         roles = tuple(str(role) for role in profile.get("roles", []))
@@ -77,7 +94,7 @@ def load_project_config(repo: Path) -> ProjectConfig:
         profiles[str(name)] = roles
     if not profiles:
         raise ConfigurationError("At least one review profile is required")
-    return ProjectConfig(ManuscriptConfig(main, engine), profiles)
+    return ProjectConfig(ManuscriptConfig(main, engine, tuple(normalized)), profiles)
 
 
 def reject_legacy_local_config(repo: Path) -> None:

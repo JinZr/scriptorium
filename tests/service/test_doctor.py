@@ -2,6 +2,7 @@ from pathlib import Path
 import shutil
 import subprocess
 
+import fitz
 import pytest
 
 from scriptorium.errors import InfrastructureError
@@ -27,7 +28,9 @@ class DoctorManuscriptManager(ManuscriptManager):
         if self.build_error is not None:
             raise self.build_error
         pdf_path = workspace / Path(manuscript.main).with_suffix(".pdf")
-        pdf_path.write_bytes(b"%PDF-1.4\n")
+        with fitz.open() as document:
+            document.new_page()
+            document.save(pdf_path)
         return BuildResult(pdf_path=pdf_path, log="compiled")
 
 
@@ -58,6 +61,31 @@ def prepare_doctor(monkeypatch: pytest.MonkeyPatch) -> None:
         "scriptorium.service.shutil.which",
         lambda command: system_which("git") if command == "git" else f"/usr/bin/{command}",
     )
+
+
+@pytest.mark.parametrize("missing", [False, True])
+def test_doctor_checks_every_committed_entrypoint(tmp_path, monkeypatch, missing):
+    repo = make_repository(tmp_path)
+    config = repo / "scriptorium.toml"
+    config.write_text(
+        config.read_text().replace('engine = "pdflatex"', 'engine = "pdflatex"\nsupplements = ["supplement.tex"]')
+    )
+    if not missing:
+        (repo / "supplement.tex").write_text("committed supplement")
+    git(repo, "add", ".")
+    git(repo, "commit", "-qm", "Declare supplement")
+    (repo / "supplement.tex").write_text("uncommitted supplement")
+    prepare_doctor(monkeypatch)
+    manager = DoctorManuscriptManager(repo)
+    with ScriptoriumService(repo, manuscript_manager=manager) as service:
+        result = service.doctor(profile="quick")
+    if missing:
+        assert not result["ok"]
+        assert manager.built_main_texts == []
+        assert any("supplement.tex" in item["message"] and not item["ok"] for item in result["checks"])
+    else:
+        assert result["ok"]
+        assert manager.built_main_texts == ["paper", "committed supplement"]
 
 
 def test_doctor_uses_the_requested_frozen_revision_and_ignores_dirty_worktree(
@@ -119,7 +147,7 @@ def test_doctor_reports_compile_failure(
 
     assert result["exit_code"] == 3
     compile_check = next(item for item in result["checks"] if item["name"] == "manuscript_compile")
-    assert compile_check["message"] == "LaTeX build failed:\ntest log"
+    assert compile_check["message"] == "Cannot compile review document main.tex: LaTeX build failed:\ntest log"
     assert not manager.build_workspaces[0].exists()
 
 

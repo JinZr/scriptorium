@@ -146,16 +146,30 @@ class CompiledPdfPageRecord(StrictModel):
         return self
 
 
+class CompiledPdfDocumentRecord(StrictModel):
+    entrypoint: str = Field(min_length=1)
+    start_page: int = Field(ge=1)
+    page_count: int = Field(ge=1)
+
+
 class CompiledPdfAnchor(StrictModel):
     source_path: Literal["manuscript.pdf"]
     read_path: Literal["manuscript.pdf"]
     page_count: int = Field(ge=1)
     pages: list[CompiledPdfPageRecord]
+    documents: list[CompiledPdfDocumentRecord] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def validate_pages(self) -> "CompiledPdfAnchor":
         if [item.page for item in self.pages] != list(range(1, self.page_count + 1)):
             raise ValueError("pages must contain every compiled PDF page in order")
+        next_page = 1
+        for document in self.documents:
+            if document.start_page != next_page:
+                raise ValueError("document page ranges must be contiguous and ordered")
+            next_page += document.page_count
+        if self.documents and next_page != self.page_count + 1:
+            raise ValueError("document page ranges must cover the compiled PDF")
         return self
 
 
@@ -169,6 +183,10 @@ class EvidenceAnchorMap(StrictModel):
         source_paths = [item.source_path for item in self.sources]
         if len(source_paths) != len(set(source_paths)):
             raise ValueError("source_path values must be unique")
+        entrypoints = [item.entrypoint for item in self.compiled_pdf.documents]
+        text_paths = {item.source_path for item in self.sources if item.text_anchorable}
+        if len(entrypoints) != len(set(entrypoints)) or not set(entrypoints) <= text_paths:
+            raise ValueError("document entrypoints must be distinct frozen text sources")
         return self
 
 
