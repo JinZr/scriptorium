@@ -595,16 +595,21 @@ class ScriptoriumService:
             raise ConfigurationError("invalid search query, cursor, or limit")
         sources = [item for item in bundle.anchor_map.sources if item.text_anchorable]
         search_items = [(item.source_path, bundle.workspace / item.read_path, item.source_digest) for item in sources]
-        for name in ("manifest.json", "navigation.json", "source-map.json"):
+        path_items = {source.read_path: item for source, item in zip(sources, search_items)}
+        path_items.update((item[0], item) for item in search_items)
+        metadata_names = ("manifest.json", "navigation.json", "source-map.json")
+        for name in metadata_names:
             read_path = bundle.workspace / name
-            search_items.append((name, read_path, files[name]["digest"]))
+            item = (name, read_path, files[name]["digest"])
+            search_items.append(item)
+            path_items[name] = item
         if path is not None:
-            source_paths = {item.read_path: item.source_path for item in sources}
-            source_paths.update((item.source_path, item.source_path) for item in sources)
-            path = source_paths.get(path, path)
-            search_items = [item for item in search_items if item[0] == path]
-            if not search_items:
+            item = path_items.get(path)
+            if item is None:
                 raise ConfigurationError("path is not a text source in the frozen bundle")
+            search_items = [item]
+            if item[0] not in metadata_names:
+                path = item[0]
         matches = []
         total_matches = 0
         folded_query = query.casefold()
