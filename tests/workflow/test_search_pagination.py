@@ -62,3 +62,38 @@ def test_search_source_paths_take_priority_over_read_path_aliases(tmp_path):
         (bundle / "sources/sources/main.tex").write_text("Tampered evidence.\n")
         with pytest.raises(InfrastructureError):
             service.search_task(attempt.id, "evidence", "sources/sources/main.tex", 0, 20)
+
+
+@pytest.mark.parametrize("name", ["manifest.json", "navigation.json", "source-map.json"])
+def test_search_alias_keeps_sources_separate_from_same_named_metadata(tmp_path, name):
+    repo = make_repository(tmp_path, roles=("substantive_review",))
+    (repo / name).write_text(f"{name} {name} {name}\n", encoding="utf-8")
+    (repo / "main.tex").write_text(f"Root evidence.\n\\input{{{name}}}\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(repo), "add", "main.tex", name], check=True)
+    subprocess.run(["git", "-C", str(repo), "commit", "-qm", "Source named like metadata"], check=True)
+    with ScriptoriumService(repo, manuscript_manager=PdfBuildingManuscriptManager(repo)) as service:
+        run = asyncio.run(service.start_run("HEAD", "quick"))["run"]
+        attempt = claim(service, run.id, AgentRole.SUBSTANTIVE_REVIEW)["attempt"]
+        alias = f"sources/{name}"
+        source = service.read_task(attempt.id, alias, 1, 10, 0, 1000)
+        metadata = service.read_task(attempt.id, name, 1, 10, 0, 1000)
+        assert source["source_digest"] != metadata["source_digest"]
+        cursor = 0
+        matches = []
+        while True:
+            page = service.search_task(attempt.id, name, alias, cursor, 1)
+            assert page["total_matches"] == 3
+            matches.extend(page["matches"])
+            if page["next_cursor"] is None:
+                break
+            assert f"--path={alias}" in page["next_command"]
+            cursor = page["next_cursor"]
+        assert len(matches) == 3
+        assert {match["path"] for match in matches} == {name}
+        assert {match["source_digest"] for match in matches} == {source["source_digest"]}
+        events = [event for event in service.database.list_events(run.id) if event.event_type == "tool.search"]
+        assert {event.payload["path"] for event in events} == {alias}
+        metadata_search = service.search_task(attempt.id, name, name, 0, 50)
+        metadata_text = (repo / ".scriptorium/runs" / run.id / "bundle" / name).read_text()
+        assert metadata_search["total_matches"] == metadata_text.count(name) > 0
+        assert {match["source_digest"] for match in metadata_search["matches"]} == {metadata["source_digest"]}
