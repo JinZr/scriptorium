@@ -45,13 +45,17 @@ scriptorium --json task list RUN_ID
 scriptorium --json task claim TASK_ID --client codex --model MODEL --effort EFFORT \
   --session-id SESSION_ID --session-source host
 scriptorium --json task show ATTEMPT_ID
+scriptorium --json task show ATTEMPT_ID --part prompt
+scriptorium --json task show ATTEMPT_ID --part schema
 scriptorium --json task search ATTEMPT_ID --query TERM
 scriptorium --json task read ATTEMPT_ID --path main.tex --start-line 1
 scriptorium --json task page ATTEMPT_ID --number 1
 scriptorium --json task submit ATTEMPT_ID --input-digest INPUT_DIGEST --file output.json
 ```
 
-`--file -` reads one JSON object from stdin. Search returns `next_cursor`; read returns `next_line` and `next_offset`. Continue from those values when present. Search `navigation.json` for literal headings, labels, references, captions, and figure paths, then inspect the relevant source and rendered page. The CLI records what it returned. A page path alone does not prove that the client opened the image.
+`task claim` and plain `task show` return a compact overview with `input_digest` and commands for the frozen inputs. `--part prompt` and `--part schema` return text fragments: follow `next_command` until null, concatenate `text` in offset order, and parse the complete schema text as JSON. Read `source-map.json` through `task read` for evidence paths and digests.
+
+Successful JSON responses for claim, show, read, search, and page are at most 7,000 UTF-8 bytes including the envelope and newline. Reads and searches may return fewer characters, lines, or matches than requested. Follow their `next_command` until null to finish the requested traversal; a long line can require multiple reads of the **same line** with increasing `--offset`. Search `navigation.json` for literal headings, labels, references, captions, and figure paths, then inspect the relevant source and rendered page. The CLI records what it returned, not what a host displayed or understood. A page path alone does not prove that the client opened the image. `--file -` reads one output JSON object from stdin.
 
 New review tasks require a `scope` object in the submitted JSON: `completion` (`complete`, `partial`, or `unknown`), `checked` and `outstanding` lists of frozen source paths or PDF pages, and a `limitations` list. Source entries may include an inclusive line range. `run report` presents this model-declared scope separately from tool-access events and flags checked text or pages without matching task-tool returns. Its read-line summaries include partial line fragments, and it cannot observe direct host file access or prove exhaustive reading. Only a `complete` declaration satisfies the required-review gate for a scoped review. Runs frozen under the previous review schema remain readable and resumable without a scope field.
 
