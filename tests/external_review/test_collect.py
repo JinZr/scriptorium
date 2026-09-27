@@ -145,7 +145,9 @@ def test_manuscript_cannot_shadow_the_collector_cli_or_dependencies(tmp_path, mo
     module = root / shadow
     module.parent.mkdir(exist_ok=True)
     module.write_text(
-        "from pathlib import Path\nPath('shadow-imported').write_text('untrusted code ran')\nraise RuntimeError('project module shadowed CLI')\n"
+        "from pathlib import Path\n"
+        "Path('shadow-imported').write_text('untrusted code ran')\n"
+        "raise RuntimeError('project module shadowed CLI')\n"
     )
     monkeypatch.setenv("PYTHONPATH", str(root))
     output = collect(root, run_id, tmp_path / "collection", "case", "trial")
