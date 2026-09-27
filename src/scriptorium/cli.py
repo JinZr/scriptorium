@@ -14,7 +14,7 @@ from typing import Any
 from .config import find_repo, initialize_project
 from .domain import Attempt, Run, Task
 from .errors import ConfigurationError, InfrastructureError, ScriptoriumError
-from .tool_output import REPORT_PARTS, run_overview, success_json
+from .tool_output import REPORT_PARTS, pretty_json, run_overview, success_json
 
 
 class _UsageError(Exception):
@@ -393,7 +393,7 @@ def _emit_success(payload: Any, json_output: bool, output_format: str | None) ->
         print(payload)
         return
     if output_format == "json" or isinstance(value, (dict, list)):
-        print(json.dumps(value, ensure_ascii=False, indent=2))
+        print(pretty_json(value))
         return
     if value is not None:
         print(value)

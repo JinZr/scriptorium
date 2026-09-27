@@ -29,8 +29,15 @@ def success_json(payload):
     return json.dumps({"ok": True, "data": payload}, ensure_ascii=False, separators=(",", ":"))
 
 
+def pretty_json(payload):
+    return json.dumps(payload, ensure_ascii=False, indent=2)
+
+
 def fits_response(payload):
-    return len(success_json(payload).encode("utf-8")) + 1 <= MAX_TOOL_RESPONSE_BYTES
+    return all(
+        len(serialized.encode("utf-8")) + 1 <= MAX_TOOL_RESPONSE_BYTES
+        for serialized in (success_json(payload), pretty_json(payload))
+    )
 
 
 def require_bounded(payload):

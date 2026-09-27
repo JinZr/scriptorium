@@ -73,7 +73,7 @@ scriptorium --json run report RUN_ID --part review_coverage_audit
 scriptorium run report RUN_ID --format json > report.json
 ```
 
-Report parts use the same bounded `text`/`offset`/`next_command` traversal as frozen task inputs. Concatenate the fragments and parse the complete JSON value. Continuations include `--report-digest` for the entire report; a changed report is rejected rather than mixed with previous fragments. Restart the report traversal at offset zero if it changes. Full JSON and Markdown report exports remain unbounded and are intended for files or human inspection. The detailed `task list` command also remains available; use `run status` for the model's normal workflow.
+Report parts use the same bounded `text`/`offset`/`next_command` traversal as frozen task inputs. The byte bound applies both to the compact `--json` envelope and to ordinary indented output for all bounded commands. Concatenate the fragments and parse the complete JSON value. Continuations include `--report-digest` for the entire report; a changed report is rejected rather than mixed with previous fragments. Restart the report traversal at offset zero if it changes. Full JSON and Markdown report exports remain unbounded and are intended for files or human inspection. The detailed `task list` command also remains available; use `run status` for the model's normal workflow.
 
 Human finding decisions, patch approval, and patch application remain separate operations. A verifier must use a new external conversation; use the host's actual session ID and `--session-source host` when available. Self-declared or reused identity leaves verification inconclusive. Scriptorium records the host report but cannot cryptographically prove what the host displayed or read.
 
