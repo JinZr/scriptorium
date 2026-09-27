@@ -392,6 +392,8 @@ def _emit_success(payload: Any, json_output: bool, output_format: str | None) ->
     if output_format == "markdown" and isinstance(payload, str):
         print(payload)
         return
+    if output_format is None and isinstance(value, dict) and value.get("next_command"):
+        value["next_command"] = value["next_command"].replace("scriptorium --json ", "scriptorium ", 1)
     if output_format == "json" or isinstance(value, (dict, list)):
         print(pretty_json(value))
         return
