@@ -73,6 +73,8 @@ def test_benchmark_prepares_external_tasks_and_collects_validated_reviews(tmp_pa
         assert all(item["task"].status.value == "pending" for item in tasks)
         for item in tasks:
             claim = service.claim_task(item["task"].id, "codex", "selected-model", "max", "session-1", "host")
+            assert claim["source_map"]["compiled_pdf"]["documents"] == []
+            assert all(source["source_path"] != "benchmark.tex" for source in claim["source_map"]["sources"])
             asyncio.run(
                 service.submit_task(
                     claim["attempt"].id,

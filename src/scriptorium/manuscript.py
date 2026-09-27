@@ -20,6 +20,7 @@ from .config import ManuscriptConfig
 from .errors import InfrastructureError, StateError
 from .schemas import (
     CompiledPdfAnchor,
+    CompiledPdfDocumentRecord,
     CompiledPdfPageRecord,
     EvidenceAnchorContract,
     EvidenceAnchorMap,
@@ -99,6 +100,7 @@ class BuildResult:
     pdf_path: Path
     log: str
     compiler_inputs: tuple[CompilerInput, ...] | None = None
+    documents: tuple[CompiledPdfDocumentRecord, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -181,6 +183,17 @@ class ManuscriptManager:
             line_count = len(data.decode("utf-8", errors="replace").splitlines())
             sources.append(SourceFile(relative.as_posix(), sha256(data).hexdigest(), line_count))
         return tuple(sources)
+
+    def scan_project_sources(self, snapshot: Path, manuscript: ManuscriptConfig) -> tuple[SourceFile, ...]:
+        roots = [self._normalized_relative(snapshot.resolve(), Path(entry)) for entry in manuscript.entrypoints]
+        if len(set(roots)) != len(roots):
+            raise InfrastructureError("Review document entrypoints must resolve to distinct sources")
+        sources = {
+            source.path: source
+            for entrypoint in manuscript.entrypoints
+            for source in self.scan_sources(snapshot, entrypoint)
+        }
+        return tuple(sources[path] for path in sorted(sources))
 
     def _source_dependencies(
         self, root: Path, relative: Path, graphics_paths: list[Path], bibliography_fallback: Path
@@ -280,6 +293,41 @@ class ManuscriptManager:
             source.path
             for source in sources
             if any(source.path == name or source.path.endswith("/" + name) for name in names)
+        )
+
+    def build_project(self, snapshot: Path, destination: Path, manuscript: ManuscriptConfig) -> BuildResult:
+        if destination.exists():
+            shutil.rmtree(destination)
+        builds = []
+        documents = []
+        with fitz.open() as combined:
+            for index, entrypoint in enumerate(manuscript.entrypoints):
+                workspace = destination / f"document-{index + 1}"
+                shutil.copytree(snapshot, workspace, symlinks=True)
+                try:
+                    build = self.build(workspace, ManuscriptConfig(entrypoint, manuscript.engine))
+                    with fitz.open(build.pdf_path) as document:
+                        documents.append(
+                            CompiledPdfDocumentRecord(
+                                entrypoint=self._normalized_relative(snapshot.resolve(), Path(entrypoint)).as_posix(),
+                                start_page=combined.page_count + 1,
+                                page_count=document.page_count,
+                            )
+                        )
+                        combined.insert_pdf(document)
+                except (InfrastructureError, RuntimeError, ValueError) as exc:
+                    raise InfrastructureError(f"Cannot compile review document {entrypoint}: {exc}") from exc
+                builds.append(build)
+            pdf_path = destination / "manuscript.pdf"
+            if len(builds) == 1:
+                shutil.copy2(builds[0].pdf_path, pdf_path)
+            else:
+                combined.save(pdf_path)
+        return BuildResult(
+            pdf_path=pdf_path,
+            log="\n\n".join(f"Document {item.entrypoint}:\n{build.log}" for item, build in zip(documents, builds)),
+            compiler_inputs=tuple(item for build in builds for item in (build.compiler_inputs or ())),
+            documents=tuple(documents),
         )
 
     def build(self, workspace: Path, manuscript: ManuscriptConfig) -> BuildResult:
@@ -600,6 +648,7 @@ class ManuscriptManager:
         pdf_path: Path,
         anchor_contract: EvidenceAnchorContract,
         navigation: str | None = None,
+        documents: tuple[CompiledPdfDocumentRecord, ...] = (),
     ) -> ManuscriptBundle:
         if destination.exists():
             shutil.rmtree(destination)
@@ -628,6 +677,7 @@ class ManuscriptManager:
             "sources": [asdict(source) for source in sources],
             "pdf_digest": sha256(bundle_pdf.read_bytes()).hexdigest(),
             "pdf_pages": page_count,
+            "documents": [item.model_dump(mode="json") for item in documents],
             "pages": [
                 {
                     "path": page_path.relative_to(destination).as_posix(),
@@ -661,6 +711,7 @@ class ManuscriptManager:
                 source_path=anchor_contract.pdf_page.source_path,
                 read_path=anchor_contract.pdf_page.source_path,
                 page_count=page_count,
+                documents=list(documents),
                 pages=[
                     CompiledPdfPageRecord(
                         page=index,

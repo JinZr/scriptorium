@@ -8,11 +8,58 @@ from scriptorium.schemas import (
     SCHEMA_MODELS,
     Evidence,
     EvidenceAnchorContract,
+    EvidenceAnchorMap,
     evidence_anchor_contract_content,
     evidence_anchor_contract_digest,
     output_schema,
 )
 from scriptorium.storage import SCHEMA_VERSION
+
+
+@pytest.mark.parametrize(
+    "documents",
+    [
+        [{"entrypoint": "main.tex", "start_page": 2, "page_count": 2}],
+        [{"entrypoint": "main.tex", "start_page": 1, "page_count": 1}],
+        [{"entrypoint": "main.tex", "start_page": 1, "page_count": 4}],
+        [{"entrypoint": "missing.tex", "start_page": 1, "page_count": 3}],
+        [
+            {"entrypoint": "main.tex", "start_page": 1, "page_count": 1},
+            {"entrypoint": "main.tex", "start_page": 2, "page_count": 2},
+        ],
+        [
+            {"entrypoint": "main.tex", "start_page": 1, "page_count": 2},
+            {"entrypoint": "supplement.tex", "start_page": 2, "page_count": 1},
+        ],
+    ],
+)
+def test_document_index_rejects_missing_sources_duplicates_gaps_and_overlaps(documents):
+    with pytest.raises(ValidationError, match="document"):
+        EvidenceAnchorMap.model_validate(
+            {
+                "contract_digest": "a" * 64,
+                "sources": [
+                    {
+                        "source_path": name,
+                        "read_path": f"sources/{name}",
+                        "source_digest": "b" * 64,
+                        "text_anchorable": True,
+                        "line_count": 1,
+                    }
+                    for name in ("main.tex", "supplement.tex")
+                ],
+                "compiled_pdf": {
+                    "source_path": "manuscript.pdf",
+                    "read_path": "manuscript.pdf",
+                    "page_count": 3,
+                    "pages": [
+                        {"page": number, "read_path": f"pages/page-{number:04d}.png", "page_digest": "c" * 64}
+                        for number in range(1, 4)
+                    ],
+                    "documents": documents,
+                },
+            }
+        )
 
 
 def test_anchor_contract_is_content_addressed_without_a_version_field() -> None:

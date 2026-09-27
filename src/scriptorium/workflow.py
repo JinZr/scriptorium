@@ -110,7 +110,7 @@ class Armarius:
         self.manuscript.create_snapshot(revision, snapshot)
         project = load_project_config(snapshot)
         validate_ready(project, profile)
-        sources = self.manuscript.scan_sources(snapshot, project.manuscript.main)
+        sources = self.manuscript.scan_project_sources(snapshot, project.manuscript)
         frozen_config = self._freeze_config(
             project,
             profile,
@@ -355,6 +355,7 @@ class Armarius:
             build.pdf_path,
             self.require_evidence_anchor_contract(run.id),
             self._navigation_for_run(run),
+            build.documents,
         )
         self._record_file(snapshot / "scriptorium.toml", "application/toml")
         for source in sources:
@@ -700,7 +701,7 @@ class Armarius:
                 self._run_dir(run.id) / "build" / f"verification-{patch.id}",
                 self._manuscript_config(run),
             )
-            patched_sources = self.manuscript.scan_sources(patched, self._manuscript_config(run).main)
+            patched_sources = self.manuscript.scan_project_sources(patched, self._manuscript_config(run))
             navigation = (
                 self.manuscript.create_navigation(patched, patched_sources)
                 if "navigation" in run.frozen_config
@@ -714,6 +715,7 @@ class Armarius:
                 build.pdf_path,
                 anchor_contract,
                 navigation,
+                build.documents,
             )
         if "navigation" in run.frozen_config:
             self._record_file(verification_workspace / "navigation.json", "application/json")
@@ -1317,6 +1319,10 @@ class Armarius:
                 raise ValueError("source map pages mismatch")
             if files["manuscript.pdf"]["digest"] != manifest["pdf_digest"]:
                 raise ValueError("PDF digest mismatch")
+            if [item.model_dump(mode="json") for item in anchor_map.compiled_pdf.documents] != manifest.get(
+                "documents", []
+            ):
+                raise ValueError("source map documents mismatch")
             for source in anchor_map.sources:
                 if files[source.read_path]["digest"] != source.source_digest:
                     raise ValueError("source digest mismatch")
@@ -2234,6 +2240,7 @@ class Armarius:
                         "read_path": contract.pdf_page.source_path,
                         "page_count": pdf_pages,
                         "pages": page_anchor_records,
+                        "documents": manifest.get("documents", []),
                     },
                 }
             )
@@ -2275,11 +2282,8 @@ class Armarius:
         sources: tuple[SourceFile, ...] | None = None,
     ) -> BuildResult:
         if sources is None:
-            sources = self.manuscript.scan_sources(source, manuscript.main)
-        if destination.exists():
-            shutil.rmtree(destination)
-        shutil.copytree(source, destination, symlinks=True)
-        build = self.manuscript.build(destination, manuscript)
+            sources = self.manuscript.scan_project_sources(source, manuscript)
+        build = self.manuscript.build_project(source, destination, manuscript)
         self._record_text(build.log, "text/plain; charset=utf-8")
         self.manuscript.validate_build_sources(build, sources)
         return build

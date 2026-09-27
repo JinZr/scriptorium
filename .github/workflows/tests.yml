@@ -40,4 +40,4 @@ jobs:
           biber --version
           repstopdf --version
           gs --version
-          python -m pytest -q tests/manuscript/test_dependencies_compile.py tests/manuscript/test_compiler_inputs.py tests/manuscript/test_build_helpers.py tests/external/test_contract.py
+          python -m pytest -q tests/manuscript/test_dependencies_compile.py tests/manuscript/test_compiler_inputs.py tests/manuscript/test_build_helpers.py tests/manuscript/test_review_materials.py tests/external/test_contract.py

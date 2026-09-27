@@ -236,14 +236,14 @@ class ScriptoriumService:
                 )
             else:
                 try:
-                    sources = self.manuscript.scan_sources(snapshot, project.manuscript.main)
+                    sources = self.manuscript.scan_project_sources(snapshot, project.manuscript)
                 except (InfrastructureError, OSError, UnicodeError) as exc:
                     check("manuscript_sources", False, str(exc), "infrastructure")
                 else:
                     check(
                         "manuscript_sources",
                         True,
-                        f"resolved {len(sources)} source files from {project.manuscript.main}",
+                        f"resolved {len(sources)} source files from {', '.join(project.manuscript.entrypoints)}",
                     )
 
             compile_dependency = None
@@ -263,8 +263,7 @@ class ScriptoriumService:
                 build_workspace = temporary_root / "build"
                 try:
                     # Compile a copy so generated LaTeX files cannot mutate the frozen snapshot.
-                    shutil.copytree(snapshot, build_workspace, symlinks=True)
-                    build = self.manuscript.build(build_workspace, project.manuscript)
+                    build = self.manuscript.build_project(snapshot, build_workspace, project.manuscript)
                     self.manuscript.validate_build_sources(build, sources)
                     if not build.pdf_path.is_file():
                         raise InfrastructureError(f"LaTeX build did not create {build.pdf_path.name}")
@@ -274,7 +273,8 @@ class ScriptoriumService:
                     check(
                         "manuscript_compile",
                         True,
-                        f"compiled {project.manuscript.main} from {frozen_revision.commit_sha}; build-only inputs: "
+                        f"compiled {', '.join(project.manuscript.entrypoints)} "
+                        f"from {frozen_revision.commit_sha}; build-only inputs: "
                         + (
                             ", ".join(item.path for item in (build.compiler_inputs or ()) if item.kind == "build")
                             or "none"
