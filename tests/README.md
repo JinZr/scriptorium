@@ -10,3 +10,8 @@ Tests live beside the behavior they own. Keep builders and fakes inside their ow
 - `external_review/` tests sealed CLI report collection, fixed-input provenance, anonymous candidate packaging and external judge validation. Synthetic judgments are contract fixtures, not paid model or scientific-quality evidence.
 
 The small retrieval fixture under `manuscript/fixtures/` annotates clean text, a supplementary counterexample, and a cross-section contradiction. It is an offline reachability fixture, not proof that a paid model detected those issues. Credentialed model checks require explicit opt-in and are reported separately from default CI.
+
+`manuscript/test_review_materials.py` covers declared independent supplements, isolated compilation and frozen
+document/page ranges, including a real two-document LaTeX build in the LaTeX CI job.
+`workflow/test_review_materials.py` covers cross-process document retrieval, corrupt supplemental artifacts,
+failed builds and recovery, and supplementary edits through approval, verification and application gates.
