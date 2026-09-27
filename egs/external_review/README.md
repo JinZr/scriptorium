@@ -106,6 +106,8 @@ This is a candidate-level assessment, not a new exhaustive review or an audit of
 `judging/mapping.json` stays private. It maps each candidate to its original finding/attempt/trial and retains
 all trial statuses. The same run cannot masquerade as multiple trials. Exact duplicate candidate content on
 identical material is combined while preserving every origin; semantic duplicates are left for judges to mark.
+Origins include core `finding.duplicate` events from later attempts and roles. Those event origins retain
+their task, attempt, role and event IDs; they do not inherit the original finding's confidence or severity.
 The seed and mapping preserve ordering provenance. Free-text style or self-identification may still reveal a
 generator; structural blinding cannot guarantee anonymity. The host must restrict the judge's workspace:
 instructions do not isolate arbitrary host filesystem tools.

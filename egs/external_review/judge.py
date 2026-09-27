@@ -109,12 +109,24 @@ def blind(collections, output, seed):
                     "case": identity[0],
                     "trial": identity[1],
                     "finding_id": finding["id"],
+                    "task_id": finding["task_id"],
                     "attempt_id": finding["attempt_id"],
                     "role": finding["role"],
                     "severity": finding["severity"],
                     "confidence": finding["confidence"],
                 }
             )
+            for event in report["events"]:
+                if event["event_type"] == "finding.duplicate" and event["entity_id"] == finding["id"]:
+                    candidate["origins"].append(
+                        {
+                            "case": identity[0],
+                            "trial": identity[1],
+                            "finding_id": finding["id"],
+                            "duplicate_event_id": event["id"],
+                            **event["payload"],
+                        }
+                    )
     order = sorted(candidates)
     random.Random(seed).shuffle(order)
     material_ids = {digest: f"M{number:03d}" for number, digest in enumerate(sorted(materials), 1)}
