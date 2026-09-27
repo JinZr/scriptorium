@@ -45,9 +45,14 @@ def tool_command(*arguments):
 
 def task_view(context, part, offset):
     attempt, task = context["attempt"], context["task"]
+    digests = {
+        "prompt": attempt.prompt_digest,
+        "schema": attempt.schema_digest,
+        "source-map": context["source_map_digest"],
+    }
     if part is None:
         if offset != 0:
-            raise ConfigurationError("--offset requires --part prompt or --part schema")
+            raise ConfigurationError("--offset requires --part")
         return require_bounded(
             {
                 "run_id": context["run_id"],
@@ -67,17 +72,21 @@ def task_view(context, part, offset):
                 "navigation_digest": context["navigation_digest"],
                 "inputs": {
                     name: {
-                        "digest": getattr(attempt, f"{name}_digest"),
+                        "digest": digest,
                         "command": tool_command("show", attempt.id, "--part", name),
                     }
-                    for name in ("prompt", "schema")
+                    for name, digest in digests.items()
                 },
-                "source_map_command": tool_command("read", attempt.id, "--path", "source-map.json"),
+                "source_map_command": tool_command("show", attempt.id, "--part", "source-map"),
             }
         )
-    if part not in {"prompt", "schema"}:
-        raise ConfigurationError("part must be prompt or schema")
-    content = context["prompt"] if part == "prompt" else canonical_json(context["schema"])
+    if part not in digests:
+        raise ConfigurationError("part must be prompt, schema, or source-map")
+    content = {
+        "prompt": context["prompt"],
+        "schema": canonical_json(context["schema"]),
+        "source-map": context["source_map_text"],
+    }[part]
     if not 0 <= offset <= len(content):
         raise ConfigurationError("offset is outside the frozen input")
 
@@ -87,7 +96,7 @@ def task_view(context, part, offset):
             "attempt_id": attempt.id,
             "input_digest": context["input_digest"],
             "part": part,
-            "digest": getattr(attempt, f"{part}_digest"),
+            "digest": digests[part],
             "offset": offset,
             "total_chars": len(content),
             "text": content[offset:end],
