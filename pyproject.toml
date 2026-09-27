@@ -58,7 +58,7 @@ markers = [
 max_complexity = 20
 statement_warning = 80
 paths = ["src/scriptorium", "utils/check_complexity.py"]
-advisory_paths = ["egs/peerreviewbench"]
+advisory_paths = ["egs/peerreviewbench", "egs/external_review"]
 
 [[tool.scriptorium_complexity.debt]]
 path = "src/scriptorium/service.py"
