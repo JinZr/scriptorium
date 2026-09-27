@@ -11,7 +11,7 @@ scriptorium --json task claim TASK_ID --client codex --model MODEL --effort EFFO
 scriptorium --json task show ATTEMPT_ID
 ```
 
-A claimed attempt remains active when the CLI exits. In a `task show` JSON response, `data.schema` is the frozen output schema, `data.input_digest` is the digest to submit, and `data.source_map.sources` supplies text evidence paths and digests. Inspect the schema's required fields and the frozen prompt before writing an output. The attempt's input digest must accompany submission:
+A claimed attempt remains active when the CLI exits. Claim and plain `task show` return a compact overview: `data.input_digest` is the digest to submit, and `data.inputs.prompt.command` and `data.inputs.schema.command` retrieve the frozen inputs. Run each command and follow its `data.next_command` until null. Concatenate each part's `data.text` fragments in `data.offset` order; offsets count Unicode characters, not UTF-8 bytes. Parse the complete schema text as JSON and inspect its required fields before writing an output. Each part includes its immutable digest and total character count. `task show ATTEMPT_ID --part prompt|schema --offset N` also accepts an explicit continuation offset. Read `source-map.json` using `task read` for the `sources` array of evidence paths and digests. The attempt's input digest must accompany submission:
 
 ```bash
 scriptorium --json task search ATTEMPT_ID --query phrase --cursor 0 --limit 20
@@ -20,11 +20,15 @@ scriptorium --json task page ATTEMPT_ID --number 1
 scriptorium --json task submit ATTEMPT_ID --input-digest DIGEST --file answer.json
 ```
 
-`task read` supports `manifest.json`, `navigation.json`, `source-map.json`, and text sources named in the source map (either `source_path` or `read_path`). It returns at most 8,000 characters per call, with `next_line` and `next_offset` when a read was truncated. `task search` searches those frozen text sources and metadata files, with `next_cursor` for further matches. `task page` returns the exact rendered image path and digest; the host must actually open the image for a visual review.
+`task read` supports `manifest.json`, `navigation.json`, `source-map.json`, and text sources named in the source map (either `source_path` or `read_path`). `--max-chars` is a ceiling of at most 8,000 characters, not a promised chunk size. Successful JSON responses for claim, show, read, search, and page are limited to 7,000 UTF-8 bytes including JSON escaping, metadata, envelope, and newline. Metadata that cannot fit fails explicitly. This bound leaves room under the observed host truncation threshold; it cannot guarantee delivery by every host. Other responses, including reports and submission diagnostics, are not covered by this bound.
+
+Read returns `next_line`, `next_offset`, and a shell-quoted `next_command` when more text remains. Execute that command unchanged (or use the same arguments with your installed CLI entrypoint). A nonzero offset continues the same line; incrementing the line skips its unread tail. Search returns `total_matches`, `next_cursor`, and `next_command`; the byte limit may reduce the number of returned matches below `--limit`. Follow continuations until null when traversing an entire file or search. Access events record only the returned fragments and matches. `task page` returns the exact rendered image path and digest; the host must actually open the image for a visual review.
+
+External review sessions have no wall-clock deadline by default. For AGY print-mode validation, use `--print-timeout 0` and wait without a subprocess timeout. A host process exit or a success message is not review completion: inspect the accepted submission receipt and `task list`, continue accepted partial scope through `run continue`, and stop at an explicit human gate. If the host disconnects, inspect the durable attempt and reconnect to the same session before deciding whether explicit abandonment is needed. Paid-call and correction allowances remain separate from elapsed time; `--help` calls are not material retrievals.
 
 `task submit --file` accepts UTF-8 JSON up to 2 MB from a file or stdin. The CLI rejects larger input before decoding or passing it to the workflow.
 
-For a new review task, include `scope` alongside `summary` and `findings`. This minimal partial output illustrates `scope` only; a new `substantive_review` also requires `claim_checks`. See the [shared skill's full JSON example](../skills/scriptorium/SKILL.md#example-substantive-review-output) for a finding, its exact text anchor, and its zero-based claim-check link. The task's frozen `data.schema` takes precedence over either example:
+For a new review task, include `scope` alongside `summary` and `findings`. This minimal partial output illustrates `scope` only; a new `substantive_review` also requires `claim_checks`. See the [shared skill's full JSON example](../skills/scriptorium/SKILL.md#example-substantive-review-output) for a finding, its exact text anchor, and its zero-based claim-check link. The task's reconstructed frozen schema takes precedence over either example:
 
 ```json
 {
