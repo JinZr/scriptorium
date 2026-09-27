@@ -15,19 +15,24 @@ from ._support import PdfBuildingManuscriptManager, make_repository
 
 
 @pytest.fixture
-def review_cli(tmp_path, monkeypatch, capsys):
+def review_cli(tmp_path, monkeypatch, capsys, request):
     repo = make_repository(tmp_path, roles=("substantive_review",))
+    source_path = getattr(request, "param", "main.tex")
+    if source_path != "main.tex":
+        (repo / "main.tex").rename(repo / source_path)
+        config = repo / "scriptorium.toml"
+        config.write_text(config.read_text().replace('main = "main.tex"', f'main = "{source_path}"'))
     text = (
         "\\documentclass{article}\n\\begin{document}\n"
         + "% "
-        + "实验'needle \"\\value\t🧬 " * 300
+        + "实验'needle -needle --json --help \"\\value\t🧬 " * 300
         + "counterevidence at the tail\n"
         + "\n" * 120
         + ('% "\\value 🧬\t实验\n' * 90)
         + "\\end{document}\n"
     )
-    (repo / "main.tex").write_text(text, encoding="utf-8")
-    subprocess.run(["git", "-C", str(repo), "add", "main.tex"], check=True)
+    (repo / source_path).write_text(text, encoding="utf-8")
+    subprocess.run(["git", "-C", str(repo), "add", "--all"], check=True)
     subprocess.run(["git", "-C", str(repo), "commit", "-qm", "Long Unicode source"], check=True)
     with ScriptoriumService(repo, manuscript_manager=PdfBuildingManuscriptManager(repo)) as service:
         run = asyncio.run(service.start_run("HEAD", "quick"))["run"]
@@ -207,6 +212,47 @@ def test_cli_search_byte_pages_preserve_all_matches_and_log_only_returns(review_
     for access, chunk in zip(accesses, chunks):
         assert access["matches"] == [{k: m[k] for k in ("path", "line", "source_digest")} for m in chunk["matches"]]
         assert access["next_cursor"] == chunk["next_cursor"]
+
+
+@pytest.mark.parametrize("review_cli", ["-main.tex"], indirect=True)
+def test_read_continuation_accepts_an_option_like_source_path(review_cli):
+    service, task, command, text = review_cli
+    context = service.claim_task(task.id, "codex", "model", "high", "session", "host")
+    arguments = ["--json", "task", "read", context["attempt"].id, "--path=-main.tex", "--max-lines", "100"]
+    returned = {}
+    while arguments:
+        response = command(arguments)
+        for piece in response["lines"]:
+            assert piece["offset"] == len(returned.setdefault(piece["line"], ""))
+            returned[piece["line"]] += piece["text"]
+        arguments = shlex.split(response["next_command"])[1:] if response["next_command"] else None
+    assert list(returned.values()) == text.splitlines()
+
+
+@pytest.mark.parametrize("review_cli", ["-main.tex"], indirect=True)
+@pytest.mark.parametrize("query", ["-needle", "--json", "--help"])
+def test_search_continuation_accepts_option_like_query_and_path(review_cli, query):
+    service, task, command, text = review_cli
+    context = service.claim_task(task.id, "codex", "model", "high", "session", "host")
+    arguments = [
+        "--json",
+        "task",
+        "search",
+        context["attempt"].id,
+        f"--query={query}",
+        "--path=-main.tex",
+        "--limit",
+        "50",
+    ]
+    matches = []
+    while arguments:
+        response = command(arguments)
+        assert response["total_matches"] == 300
+        matches.extend(response["matches"])
+        arguments = shlex.split(response["next_command"])[1:] if response["next_command"] else None
+    line = text.splitlines()[2]
+    assert [m["column"] for m in matches] == [i + 1 for i in range(len(line)) if line.startswith(query, i)]
+    assert {m["path"] for m in matches} == {"-main.tex"}
 
 
 @pytest.mark.parametrize("part,offset", [(None, 1), ("prompt", -1), ("schema", 10_000_000)])

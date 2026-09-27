@@ -123,8 +123,7 @@ def bound_read(response, attempt_id, max_lines, max_chars):
                 tool_command(
                     "read",
                     attempt_id,
-                    "--path",
-                    response["path"],
+                    f"--path={response['path']}",
                     "--start-line",
                     line,
                     "--offset",
@@ -166,9 +165,9 @@ def bound_read(response, attempt_id, max_lines, max_chars):
 def bound_search(matches, total, attempt_id, query, path, cursor, limit):
     def build(count):
         next_cursor = cursor + count if cursor + count < total else None
-        arguments = ["search", attempt_id, "--query", query, "--cursor", next_cursor, "--limit", limit]
+        arguments = ["search", attempt_id, f"--query={query}", "--cursor", next_cursor, "--limit", limit]
         if path is not None:
-            arguments.extend(["--path", path])
+            arguments.append(f"--path={path}")
         return {
             "matches": matches[:count],
             "total_matches": total,
