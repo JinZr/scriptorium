@@ -1,12 +1,13 @@
 import asyncio
 import json
+import shutil
 import subprocess
 
 import pytest
 
 from egs.external_review import judge as evaluator
 from egs.external_review.collect import collect
-from egs.external_review.files import read_json, verify_seal
+from egs.external_review.files import read_json, seal, verify_seal
 from egs.external_review.judge import blind, summarize
 from scriptorium.service import ScriptoriumService
 
@@ -201,6 +202,60 @@ def test_packet_material_changes_rejected_and_outputs_not_overwritten(collection
     material.write_text("changed")
     with pytest.raises(ValueError, match="Collection has changed"):
         summarize(packet, [path], tmp_path / "results")
+
+
+@pytest.mark.parametrize("reseal", [False, True])
+def test_collection_changed_during_copy_cannot_publish_packet(collections, tmp_path, monkeypatch, reseal):
+    collection = tmp_path / "collection"
+    shutil.copytree(collections[0], collection)
+    original = evaluator.shutil.copytree
+
+    def changing_copy(source, destination, *args, **kwargs):
+        if source == collection / "bundle":
+            (source / "sources/main.tex").write_text("Changed while preparing packet")
+            if reseal:
+                (collection / "seal.json").unlink()
+                seal(collection)
+        return original(source, destination, *args, **kwargs)
+
+    monkeypatch.setattr(evaluator.shutil, "copytree", changing_copy)
+    with pytest.raises(ValueError, match="Collection has changed"):
+        blind([collection], tmp_path / "packet", 13)
+    assert not (tmp_path / "packet").exists()
+
+
+@pytest.mark.parametrize("reseal", [False, True])
+def test_packet_changed_during_summary_cannot_publish_results(collections, tmp_path, monkeypatch, reseal):
+    packet = blind(collections[:1], tmp_path / "packet", 13)
+    original = evaluator.read_json
+
+    def changing_read(path):
+        value = original(path)
+        if path == packet / "mapping.json":
+            changed = json.loads(json.dumps(value))
+            changed["trials"][0]["trial"] = "changed-during-summary"
+            save(path, changed)
+            if reseal:
+                (packet / "seal.json").unlink()
+                seal(packet)
+        return value
+
+    monkeypatch.setattr(evaluator, "read_json", changing_read)
+    with pytest.raises(ValueError, match="Collection has changed"):
+        summarize(packet, [], tmp_path / "results")
+    assert not (tmp_path / "results").exists()
+
+
+def test_summary_binds_private_mapping_when_public_packets_match(collections, tmp_path):
+    packets = [
+        blind([collection], tmp_path / f"packet-{number}", 13) for number, collection in enumerate(collections[:2])
+    ]
+    assert verify_seal(packets[0] / "public") == verify_seal(packets[1] / "public")
+    results = [summarize(packet, [], tmp_path / f"results-{number}") for number, packet in enumerate(packets)]
+    assert results[0]["packet_digest"] == results[1]["packet_digest"]
+    assert results[0]["packet_seal_digest"] != results[1]["packet_seal_digest"]
+    for packet, result in zip(packets, results):
+        assert result["packet_seal_digest"] == verify_seal(packet)
 
 
 def test_outputs_cannot_be_nested_in_sealed_inputs(collections, tmp_path):
