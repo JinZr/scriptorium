@@ -507,7 +507,7 @@ def test_retrieval_rejects_corrupt_bundle_index(tmp_path: Path) -> None:
             service.read_task(claim["attempt"].id, "supplement.tex", 1, 1, 0, 8000)
 
 
-def test_read_prefers_canonical_source_path_over_colliding_bundle_alias(tmp_path: Path) -> None:
+def test_read_preserves_both_sources_with_colliding_bundle_alias(tmp_path: Path) -> None:
     repo = _repo(tmp_path / "paper")
     nested = repo / "sources" / "supplement.tex"
     nested.parent.mkdir()
@@ -528,9 +528,12 @@ def test_read_prefers_canonical_source_path_over_colliding_bundle_alias(tmp_path
     _, task_id = _start(repo)
     with ScriptoriumService(repo) as service:
         attempt = service.claim_task(task_id, "codex", "model", "max", "session", "host")["attempt"]
-        assert service.read_task(attempt.id, "sources/supplement.tex", 1, 1, 0, 8000)["lines"][0]["text"] == (
-            "Canonical nested source."
-        )
+        root = service.read_task(attempt.id, "sources/supplement.tex", 1, 1, 0, 8000)
+        assert root["source_path"] == "supplement.tex"
+        assert root["lines"][0]["text"] == "The supplement explains that result."
+        nested = service.read_task(attempt.id, "sources/sources/supplement.tex", 1, 1, 0, 8000)
+        assert nested["source_path"] == "sources/supplement.tex"
+        assert nested["lines"][0]["text"] == "Canonical nested source."
 
 
 def test_frozen_navigation_damage_blocks_claim_before_any_attempt(tmp_path: Path) -> None:
