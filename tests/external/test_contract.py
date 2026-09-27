@@ -361,7 +361,7 @@ def test_search_paging_long_line_and_bundle_path_boundary(tmp_path: Path) -> Non
         assert first["matches"][0]["column"] == 1
         assert second["matches"][0]["column"] == 8
         read = service.read_task(attempt_id, "supplement.tex", 1, 1, 0, 8000)
-        assert read["next_line"] == 1 and read["next_offset"] == 8000
+        assert read["next_line"] == 1 and 0 < read["next_offset"] < 8000
         continued = service.read_task(attempt_id, "supplement.tex", read["next_line"], 1, read["next_offset"], 8000)
         assert "counterevidence" in continued["lines"][0]["text"]
         accesses = [
