@@ -108,6 +108,52 @@ def test_multiple_judges_preserve_disagreement_and_original_outputs(collections,
     verify_seal(tmp_path / "results")
 
 
+def test_duplicate_event_origins_preserve_continuation_and_other_role(tmp_path):
+    root = project(tmp_path)
+    configuration = root / "scriptorium.toml"
+    configuration.write_text(configuration.read_text().replace('["copyedit"]', '["copyedit", "consistency"]'))
+    subprocess.run(["git", "-C", str(root), "add", "scriptorium.toml"], check=True)
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(root),
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.test",
+            "commit",
+            "-qm",
+            "Two roles",
+        ],
+        check=True,
+    )
+    run_id, task_id = start(root)
+    with ScriptoriumService(root) as service:
+        first = submit(service, task_id, completion="partial")
+        asyncio.run(service.continue_review(run_id, task_id))
+        continued = submit(service, task_id, session="continued")
+        other_id = next(item["task"].id for item in service.list_tasks(run_id)["tasks"] if item["task"].id != task_id)
+        other = submit(service, other_id, session="other-role")
+    collection = collect(root, run_id, tmp_path / "collection", "paper", "multi-role")
+    packet = blind([collection], tmp_path / "packet", 13)
+    mapping = read_json(packet / "mapping.json")
+    assert len(mapping["candidates"]) == 1
+    origins = mapping["candidates"]["C0001"]
+    assert [origin["attempt_id"] for origin in origins] == [
+        context["attempt"].id for context in (first, continued, other)
+    ]
+    assert [origin["role"] for origin in origins] == ["copyedit", "copyedit", "consistency"]
+    events = [
+        event for event in read_json(collection / "report.json")["events"] if event["event_type"] == "finding.duplicate"
+    ]
+    assert [origin["duplicate_event_id"] for origin in origins[1:]] == [event["id"] for event in events]
+    assert all("confidence" not in origin and "severity" not in origin for origin in origins[1:])
+    assert {origin["finding_id"] for origin in origins} == {origins[0]["finding_id"]}
+    result = summarize(packet, [], tmp_path / "results")
+    assert result["trials"][0]["candidate_count"] == 1
+
+
 @pytest.mark.parametrize(
     "bad",
     ["digest", "missing", "duplicate", "unknown", "self_duplicate", "reused_session", "negative_cost", "nan_cost"],
