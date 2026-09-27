@@ -16,17 +16,20 @@ from scriptorium.tool_output import MAX_TOOL_RESPONSE_BYTES, REPORT_PARTS, succe
 from ._support import PdfBuildingManuscriptManager, claim, make_repository, prepare_verification, review_finding, submit
 
 
-def test_bounded_status_and_report_parts_reconstruct_full_report(tmp_path, monkeypatch, capsys):
+@pytest.mark.parametrize("json_output", [True, False], ids=["json", "plain"])
+def test_bounded_status_and_report_parts_reconstruct_full_report(tmp_path, monkeypatch, capsys, json_output):
     repo = make_repository(tmp_path, roles=("substantive_review",))
     with ScriptoriumService(repo, manuscript_manager=PdfBuildingManuscriptManager(repo)) as service:
         monkeypatch.chdir(repo)
         monkeypatch.setattr(cli, "_build_service", lambda _: service)
 
         def command(arguments):
-            assert cli.main(["--json", *arguments]) == 0
+            arguments = [argument for argument in arguments if argument != "--json"]
+            assert cli.main((["--json"] if json_output else []) + arguments) == 0
             raw = capsys.readouterr().out
             assert len(raw.encode()) <= MAX_TOOL_RESPONSE_BYTES
-            return json.loads(raw)["data"]
+            value = json.loads(raw)
+            return value["data"] if json_output else value
 
         overview = command(["run", "start", "--profile", "quick"])
         run_id = overview["run"]["id"]

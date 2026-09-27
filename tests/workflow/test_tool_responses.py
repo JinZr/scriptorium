@@ -41,18 +41,21 @@ def review_cli(tmp_path, monkeypatch, capsys, request):
         monkeypatch.setattr(cli, "_build_service", lambda _: service)
         capsys.readouterr()
 
-        def command(arguments):
-            assert cli.main(arguments) == 0
+        def command(arguments, json_output=True):
+            arguments = [argument for argument in arguments if argument != "--json"]
+            assert cli.main((["--json"] if json_output else []) + arguments) == 0
             captured = capsys.readouterr()
             assert not captured.err
             assert len(captured.out.encode("utf-8")) <= MAX_TOOL_RESPONSE_BYTES
-            return json.loads(captured.out)["data"]
+            value = json.loads(captured.out)
+            return value["data"] if json_output else value
 
         yield service, task, command, text
 
 
 @pytest.mark.parametrize("client", ["codex", "claude_code", "antigravity"])
-def test_cli_input_fragments_reconstruct_frozen_artifacts(review_cli, client):
+@pytest.mark.parametrize("json_output", [True, False], ids=["json", "plain"])
+def test_cli_input_fragments_reconstruct_frozen_artifacts(review_cli, client, json_output):
     service, task, command, _ = review_cli
     arguments = [
         "--json",
@@ -70,8 +73,8 @@ def test_cli_input_fragments_reconstruct_frozen_artifacts(review_cli, client):
         "--session-source",
         "host",
     ]
-    overview = command(arguments)
-    assert command(arguments)["attempt"]["id"] == overview["attempt"]["id"]
+    overview = command(arguments, json_output)
+    assert command(arguments, json_output)["attempt"]["id"] == overview["attempt"]["id"]
     assert "prompt" not in overview and "schema" not in overview and "source_map" not in overview
     assert overview["attempt"]["external_client"] == client
     for part in ("prompt", "schema"):
@@ -79,7 +82,7 @@ def test_cli_input_fragments_reconstruct_frozen_artifacts(review_cli, client):
         text = ""
         chunks = []
         while next_command:
-            response = command(shlex.split(next_command)[1:])
+            response = command(shlex.split(next_command)[1:], json_output)
             assert response["offset"] == len(text)
             assert response["input_digest"] == overview["input_digest"]
             assert response["part"] == part
@@ -149,7 +152,8 @@ def test_terminal_attempt_keeps_bounded_source_map_inspection(review_cli, status
         service.read_task(attempt_id, "source-map.json", 1, 40, 0, 6000)
 
 
-def test_cli_read_continuations_preserve_every_character_and_logged_range(review_cli):
+@pytest.mark.parametrize("json_output", [True, False], ids=["json", "plain"])
+def test_cli_read_continuations_preserve_every_character_and_logged_range(review_cli, json_output):
     service, task, command, text = review_cli
     context = service.claim_task(task.id, "antigravity", "model", "high", "session", "host")
     next_command = (
@@ -158,7 +162,7 @@ def test_cli_read_continuations_preserve_every_character_and_logged_range(review
     returned = {}
     chunks = []
     while next_command:
-        response = command(shlex.split(next_command)[1:])
+        response = command(shlex.split(next_command)[1:], json_output)
         for piece in response["lines"]:
             assert piece["offset"] == len(returned.setdefault(piece["line"], ""))
             returned[piece["line"]] += piece["text"]
@@ -177,7 +181,8 @@ def test_cli_read_continuations_preserve_every_character_and_logged_range(review
         assert access["next_offset"] == chunk["next_offset"]
 
 
-def test_cli_search_byte_pages_preserve_all_matches_and_log_only_returns(review_cli):
+@pytest.mark.parametrize("json_output", [True, False], ids=["json", "plain"])
+def test_cli_search_byte_pages_preserve_all_matches_and_log_only_returns(review_cli, json_output):
     service, task, command, text = review_cli
     context = service.claim_task(task.id, "antigravity", "model", "high", "session", "host")
     query = "实验'needle"
@@ -196,7 +201,7 @@ def test_cli_search_byte_pages_preserve_all_matches_and_log_only_returns(review_
     matches = []
     chunks = []
     while arguments:
-        response = command(arguments)
+        response = command(arguments, json_output)
         assert response["total_matches"] == 300
         assert response["matches"]
         matches.extend(response["matches"])
