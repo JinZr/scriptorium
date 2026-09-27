@@ -583,6 +583,9 @@ class ScriptoriumService:
             read_path = bundle.workspace / name
             search_items.append((name, read_path, files[name]["digest"]))
         if path is not None:
+            source_paths = {item.read_path: item.source_path for item in sources}
+            source_paths.update((item.source_path, item.source_path) for item in sources)
+            path = source_paths.get(path, path)
             search_items = [item for item in search_items if item[0] == path]
             if not search_items:
                 raise ConfigurationError("path is not a text source in the frozen bundle")
