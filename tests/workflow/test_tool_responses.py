@@ -7,7 +7,7 @@ import subprocess
 import pytest
 
 from scriptorium import cli
-from scriptorium.errors import ConfigurationError
+from scriptorium.errors import ConfigurationError, StateError
 from scriptorium.service import ScriptoriumService
 from scriptorium.tool_output import MAX_TOOL_RESPONSE_BYTES, bound_read, bound_search
 
@@ -96,6 +96,52 @@ def test_cli_input_fragments_reconstruct_frozen_artifacts(review_cli, client):
         for event, chunk in zip(events, chunks):
             assert event["start_offset"] == chunk["offset"]
             assert event["end_offset"] == chunk["offset"] + len(chunk["text"])
+
+
+@pytest.mark.parametrize("status", ["completed", "failed", "interrupted"])
+def test_terminal_attempt_keeps_bounded_source_map_inspection(review_cli, status):
+    service, task, command, _ = review_cli
+    context = service.claim_task(task.id, "codex", "model", "high", "session", "host")
+    attempt_id = context["attempt"].id
+    if status == "interrupted":
+        service.cancel_run(task.run_id, "Stop review")
+    else:
+        output = {
+            "summary": "Partial check.",
+            "findings": [],
+            "claim_checks": [],
+            "scope": {"completion": "partial", "checked": [], "outstanding": [], "limitations": []},
+        }
+        asyncio.run(
+            service.submit_task(
+                attempt_id, context["input_digest"], json.dumps(output) if status == "completed" else "{}"
+            )
+        )
+    before = (
+        service.database.get_attempt(attempt_id),
+        service.database.get_task(task.id),
+        service.database.get_run(task.run_id),
+    )
+    assert before[0].status.value == status
+    overview = command(["--json", "task", "show", attempt_id])
+    next_command = overview["source_map_command"]
+    text = ""
+    while next_command:
+        response = command(shlex.split(next_command)[1:])
+        assert response["offset"] == len(text)
+        assert response["digest"] == overview["inputs"]["source-map"]["digest"]
+        text += response["text"]
+        next_command = response["next_command"]
+    assert text == context["source_map_text"]
+    assert sha256(text.encode()).hexdigest() == context["source_map_digest"]
+    assert json.loads(text) == context["source_map"]
+    assert before == (
+        service.database.get_attempt(attempt_id),
+        service.database.get_task(task.id),
+        service.database.get_run(task.run_id),
+    )
+    with pytest.raises(StateError, match="active attempt"):
+        service.read_task(attempt_id, "source-map.json", 1, 40, 0, 6000)
 
 
 def test_cli_read_continuations_preserve_every_character_and_logged_range(review_cli):

@@ -89,7 +89,9 @@ def build_parser() -> argparse.ArgumentParser:
     claim_parser.add_argument("--session-source", choices=("host", "declared"), required=True)
     show_parser = task_commands.add_parser("show")
     show_parser.add_argument("attempt_id")
-    show_parser.add_argument("--part", choices=("prompt", "schema"), help="read a frozen input as text fragments")
+    show_parser.add_argument(
+        "--part", choices=("prompt", "schema", "source-map"), help="read a frozen input as text fragments"
+    )
     show_parser.add_argument("--offset", type=int, default=0, help="character offset from the previous fragment")
     submit_parser = task_commands.add_parser("submit")
     submit_parser.add_argument("attempt_id")

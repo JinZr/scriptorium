@@ -53,7 +53,7 @@ scriptorium --json task page ATTEMPT_ID --number 1
 scriptorium --json task submit ATTEMPT_ID --input-digest INPUT_DIGEST --file output.json
 ```
 
-`task claim` and plain `task show` return a compact overview with `input_digest` and commands for the frozen inputs. `--part prompt` and `--part schema` return text fragments: follow `next_command` until null, concatenate `text` in offset order, and parse the complete schema text as JSON. Read `source-map.json` through `task read` for evidence paths and digests.
+`task claim` and plain `task show` return a compact overview with `input_digest` and commands for the frozen inputs. `--part prompt` and `--part schema` return text fragments: follow `next_command` until null, concatenate `text` in offset order, and parse the complete schema text as JSON. Use `source_map_command` or `task show ATTEMPT_ID --part source-map` for evidence paths and digests, including after the attempt finishes. This reconstructs the frozen JSON file using the same fragment protocol.
 
 Successful JSON responses for claim, show, read, search, and page are at most 7,000 UTF-8 bytes including the envelope and newline. Reads and searches may return fewer characters, lines, or matches than requested. Follow their `next_command` until null to finish the requested traversal; a long line can require multiple reads of the **same line** with increasing `--offset`. Search `navigation.json` for literal headings, labels, references, captions, and figure paths, then inspect the relevant source and rendered page. The CLI records what it returned, not what a host displayed or understood. A page path alone does not prove that the client opened the image. `--file -` reads one output JSON object from stdin.
 

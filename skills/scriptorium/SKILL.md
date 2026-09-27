@@ -23,13 +23,13 @@ Use `client=codex`, `claude_code`, or `antigravity`. Report the model and effort
 
 ## Retrieve and inspect
 
-Claim and plain `task show` return an overview with `data.input_digest`, the navigation digest, and commands in `data.inputs.prompt.command` and `data.inputs.schema.command`. Run both input commands and follow each `data.next_command` until null. Concatenate `data.text` fragments in offset order without adding separators; parse the complete schema text as JSON. Each part's digest and total character count identify the frozen input. Read `source-map.json` with `task read` for the `sources` array of evidence paths and digests. Inspect the schema's `required` fields and the complete frozen prompt before writing the answer; do not copy an output shape from another role or run. Read `manifest.json` to inventory the sources and rendered pages. Search `navigation.json` for headings, labels, references, citations, captions, and figure paths; then read their source and adjacent context:
+Claim and plain `task show` return an overview with `data.input_digest`, the navigation digest, and commands in `data.inputs.prompt.command` and `data.inputs.schema.command`. Run both input commands and follow each `data.next_command` until null. Concatenate `data.text` fragments in offset order without adding separators; parse the complete schema text as JSON. Each part's digest and total character count identify the frozen input. Run `data.source_map_command` (equivalently `task show ATTEMPT_ID --part source-map`) and concatenate its text fragments for the `sources` array of evidence paths and digests. These frozen inputs remain inspectable after the attempt finishes; normal `task read/search/page` still require an active attempt. Inspect the schema's `required` fields and the complete frozen prompt before writing the answer; do not copy an output shape from another role or run. Read `manifest.json` to inventory the sources and rendered pages. Search `navigation.json` for headings, labels, references, citations, captions, and figure paths; then read their source and adjacent context:
 
 ```bash
 scriptorium --json task search ATTEMPT_ID --query TERM --path navigation.json
 scriptorium --json task show ATTEMPT_ID --part prompt
 scriptorium --json task show ATTEMPT_ID --part schema
-scriptorium --json task read ATTEMPT_ID --path source-map.json
+scriptorium --json task show ATTEMPT_ID --part source-map
 scriptorium --json task search ATTEMPT_ID --query TERM
 scriptorium --json task read ATTEMPT_ID --path manifest.json --start-line 1
 scriptorium --json task read ATTEMPT_ID --path SOURCE_PATH --start-line LINE
