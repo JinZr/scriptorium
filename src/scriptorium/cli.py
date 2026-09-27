@@ -14,6 +14,7 @@ from typing import Any
 from .config import find_repo, initialize_project
 from .domain import Attempt, Run, Task
 from .errors import ConfigurationError, InfrastructureError, ScriptoriumError
+from .tool_output import success_json
 
 
 class _UsageError(Exception):
@@ -86,7 +87,10 @@ def build_parser() -> argparse.ArgumentParser:
     claim_parser.add_argument("--effort", required=True)
     claim_parser.add_argument("--session-id", required=True)
     claim_parser.add_argument("--session-source", choices=("host", "declared"), required=True)
-    task_commands.add_parser("show").add_argument("attempt_id")
+    show_parser = task_commands.add_parser("show")
+    show_parser.add_argument("attempt_id")
+    show_parser.add_argument("--part", choices=("prompt", "schema"), help="read a frozen input as text fragments")
+    show_parser.add_argument("--offset", type=int, default=0, help="character offset from the previous fragment")
     submit_parser = task_commands.add_parser("submit")
     submit_parser.add_argument("attempt_id")
     submit_parser.add_argument("--input-digest", required=True)
@@ -244,19 +248,21 @@ def _dispatch_task(service: Any, arguments: argparse.Namespace) -> tuple[Any, in
         return service.list_tasks(arguments.run_id), 0, None
     if arguments.task_command == "claim":
         return (
-            service.claim_task(
-                arguments.task_id,
-                arguments.client,
-                arguments.model,
-                arguments.effort,
-                arguments.session_id,
-                arguments.session_source,
+            service.task_view(
+                service.claim_task(
+                    arguments.task_id,
+                    arguments.client,
+                    arguments.model,
+                    arguments.effort,
+                    arguments.session_id,
+                    arguments.session_source,
+                )
             ),
             0,
             None,
         )
     if arguments.task_command == "show":
-        return service.show_task(arguments.attempt_id), 0, None
+        return service.task_view(service.show_task(arguments.attempt_id), arguments.part, arguments.offset), 0, None
     if arguments.task_command == "submit":
         if arguments.file == "-":
             raw = sys.stdin.buffer.read(2_000_001)
@@ -364,7 +370,7 @@ def _status_value(result: Any) -> str | None:
 def _emit_success(payload: Any, json_output: bool, output_format: str | None) -> None:
     value = _jsonable(payload)
     if json_output:
-        print(json.dumps({"ok": True, "data": value}, ensure_ascii=False, separators=(",", ":")))
+        print(success_json(value))
         return
     if output_format == "markdown" and isinstance(payload, str):
         print(payload)

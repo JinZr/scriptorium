@@ -40,6 +40,7 @@ from .errors import ConfigurationError, InfrastructureError, NotFoundError, Stat
 from .manuscript import ManuscriptManager
 from .schemas import ScientificReviewOutput, ScopedReviewOutput
 from .storage import ConflictError, Database, NotFoundError as StorageNotFoundError, StorageError
+from .tool_output import bound_read, bound_search, require_bounded, task_view
 from .workflow import Armarius
 
 
@@ -440,16 +441,6 @@ class ScriptoriumService:
         bundle = self.armarius._external_bundle(run, metadata)
         prompt = self.armarius._load_prompt_artifact(attempt.prompt_digest)
         schema = self.armarius._load_schema_artifact(run, metadata["schema_kind"], attempt.schema_digest)
-        self._record_access(
-            run.id,
-            attempt.id,
-            "show",
-            {
-                "prompt_digest": attempt.prompt_digest,
-                "schema_digest": metadata["schema_digest"],
-                "bundle_digest": metadata["bundle_digest"],
-            },
-        )
         return {
             "run_id": run.id,
             "task": task,
@@ -468,6 +459,14 @@ class ScriptoriumService:
             "navigation_digest": ArtifactStore.digest_file(bundle.workspace / "navigation.json"),
             "source_map": bundle.anchor_map.model_dump(mode="json"),
         }
+
+    def task_view(self, context: dict[str, Any], part: str | None = None, offset: int = 0):
+        response = task_view(context, part, offset)
+        access = {"part": part or "overview", "input_digest": context["input_digest"]}
+        if part is not None:
+            access.update(digest=response["digest"], start_offset=offset, end_offset=offset + len(response["text"]))
+        self._record_access(context["run_id"], context["attempt"].id, "show", access)
+        return response
 
     async def submit_task(self, attempt_id: str, input_digest: str, output_text: str) -> dict[str, Any]:
         if len(output_text.encode("utf-8")) > 2_000_000:
@@ -534,6 +533,18 @@ class ScriptoriumService:
             bundle.workspace, files, read_path.relative_to(bundle.workspace).as_posix()
         )
         pieces, next_line, next_offset = _read_text_window(read_path, start_line, max_lines, offset, max_chars)
+        response = bound_read(
+            {
+                "path": path,
+                "source_digest": source_digest,
+                "lines": pieces,
+                "next_line": next_line,
+                "next_offset": next_offset,
+            },
+            attempt_id,
+            max_lines,
+            max_chars,
+        )
         self._record_access(
             task.run_id,
             attempt.id,
@@ -547,19 +558,13 @@ class ScriptoriumService:
                         "start_offset": item["offset"],
                         "end_offset": item["offset"] + len(item["text"]),
                     }
-                    for item in pieces
+                    for item in response["lines"]
                 ],
-                "next_line": next_line,
-                "next_offset": next_offset,
+                "next_line": response["next_line"],
+                "next_offset": response["next_offset"],
             },
         )
-        return {
-            "path": path,
-            "source_digest": source_digest,
-            "lines": pieces,
-            "next_line": next_line,
-            "next_offset": next_offset,
-        }
+        return response
 
     def search_task(self, attempt_id: str, query: str, path: str | None, cursor: int, limit: int):
         with self._retrieval_operation(attempt_id, "task search"):
@@ -610,7 +615,7 @@ class ScriptoriumService:
                             )
                         total_matches += 1
                         position = folded.find(folded_query, position + max(1, len(folded_query)))
-        next_cursor = cursor + len(matches) if cursor + len(matches) < total_matches else None
+        response = bound_search(matches, total_matches, attempt_id, query, path, cursor, limit)
         self._record_access(
             task.run_id,
             attempt.id,
@@ -620,12 +625,12 @@ class ScriptoriumService:
                 "path": path,
                 "matches": [
                     {"path": item["path"], "line": item["line"], "source_digest": item["source_digest"]}
-                    for item in matches
+                    for item in response["matches"]
                 ],
-                "next_cursor": next_cursor,
+                "next_cursor": response["next_cursor"],
             },
         )
-        return {"matches": matches, "total_matches": total_matches, "next_cursor": next_cursor}
+        return response
 
     def page_task(self, attempt_id: str, page_number: int):
         with self._retrieval_operation(attempt_id, "task page"):
@@ -637,8 +642,11 @@ class ScriptoriumService:
         if page is None:
             raise ConfigurationError("page is outside the frozen PDF")
         self.armarius._verify_retrieval_file(bundle.workspace, files, page.read_path)
+        response = require_bounded(
+            {"page": page_number, "path": str(bundle.workspace / page.read_path), "digest": page.page_digest}
+        )
         self._record_access(task.run_id, attempt.id, "page", {"page": page_number, "read_path": page.read_path})
-        return {"page": page_number, "path": str(bundle.workspace / page.read_path), "digest": page.page_digest}
+        return response
 
     def _record_access(self, run_id: str, attempt_id: str, operation: str, payload: dict[str, Any]) -> None:
         self._storage(
