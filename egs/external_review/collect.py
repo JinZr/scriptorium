@@ -18,8 +18,24 @@ from .files import contained_file, file_records, publication, read_json, verify_
 
 
 def cli(project, arguments, records):
+    bootstrap = (
+        "import runpy, sys\n"
+        "sys.path.insert(0, sys.argv.pop(1))\n"
+        "runpy.run_module('scriptorium', run_name='__main__')\n"
+    )
     result = subprocess.run(
-        [sys.executable, "-m", "scriptorium", *arguments], cwd=project, capture_output=True, text=True
+        [
+            sys.executable,
+            "-I",
+            "-B",
+            "-c",
+            bootstrap,
+            str(Path(scriptorium.__file__).resolve().parent.parent),
+            *arguments,
+        ],
+        cwd=project,
+        capture_output=True,
+        text=True,
     )
     records.append(
         {"arguments": arguments, "returncode": result.returncode, "stdout": result.stdout, "stderr": result.stderr}
@@ -164,6 +180,8 @@ def collect(project, run_id, output, case, trial, baseline=None, host_records=()
                 raise ValueError("Prepared trial inputs or identity changed")
             if any(item["attempts"] for item in read_json(baseline / "report.json")["tasks"]):
                 raise ValueError("Baseline must be collected before the first attempt")
+            if verify_seal(baseline) != baseline_digest:
+                raise ValueError("Collection has changed while reading baseline")
         for item in report["tasks"]:
             for attempt in item["attempts"]:
                 for field in (

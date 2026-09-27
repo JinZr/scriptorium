@@ -61,13 +61,16 @@ A preparation failure without a frozen bundle cannot enter this collector. Keep 
 preflight ledger as infrastructure-blocked; do not count it as a zero-finding review or silently remove it from
 the planned manuscript set.
 
-The collector reconstructs all report sections through bounded `run report --part` calls, executes returned
+The collector invokes its own Scriptorium package with isolated Python imports, so manuscript-local modules
+and `PYTHONPATH` cannot shadow the inspection CLI or its dependencies. It reconstructs all report sections
+through bounded `run report --part` calls, executes returned
 continuation commands unchanged, and checks offsets, section hashes and the shared report digest. It checks
 the digest again after copying, so a concurrently advancing run requires a fresh collection. The full bundle
 must match its content-addressed file index. Every available attempt prompt, schema, bundle index, raw output,
 trace and validation artifact is copied with its digest checked, including invalid raw submissions. Corruption
 or changing input leaves no published collection. Baselines must precede all attempts and match case/trial,
-run identity and frozen input bytes exactly.
+run identity and frozen input bytes exactly. Their seals are checked again after reading baseline metadata,
+including when an input has been resealed, before prospective provenance can be recorded.
 
 Each collection contains:
 
