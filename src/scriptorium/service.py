@@ -662,20 +662,37 @@ class ScriptoriumService:
         )
         return response
 
-    def page_task(self, attempt_id: str, page_number: int):
+    def page_task(self, attempt_id: str, page_number: int, document: str | None = None):
         with self._retrieval_operation(attempt_id, "task page"):
-            return self._page_task(attempt_id, page_number)
+            return self._page_task(attempt_id, page_number, document)
 
-    def _page_task(self, attempt_id: str, page_number: int):
+    def _page_task(self, attempt_id: str, page_number: int, document: str | None):
         attempt, task, bundle, files = self._readable_task(attempt_id)
-        page = next((item for item in bundle.anchor_map.compiled_pdf.pages if item.page == page_number), None)
+        pdf = bundle.anchor_map.compiled_pdf
+        if document is not None:
+            selected = next((item for item in pdf.documents if item.entrypoint == document), None)
+            if selected is None:
+                raise ConfigurationError("document is not a frozen LaTeX entrypoint; inspect source-map.json")
+            if not 1 <= page_number <= selected.page_count:
+                raise ConfigurationError("page is outside the frozen document")
+            page_number += selected.start_page - 1
+        page = next((item for item in pdf.pages if item.page == page_number), None)
         if page is None:
             raise ConfigurationError("page is outside the frozen PDF")
         self.armarius._verify_retrieval_file(bundle.workspace, files, page.read_path)
-        response = require_bounded(
-            {"page": page_number, "path": str(bundle.workspace / page.read_path), "digest": page.page_digest}
+        selected = next(
+            (item for item in pdf.documents if item.start_page <= page_number < item.start_page + item.page_count), None
         )
-        self._record_access(task.run_id, attempt.id, "page", {"page": page_number, "read_path": page.read_path})
+        location = {
+            "source_path": pdf.source_path,
+            "page": page_number,
+            "document": selected.entrypoint if selected else None,
+            "document_page": page_number - selected.start_page + 1 if selected else None,
+        }
+        response = require_bounded(
+            {**location, "path": str(bundle.workspace / page.read_path), "digest": page.page_digest}
+        )
+        self._record_access(task.run_id, attempt.id, "page", {**location, "read_path": page.read_path})
         return response
 
     def _record_access(self, run_id: str, attempt_id: str, operation: str, payload: dict[str, Any]) -> None:

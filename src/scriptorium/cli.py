@@ -119,6 +119,7 @@ def build_parser() -> argparse.ArgumentParser:
     page_parser = task_commands.add_parser("page")
     page_parser.add_argument("attempt_id")
     page_parser.add_argument("--number", type=int, required=True)
+    page_parser.add_argument("--document", help="frozen LaTeX entrypoint; --number is then relative to this document")
 
     finding_parser = commands.add_parser("finding", help="inspect and decide findings")
     finding_commands = finding_parser.add_subparsers(dest="finding_command", required=True)
@@ -315,7 +316,7 @@ def _dispatch_task(service: Any, arguments: argparse.Namespace) -> tuple[Any, in
             None,
         )
     if arguments.task_command == "page":
-        return service.page_task(arguments.attempt_id, arguments.number), 0, None
+        return service.page_task(arguments.attempt_id, arguments.number, arguments.document), 0, None
 
     raise _UsageError("missing task command")
 

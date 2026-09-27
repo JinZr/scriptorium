@@ -10,6 +10,15 @@ Scriptorium is a single-user modular monolith. It has no server, queue, or model
 - `storage.py` owns SQLite migrations, tasks, attempts, decisions, and events. `artifacts.py` publishes immutable SHA-256 content.
 - `service.py` serializes per-run mutations and retrieval under an OS file lock. A task claim persists across CLI processes. `cli.py` provides the shared JSON interface.
 
+Explicit `manuscript.supplements` add independent LaTeX entrypoints from the same commit. Each entrypoint's
+dependency closure is scanned separately, preserving its graphics and bibliography context; the bundle freezes
+their union. Builds use separate disposable copies so generated files cannot leak between documents. The main
+PDF and each supplement are concatenated in configured order into the existing `manuscript.pdf` evidence space.
+Both the manifest and source map freeze a document index of entrypoint, first global page and page count. Its
+ranges must partition the review PDF and refer to distinct frozen text sources. Indexed retrieval checks this
+mapping against the immutable bundle metadata. Revision and verification use the same document configuration
+and rebuild the entire set. Any failed document blocks that stage.
+
 `run start` freezes inputs, compiles the base bundle, and creates review tasks. Task preparation stores a content-addressed file index for the bundle. `task claim` records the external client, model, effort, and session ID on a durable attempt. The CLI claim and default show return a compact overview with input digests and retrieval commands. `task show --part prompt|schema|source-map` returns frozen text fragments bound to their digests and the attempt input. Source-map fragments contain the original bundle file bytes decoded as UTF-8. Show remains available for terminal attempts without reopening material retrieval or workflow state. `tool_output.py` sizes both compact JSON success envelopes and ordinary indented output, including UTF-8 encoding, escaping, metadata, and newline, to at most 7,000 bytes for claim, show, read, search, and page. It supplies lossless continuation commands; the CLI uses the same serializers and preserves the current output mode in emitted continuations. Input access events record only the fragment offsets returned, rather than implying the full prompt or schema was displayed.
 
 The CLI also projects run mutation results into bounded acknowledgements, preserving the operation's returned state without a second database read after the mutation lock is released. `run status` holds the run lock while collecting a compact overview and current next actions. Detailed task history and frozen configuration remain in the complete report. `run report --part` holds the same lock while validating and rendering a report section into bounded canonical-JSON text fragments. Each continuation binds the entire report digest; changes between calls require a restart. Report reads write no workflow events or snapshot artifacts. Full JSON/Markdown exports and the internal `get_run` representation retain their complete data.
@@ -29,6 +38,11 @@ Read, search, and page operations hold the run lock through their access event, 
 ## Evidence and gates
 
 Text evidence uses a bare source path, source digest, inclusive line range, and verbatim quote. PDF evidence uses `manuscript.pdf` plus a 1-based page; a page-image path is only a read location. Tool access logs report material returned, not model comprehension or exhaustive coverage.
+
+`task page --document ENTRYPOINT --number N` resolves a document-local physical page into that global PDF page.
+The response and access event record both coordinates. Scope, evidence and coverage audits continue to use global
+pages, so separate documents' first pages cannot be conflated. The document index is frozen bundle metadata;
+it does not change the submitted result schema or require a database migration.
 
 Finding decisions, patch approval, verification, and application are separate stages. The verifier must claim from a new host-reported conversation ID, distinct from review and revision. A declared or reused ID cannot produce a passing verification. This checks recorded provenance; Scriptorium cannot authenticate the external host's claim. Patch application rechecks exact approved edits against the current worktree. Infrastructure failures cannot pass the release gate.
 
