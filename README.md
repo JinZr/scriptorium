@@ -88,6 +88,10 @@ Human finding decisions, patch approval, and patch application remain separate o
 
 See [configuration](docs/configuration.md), [architecture](docs/architecture.md), and [operations](docs/operations.md). The optional PeerReviewBench example prepares external review tasks and collects their validated results under `egs/peerreviewbench/`.
 
+The separate [external review evaluation example](egs/external_review/README.md) seals real LaTeX run records,
+prepares anonymous candidate-judging inputs, and reports external judges' assessments and disagreements.
+It preserves failed/partial trials and keeps workflow validity, tool returns and scientific judgments separate.
+
 ## Checks
 
 ```bash
