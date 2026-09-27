@@ -2,7 +2,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from scriptorium import cli
-from scriptorium.domain import RunStatus
+from scriptorium.domain import Run, RunStatus
 
 
 @dataclass
@@ -32,31 +32,40 @@ class FakeService:
         self.calls.append(("doctor", profile, revision))
         return self.doctor_result
 
-    async def start_run(self, revision: str, profile: str) -> Result:
-        return self._record("start_run", revision, profile)
+    async def start_run(self, revision: str, profile: str) -> dict:
+        return self._record_run("start_run", revision, profile)
 
-    def get_run(self, run_id: str) -> Result:
-        return self._record("get_run", run_id)
+    def _record_run(self, *call: object) -> dict:
+        self._record(*call)
+        run = Run("/paper", "abc123", "tree", "quick", "config", {"execution": "external"}, id="run_1")
+        return {"run": run, "tasks": [], "finding_ids": [], "patch_ids": []}
 
-    async def resume_run(self, run_id: str) -> Result:
-        return self._record("resume_run", run_id)
+    def run_status(self, run_id: str) -> Result:
+        return self._record("run_status", run_id)
+
+    async def resume_run(self, run_id: str) -> dict:
+        return self._record_run("resume_run", run_id)
 
     async def retry_task(
         self, run_id: str, task_id: str, abandon_attempt_id: str | None = None, reason: str | None = None
-    ) -> Result:
-        return self._record("retry_task", run_id, task_id, abandon_attempt_id, reason)
+    ) -> dict:
+        return self._record_run("retry_task", run_id, task_id, abandon_attempt_id, reason)
 
-    async def continue_review(self, run_id: str, task_id: str) -> Result:
-        return self._record("continue_review", run_id, task_id)
+    async def continue_review(self, run_id: str, task_id: str) -> dict:
+        return self._record_run("continue_review", run_id, task_id)
 
-    def cancel_run(self, run_id: str, reason: str) -> Result:
-        return self._record("cancel_run", run_id, reason)
+    def cancel_run(self, run_id: str, reason: str) -> dict:
+        return self._record_run("cancel_run", run_id, reason)
 
     def render_report(self, run_id: str, format: str) -> str | dict:
         self.calls.append(("render_report", run_id, format))
         if format == "markdown":
             return "# Report"
         return {"run_id": run_id}
+
+    def read_report(self, run_id: str, part: str, offset: int, report_digest: str | None) -> dict:
+        self.calls.append(("read_report", run_id, part, offset, report_digest))
+        return {"run_id": run_id, "part": part, "offset": offset, "text": "[]", "next_command": None}
 
     def evaluate_gate(self, run_id: str) -> dict:
         self.calls.append(("evaluate_gate", run_id))

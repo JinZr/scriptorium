@@ -1,12 +1,28 @@
 from __future__ import annotations
 
+from collections import Counter
 import json
 import shlex
 
-from .domain import canonical_json
+from .domain import canonical_json, digest_json
 from .errors import ConfigurationError
 
 MAX_TOOL_RESPONSE_BYTES = 7000
+REPORT_PARTS = (
+    "run",
+    "tasks",
+    "finding_ids",
+    "patch_ids",
+    "findings",
+    "patches",
+    "events",
+    "validation_reports",
+    "review_scopes",
+    "review_claim_checks",
+    "review_tool_access",
+    "review_coverage_audit",
+    "gate",
+)
 
 
 def success_json(payload):
@@ -41,6 +57,63 @@ def _fit_prefix(length, build):
 
 def tool_command(*arguments):
     return shlex.join(["scriptorium", "--json", "task", *map(str, arguments)])
+
+
+def report_command(run_id, part, *arguments):
+    return shlex.join(["scriptorium", "--json", "run", "report", run_id, "--part", part, *map(str, arguments)])
+
+
+def run_overview(view, next_actions=None):
+    run = view["run"]
+    external = run.frozen_config.get("execution") == "external"
+    return require_bounded(
+        {
+            "run": {"id": run.id, "status": run.status.value, "commit_sha": run.commit_sha},
+            "execution": "external" if external else "legacy_read_only",
+            "task_counts": dict(Counter(item["task"].status.value for item in view["tasks"])),
+            "finding_count": len(view["finding_ids"]),
+            "patch_count": len(view["patch_ids"]),
+            "has_error": run.error is not None,
+            "estimated_cost_usd": None if external else run.estimated_cost_usd,
+            "next_actions": next_actions if next_actions is not None else [{"command": "run status", "run_id": run.id}],
+            "report_parts": {part: report_command(run.id, part) for part in REPORT_PARTS},
+        }
+    )
+
+
+def report_fragment(run_id, report, part, offset, expected_digest):
+    report_digest = digest_json(report)
+    if expected_digest is not None and expected_digest != report_digest:
+        raise ConfigurationError("report changed; restart at offset 0 without --report-digest")
+    if offset != 0 and expected_digest is None:
+        raise ConfigurationError("a nonzero report offset requires --report-digest from the previous fragment")
+    content = canonical_json(report[part])
+    part_digest = digest_json(report[part])
+    if not 0 <= offset <= len(content):
+        raise ConfigurationError("offset is outside the report part")
+
+    def fragment(length):
+        end = offset + length
+        return {
+            "run_id": run_id,
+            "part": part,
+            "report_digest": report_digest,
+            "digest": part_digest,
+            "offset": offset,
+            "total_chars": len(content),
+            "text": content[offset:end],
+            "next_offset": end if end < len(content) else None,
+            "next_command": (
+                report_command(run_id, part, "--offset", end, "--report-digest", report_digest)
+                if end < len(content)
+                else None
+            ),
+        }
+
+    length, response = _fit_prefix(len(content) - offset, fragment)
+    if length == 0 and offset < len(content):
+        raise ConfigurationError("report metadata leaves no room for text in the 7000-byte response limit")
+    return response
 
 
 def task_view(context, part, offset):

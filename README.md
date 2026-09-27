@@ -36,10 +36,10 @@ scriptorium init . --main main.tex --engine pdflatex
 # Commit scriptorium.toml and the manuscript inputs.
 scriptorium --json doctor --revision COMMIT --profile full
 scriptorium --json run start --revision COMMIT --profile full
-scriptorium --json task list RUN_ID
+scriptorium --json run status RUN_ID
 ```
 
-`run start` compiles and freezes the selected commit, then returns with pending tasks. It makes no model call. For each task, the current Codex, Claude Code, or Antigravity session uses its selected model:
+`run start` compiles and freezes the selected commit, then returns a compact acknowledgement. Read `run status RUN_ID` for task counts, current `next_actions`, and commands for report sections. It makes no model call. For each pending task offered by `next_actions`, the current Codex, Claude Code, or Antigravity session uses its selected model:
 
 ```bash
 scriptorium --json task claim TASK_ID --client codex --model MODEL --effort EFFORT \
@@ -61,9 +61,19 @@ New review tasks require a `scope` object in the submitted JSON: `completion` (`
 
 New `substantive_review` tasks also require `claim_checks`: each assessed central claim has frozen evidence, a critical question, a countercheck, an assessment (`supported`, `unresolved`, or `finding`), and zero-based indices linking retained concerns to `findings`. A complete substantive review needs at least one check; every substantive finding needs a link. `run report` shows these model-declared checks for inspection. Their presence does not establish scientific correctness.
 
-After each submission, inspect `scriptorium --json task list RUN_ID`. It returns the remaining tasks, each accepted review's declared completion, and `next_actions`. A scoped review marked `partial` or `unknown` keeps the run in `reviewing` and cannot satisfy the required-review gate. To continue it, run `scriptorium --json run continue RUN_ID --task TASK_ID`, then claim the same task again. Its new attempt is bound to a frozen continuation prompt containing the previous accepted scope and recorded finding details; prior output and findings remain intact. Submit only newly discovered findings, except when a new claim check needs to link an existing concern: include that finding in the current output and link its index. Repeated findings with the same category, severity, title, claim, and evidence retain their original identity even if the explanation, suggested action, or confidence changes. Keep the new scope cumulative. The run advances to human finding decisions only after every required role declares `complete`. Historical review outputs without scope keep their frozen completion contract. A run already finalized under an older version is not reopened.
+After each submission, inspect `scriptorium --json run status RUN_ID`. It returns task counts and `next_actions`; use the `review_scopes` report section for accepted completion declarations and `tasks` for attempt history. A scoped review marked `partial` or `unknown` keeps the run in `reviewing` and cannot satisfy the required-review gate. To continue it, run `scriptorium --json run continue RUN_ID --task TASK_ID`, then claim the same task again. Its new attempt is bound to a frozen continuation prompt containing the previous accepted scope and recorded finding details; prior output and findings remain intact. Submit only newly discovered findings, except when a new claim check needs to link an existing concern: include that finding in the current output and link its index. Repeated findings with the same category, severity, title, claim, and evidence retain their original identity even if the explanation, suggested action, or confidence changes. Keep the new scope cumulative. The run advances to human finding decisions only after every required role declares `complete`. Historical review outputs without scope keep their frozen completion contract. A run already finalized under an older version is not reopened.
 
 A rejected submission includes a validation report. `run retry RUN_ID --task TASK_ID` explicitly makes the task claimable again; the next attempt includes the frozen diagnostic feedback and has a new attempt input digest. An active claim survives CLI exit. To replace an abandoned active claim, use `run retry RUN_ID --task TASK_ID --abandon-attempt ATTEMPT_ID --reason TEXT`. `run resume RUN_ID` replays accepted work and prepares the next stage after human decisions. `run cancel RUN_ID --reason TEXT` waits for the current run operation, then invalidates active attempts.
+
+`run status` and the CLI acknowledgements for start, resume, retry, continue, and cancel are bounded to 7,000 UTF-8 bytes. Mutation acknowledgements direct the client to `run status` for fresh next actions. Use its `report_parts` commands to inspect findings, scope, claim checks, validation reports, and other sections without receiving the whole report at once:
+
+```bash
+scriptorium --json run report RUN_ID --part findings
+scriptorium --json run report RUN_ID --part review_coverage_audit
+scriptorium run report RUN_ID --format json > report.json
+```
+
+Report parts use the same bounded `text`/`offset`/`next_command` traversal as frozen task inputs. Concatenate the fragments and parse the complete JSON value. Continuations include `--report-digest` for the entire report; a changed report is rejected rather than mixed with previous fragments. Restart the report traversal at offset zero if it changes. Full JSON and Markdown report exports remain unbounded and are intended for files or human inspection. The detailed `task list` command also remains available; use `run status` for the model's normal workflow.
 
 Human finding decisions, patch approval, and patch application remain separate operations. A verifier must use a new external conversation; use the host's actual session ID and `--session-source host` when available. Self-declared or reused identity leaves verification inconclusive. Scriptorium records the host report but cannot cryptographically prove what the host displayed or read.
 

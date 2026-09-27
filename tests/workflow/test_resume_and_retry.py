@@ -326,7 +326,7 @@ def test_prior_decision_survives_continuing_a_review_from_decision_stage(tmp_pat
         service.database.update_run(run.id, RunStatus.AWAITING_DECISION)
         service.decide_finding(original.id, "confirm", "The text needs correction")
         reopened = asyncio.run(service.continue_review(run.id, task_id))
-        assert reopened["run_status"] == RunStatus.REVIEWING
+        assert reopened["run"].status == RunStatus.REVIEWING
         assert service.database.get_finding(original.id).status.value == "confirmed"
         second = claim(service, run.id, AgentRole.SUBSTANTIVE_REVIEW, session="continued-session")
         submit(
