@@ -111,6 +111,8 @@ their task, attempt, role and event IDs; they do not inherit the original findin
 The seed and mapping preserve ordering provenance. Free-text style or self-identification may still reveal a
 generator; structural blinding cannot guarantee anonymity. The host must restrict the judge's workspace:
 instructions do not isolate arbitrary host filesystem tools.
+Collections are checked again against their original seals after the packet is built; a changed or resealed
+input aborts publication. Summary generation likewise rechecks its packet before publishing results.
 
 The operator selects the judge and obtains any needed paid authorization. Supply its actual selected model
 and effort; never silently substitute one. Judges return one JSON object under `schema.json`, with
@@ -134,6 +136,8 @@ independent context. Invalid judge results publish no aggregate. Accepted judge 
 
 `results/summary.json` reports each trial's workflow and tool facts, each judge's supported/unsupported/uncertain
 assessments and supported consequential counts, and candidate-level disagreements without majority voting.
+`packet_digest` binds the public judge input; `packet_seal_digest` binds the entire packet, including its private
+trial mapping, collection digests and workflow records. Keep the sealed packet to verify either binding later.
 Input comparisons list differing commits, sources, prompts, schemas, PDF and page hashes within each case.
 Matching these does not establish equal host capabilities, effort, cost or independent model-family biases.
 

@@ -63,8 +63,10 @@ def blind(collections, output, seed):
     sessions = set()
     identities = set()
     run_ids = set()
+    collection_digests = []
     for directory in collections:
         collection_digest = verify_seal(directory)
+        collection_digests.append((directory, collection_digest))
         collection = read_json(directory / "collection.json")
         identity = (collection["case"], collection["trial"])
         if identity in identities:
@@ -158,6 +160,9 @@ def blind(collections, output, seed):
                 "review_sessions": sorted(sessions),
             },
         )
+        for directory, expected_digest in collection_digests:
+            if verify_seal(directory) != expected_digest:
+                raise ValueError(f"Collection has changed during preparation: {directory}")
     return output
 
 
@@ -178,7 +183,7 @@ def validate_judge(raw, packet_digest, candidate_ids, review_sessions):
 
 
 def summarize(packet, judgment_paths, output):
-    verify_seal(packet)
+    packet_seal_digest = verify_seal(packet)
     packet_digest = verify_seal(packet / "public")
     mapping = read_json(packet / "mapping.json")
     candidate_ids = set(mapping["candidates"])
@@ -246,6 +251,7 @@ def summarize(packet, judgment_paths, output):
     ]
     result = {
         "packet_digest": packet_digest,
+        "packet_seal_digest": packet_seal_digest,
         "formal_benchmark": False,
         "scientific_status": "model_judgments" if judgments else "not_judged",
         "trials": trials,
@@ -271,6 +277,8 @@ def summarize(packet, judgment_paths, output):
         write_json(stage / "summary.json", result)
         for number, raw in enumerate(raw_outputs, 1):
             (stage / f"judge-{number:03d}.json").write_bytes(raw)
+        if verify_seal(packet) != packet_seal_digest:
+            raise ValueError("Collection has changed during summarization")
     return result
 
 
