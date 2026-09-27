@@ -73,7 +73,7 @@ def build_parser() -> argparse.ArgumentParser:
     report_parser = run_commands.add_parser("report", help="render a run report")
     report_parser.add_argument("run_id")
     report_mode = report_parser.add_mutually_exclusive_group()
-    report_mode.add_argument("--format", choices=("markdown", "json"), default="markdown")
+    report_mode.add_argument("--format", choices=("markdown", "json"))
     report_mode.add_argument(
         "--part", choices=REPORT_PARTS, help="read a report section as bounded JSON text fragments"
     )
@@ -250,8 +250,9 @@ def _dispatch_run(service: Any, arguments: argparse.Namespace) -> tuple[Any, int
             )
         if arguments.offset != 0 or arguments.report_digest is not None:
             raise ConfigurationError("--offset and --report-digest require --part")
-        result = service.render_report(arguments.run_id, arguments.format)
-        return result, 0, arguments.format
+        report_format = arguments.format or "markdown"
+        result = service.render_report(arguments.run_id, report_format)
+        return result, 0, report_format
     if arguments.run_command == "gate":
         result = service.evaluate_gate(arguments.run_id)
         return result, 0 if _gate_passed(result) else 1, None

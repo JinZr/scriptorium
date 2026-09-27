@@ -96,6 +96,10 @@ def test_query_and_report_commands_dispatch(monkeypatch, capsys) -> None:
     assert cli.main(["patch", "show", "patch_1"]) == 0
     assert service.calls[-1] == ("get_patch", "patch_1")
 
+    assert cli.main(["run", "report", "run_1"]) == 0
+    assert service.calls[-1] == ("render_report", "run_1", "markdown")
+    assert capsys.readouterr().out.endswith("# Report\n")
+
     assert cli.main(["run", "report", "run_1", "--format", "markdown"]) == 0
     assert service.calls[-1] == ("render_report", "run_1", "markdown")
     assert capsys.readouterr().out.endswith("# Report\n")
@@ -142,6 +146,8 @@ def test_report_fragments_dispatch_with_continuation_identity(monkeypatch, capsy
         ["--report-digest", "abc"],
         ["--part", "findings", "--format", "json"],
         ["--part", "findings", "--format", "markdown"],
+        ["--format", "json", "--part", "findings"],
+        ["--format", "markdown", "--part", "findings"],
     ],
 )
 def test_report_fragment_options_are_not_silently_ignored(monkeypatch, capsys, options):
