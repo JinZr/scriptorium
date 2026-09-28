@@ -73,6 +73,19 @@ After a partial submission, read `run report RUN_ID --part review_coverage_audit
 
 For a new `substantive_review` task, also include `claim_checks`. Each entry has `claim`, `evidence` (the same exact source or PDF anchors used by findings), `critical_question`, `countercheck`, `assessment` (`supported`, `unresolved`, or `finding`), and `finding_indices`. The indices are zero-based positions in the submitted `findings` array. Use an empty index list for supported or unresolved checks; a finding check must link at least one finding, and every finding must be linked. A complete review requires at least one claim check; a partial review may submit an empty list. The frozen schema returned by `task show` is authoritative.
 
+Before submitting a substantive review, follow its frozen prompt's conclusion-consistency instructions. A
+`supported` assessment needs evidence for the stated claim and critical question at the same scope; resolving one
+candidate criticism does not establish a broader conclusion. Carry material counterexamples and uncertainty into
+the assessment and summary, and anchor the evidence that determines the judgment. The shared skill routes the
+current model through this step; it does not start another model or add a submission field. The CLI validates the
+schema, anchors and finding links, not the scientific meaning of this comparison.
+
+Keep work completion separate from scientific certainty. Available relevant sources that remain unexamined belong
+in `scope.outstanding` and prevent a `complete` declaration. An `unresolved` claim may remain after the available
+material has been assessed; describe missing external evidence in `scope.limitations`. That alone does not require
+continuation or turn the unresolved question into a finding. Existing runs keep their frozen prompts; use a new run
+to evaluate an updated review procedure.
+
 Each report entry for claim checks includes `submitted_findings` in that attempt's original order. Its `finding_indices` refer to this list, not the report-wide findings, which may be severity-sorted or deduplicated across attempts.
 
 After each `task submit`, use `run status RUN_ID` and follow `next_actions`. An accepted scoped review with `partial` or `unknown` is a durable checkpoint: its findings are retained, but the role is not finished and the run remains in `reviewing`. Continue that role explicitly:
