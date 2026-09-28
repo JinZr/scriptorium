@@ -49,7 +49,7 @@ Prefer the exact `read_path` from the source map with `task read` or `task searc
 
 Raw source searches may also find comments or inactive alternatives. Check whether a passage belongs to the compiled manuscript before treating it as a claim. If a separate supplement is mentioned but absent from the frozen manifest, describe its role in `scope.limitations` for a review output or in `summary` for a revision or verification output; an unknown path cannot be placed in review `scope.outstanding`.
 
-For `substantive_review`, use the frozen task prompt's two passes. Map each central claim to its result, method, assumptions, and a plausible alternative; retrieve the evidence that can distinguish them. Then revisit each candidate criticism and search the whole frozen bundle for an author answer or counterevidence before deciding whether it remains a finding. Recalculate a numerical concern when the reported inputs permit it. Record each assessed claim in `claim_checks` with source evidence, the critical question, the countercheck performed, and its assessment; link retained concerns to their zero-based finding indices. If a material source or page remains unexamined, list it in the outstanding scope and describe the unresolved link in limitations instead of declaring the role complete. A checklist or count of tool calls is not evidence that the review is thorough.
+For `substantive_review`, follow the frozen task prompt's claim tracing, candidate countercheck, and final conclusion-consistency review. Map each central claim to its result, method, assumptions, and a plausible alternative; retrieve the evidence that can distinguish them. Then revisit each candidate criticism and search the whole frozen bundle for an author answer or counterevidence before deciding whether it remains a finding. Recalculate a numerical concern when the reported inputs permit it. Record each assessed claim in `claim_checks` with source evidence, the critical question, the countercheck performed, and its assessment; link retained concerns to their zero-based finding indices. If a material source or page remains unexamined, list it in the outstanding scope and describe the unresolved link in limitations instead of declaring the role complete. A checklist or count of tool calls is not evidence that the review is thorough.
 
 Align the population, analysis unit, denominator, outcome, time point, data or model version, and processing stage when comparing results, as relevant to that claim. If the only countercheck is that a number repeats in the abstract and table, assess that reporting-consistency question alone. Follow the result back to its design and analysis before treating the scientific interpretation as supported; keep unchecked links in the outstanding scope.
 
@@ -109,6 +109,12 @@ For a `substantive_review` using the current `scientific_review` schema, the fol
 ```
 
 This example illustrates the format, not a judgment about a real manuscript. The reconstructed frozen schema and its task prompt remain authoritative.
+
+Before submitting a substantive review, apply the conclusion-consistency instructions in its frozen prompt to the
+drafted `claim_checks` and `summary`. Preserve material exceptions and unresolved parts; no findings or a complete
+scope declaration establishes scientific correctness. Use the existing schema fields rather than adding a new
+self-review object. This is a review step performed by the current model, not a second model call or an automatic
+scientific-validity check by the CLI.
 
 Submit the completed answer with the exact digest from this attempt:
 
