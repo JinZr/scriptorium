@@ -48,6 +48,50 @@ def test_substantive_review_records_anchored_claim_checks_and_links_findings(tmp
         assert "evidence: `manuscript.pdf:page 1`" in markdown
 
 
+@pytest.mark.parametrize("completion", ["complete", "partial", "unknown"])
+def test_unresolved_external_evidence_is_separate_from_unfinished_frozen_review(tmp_path, completion):
+    repo = make_repository(tmp_path, roles=("substantive_review",))
+    with ScriptoriumService(repo, manuscript_manager=PdfBuildingManuscriptManager(repo)) as service:
+        run = asyncio.run(service.start_run("HEAD", "quick"))["run"]
+        review = claim(service, run.id, AgentRole.SUBSTANTIVE_REVIEW)
+        assert "Mark completion partial or unknown when work remains or cannot be assessed" not in review["prompt"]
+        assert "available relevant frozen sources or pages remains unfinished" in review["prompt"]
+        assert (
+            "do not alone prevent complete after the available relevant material has been assessed" in review["prompt"]
+        )
+        complete = completion == "complete"
+        limitation = "The external raw data needed to resolve the scientific question are unavailable."
+        checked = [{"source_path": "main.tex", "start_line": 1, "end_line": 4}]
+        if complete:
+            checked.append({"source_path": "manuscript.pdf", "page": 1})
+        receipt = submit(
+            service,
+            review,
+            {
+                "summary": limitation,
+                "findings": [],
+                "claim_checks": [
+                    {
+                        **_claim_check(assessment="unresolved", evidence=review_finding(review)["evidence"]),
+                        "countercheck": limitation,
+                    }
+                ],
+                "scope": {
+                    "completion": completion,
+                    "checked": checked,
+                    "outstanding": [] if complete else [{"source_path": "manuscript.pdf", "page": 1}],
+                    "limitations": [limitation] if complete else [limitation, "The frozen page is still unread."],
+                },
+            },
+        )
+        assert receipt["attempt"].status == AttemptStatus.COMPLETED
+        assert receipt["run_status"] == (RunStatus.AWAITING_DECISION if complete else RunStatus.REVIEWING)
+        report = service.render_report(run.id, "json")
+        assert report["review_claim_checks"][0]["claim_checks"][0]["assessment"] == "unresolved"
+        assert service.database.list_findings(run.id) == []
+        assert not service.evaluate_gate(run.id)["passed"]
+
+
 @pytest.mark.parametrize(("index", "accepted"), [(0.0, True), (0.5, False), ("0", False)])
 def test_finding_indices_follow_published_integer_schema(tmp_path, index, accepted):
     repo = make_repository(tmp_path, roles=("substantive_review",))

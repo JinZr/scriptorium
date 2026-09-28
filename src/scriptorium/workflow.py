@@ -2004,8 +2004,11 @@ class Armarius:
             "may inspect the exact page-image read_path listed for a page, but that read path is never "
             "the output anchor. Prefer source-line evidence for every textual claim. Do not modify "
             "files. In scope, declare checked and outstanding frozen source paths with optional inclusive "
-            "line ranges, or manuscript.pdf pages. Mark completion partial or unknown when work remains "
-            "or cannot be assessed, and state limitations. This declaration does not prove inspection; "
+            "line ranges, or manuscript.pdf pages. Mark completion partial or unknown while review of "
+            "available relevant frozen sources or pages remains unfinished; list that material in "
+            "scope.outstanding. Missing external material and unresolved scientific conclusions belong "
+            "in scope.limitations and do not alone prevent complete after the available relevant material "
+            "has been assessed. This declaration does not prove inspection; "
             "findings may be empty. Return only the ReviewOutput JSON object with no prose before or after it."
         )
 
