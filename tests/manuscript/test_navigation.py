@@ -362,3 +362,29 @@ def test_configured_entrypoints_stay_document_roots_when_another_source_inputs_t
     ]
     unconfigured = json.loads(manager.create_navigation(tmp_path, sources))
     assert [entry["source_path"] for entry in unconfigured["entries"] if entry["command"] == "quantity"] == ["main.tex"]
+
+
+def test_definitions_hide_siunitx_calls_and_display_math_keeps_a_leading_bracket(tmp_path):
+    body = (
+        "\\newcommand{\\defaulttemp}{\\SI{300}{K}}\n"
+        "\\begin{equation}[0.5, 1.0]\\end{equation}\n"
+        "\\begin{table}[0.5]\n\\end{table}\n"
+        "\\scalebox{0.8}[1.2]{Loss 0.25}\n"
+    )
+    quantities = _quantities(tmp_path, {"main.tex": "\\begin{document}\n" + body + "\\end{document}\n"})
+    assert [(command, value) for _, command, value in quantities] == [
+        ("quantity", "0.5"),
+        ("quantity", "1.0"),
+        ("quantity", "0.25"),
+    ]
+
+
+def test_long_environment_bodies_are_stored_as_a_bounded_prefix(tmp_path):
+    rows = "".join(f"{index} & {index}.5 \\\\\n" for index in range(400))
+    (tmp_path / "main.tex").write_text("\\begin{tabular}{cc}\n" + rows + "\\end{tabular}\n")
+    manager = ManuscriptManager(tmp_path)
+    navigation = json.loads(manager.create_navigation(tmp_path, manager.scan_sources(tmp_path, "main.tex")))
+    (entry,) = [entry for entry in navigation["entries"] if entry["command"] == "tabular"]
+    assert len(entry["value"]) == 2000 and rows.startswith(entry["value"])
+    assert entry["value_truncated"] is True
+    assert (entry["start_line"], entry["end_line"]) == (1, 402)

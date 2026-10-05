@@ -82,6 +82,8 @@ QUANTITY_COMMAND_ARGUMENTS = {
     "complexqty": 2,
 }
 QUANTITY_COMMANDS = tuple(QUANTITY_COMMAND_ARGUMENTS)
+# The index keeps a bounded literal prefix; the source range locates the rest.
+NAVIGATION_STORED_VALUE_CHARS = 2000
 NAVIGATION_COMMAND_PATTERN = re.compile(
     r"\\(part|chapter|section|subsection|subsubsection|paragraph|subparagraph|"
     r"label|ref|eqref|pageref|autoref|cref|Cref|cite|citep|citet|autocite|parencite|textcite|"
@@ -133,6 +135,8 @@ NON_QUANTITY_GROUP_LIMITS = {
     "rule": 2,
     "fontsize": 2,
 }
+# Bracket options may follow the last setting group only for these commands.
+TRAILING_OPTION_COMMANDS = frozenset({"scalebox", "begin"})
 DEFINITION_COMMANDS = frozenset({"newcommand", "renewcommand", "providecommand", "def", "gdef", "edef", "xdef"})
 # An unbraced defined name, as in \def\arraystretch{1.5}, with any parameter text before the body.
 DEFINITION_NAME_PATTERN = re.compile(r"[ \t]*(?:\n[ \t]*)?\\(?:[A-Za-z@]+|.)(?:[^{}\n]*?(?=\{))?")
@@ -398,13 +402,18 @@ def _command_argument_spans(text: str) -> Iterator[tuple[int, int]]:
         braces = NON_QUANTITY_GROUP_LIMITS.get(match.group(1))
         if end > start and match.group(1) in DEFINITION_COMMANDS:
             braces -= 1
-        if match.group(1) == "begin" and (name := ENVIRONMENT_NAME_PATTERN.match(text, end)):
+        name = ENVIRONMENT_NAME_PATTERN.match(text, end) if match.group(1) == "begin" else None
+        if name:
             braces = 1 + ENVIRONMENT_ARGUMENT_GROUPS.get(name.group(1).strip(), 0)
-        # Optional bracket arguments after the last setting group, as in \scalebox{x}[y], are settings too.
+        # Optional bracket arguments after the last setting group, as in \scalebox{x}[y] or \begin{table}[h], are
+        # settings too, but a display-math body may open with a bracket, as in \begin{equation}[0.5, 1.0].
+        options = match.group(1) in TRAILING_OPTION_COMMANDS and not (
+            name and name.group(1).strip() in EQUATION_ENVIRONMENTS
+        )
         # A required group may start on the next line; trailing groups and brackets stay on the line.
         while (
             group := re.match((ARGUMENT_SPACE if end == start or braces else r"[ \t]*") + r"([\[{])", text[end:])
-        ) and (braces is None or braces > 0 or group[1] == "["):
+        ) and (braces is None or braces > 0 or (options and group[1] == "[")):
             opening = end + group.end()
             if group.group(1) == "{":
                 closing = _balanced_group_end(text, opening)
@@ -422,6 +431,12 @@ def _command_argument_spans(text: str) -> Iterator[tuple[int, int]]:
 def _row_spacing_spans(text: str, masked: str) -> list[tuple[int, int]]:
     # Masking blanks control symbols such as \\, so find row breaks in the text and keep those outside comments.
     return [match.span() for match in ROW_SPACING_PATTERN.finditer(text) if masked[match.end() - 1] == "]"]
+
+
+def _within(spans: list[tuple[int, int]], lefts: list[int], position: int) -> bool:
+    """Return whether position falls inside one of the merged, sorted spans whose starts are lefts."""
+    nearest = bisect_right(lefts, position) - 1
+    return nearest >= 0 and position < spans[nearest][1]
 
 
 def _environment_body_start(text: str, name: str, position: int) -> int:
@@ -644,16 +659,19 @@ class ManuscriptManager:
             spans = self._navigation_spans(text, masks[path], bodies[path])
             breaks = [match.start() for match in re.finditer("\n", text)]
             for command, start, end, value_start, value_end in spans:
-                value = text[value_start:value_end]
+                value = text[value_start:value_end].strip()
                 entry = {
                     "command": command,
                     "source_path": path,
                     "start_line": bisect_left(breaks, start) + 1,
                     "end_line": bisect_left(breaks, end - 1) + 1,
-                    "value": value.strip(),
+                    "value": value[:NAVIGATION_STORED_VALUE_CHARS],
                 }
+                # Large generated tables would otherwise be copied, once per nested environment, into the frozen run.
+                if len(value) > NAVIGATION_STORED_VALUE_CHARS:
+                    entry["value_truncated"] = True
                 if command == "includegraphics":
-                    candidates = self._navigation_graphics(value.strip(), sources)
+                    candidates = self._navigation_graphics(value, sources)
                     entry["candidate_paths"] = candidates
                     entry["target_path"] = candidates[0] if len(candidates) == 1 else None
                 entries.append(entry)
@@ -719,10 +737,17 @@ class ManuscriptManager:
         spans.extend(cls._navigation_environments(masked))
         if body is not None:
             floor, ceiling = body
-            quantity_commands = [span for span in cls._quantity_commands(masked) if floor <= span[1] < ceiling]
+            # Settings and definitions, such as \newcommand{\temp}{\SI{300}{K}}, typeset no reported value.
+            arguments = _merged_spans(list(_command_argument_spans(masked)))
+            lefts = [left for left, _ in arguments]
+            quantity_commands = [
+                span
+                for span in cls._quantity_commands(masked)
+                if floor <= span[1] < ceiling and not _within(arguments, lefts, span[1])
+            ]
             spans.extend(quantity_commands)
             covered = [(start, end) for _, start, end, _, _ in quantity_commands]
-            spans.extend(cls._navigation_quantities(text, masked, covered, floor, ceiling))
+            spans.extend(cls._navigation_quantities(text, masked, [*covered, *arguments], floor, ceiling))
         return sorted(spans, key=lambda span: span[1])
 
     @staticmethod
@@ -763,13 +788,12 @@ class ManuscriptManager:
     @staticmethod
     def _navigation_quantities(text: str, masked: str, skipped: list[tuple[int, int]], floor: int, ceiling: int):
         # Literal numeric reports: decimals, uncertainties, exponents, plus-minus or percentages, with an adjacent unit.
-        excluded = _merged_spans([*skipped, *_command_argument_spans(masked), *_row_spacing_spans(text, masked)])
+        excluded = _merged_spans([*skipped, *_row_spacing_spans(text, masked)])
         lefts = [left for left, _ in excluded]
         scanned = CONTROL_WORD_BEFORE_NUMBER_PATTERN.sub(lambda word: " " * len(word[0]), text)
         for match in QUANTITY_PATTERN.finditer(scanned, floor, ceiling):
             start, end = match.span()
-            nearest = bisect_right(lefts, start) - 1
-            if masked[start] != text[start] or (nearest >= 0 and start < excluded[nearest][1]):
+            if masked[start] != text[start] or _within(excluded, lefts, start):
                 continue
             if LENGTH_FOLLOWER_PATTERN.match(text, end) or NON_QUANTITY_CONTEXT_PATTERN.search(
                 text, max(floor, start - 24), start
