@@ -54,9 +54,22 @@ EQUATION_ENVIRONMENTS = (
     "eqnarray*",
     "displaymath",
 )
-QUANTITY_COMMANDS = ("SI", "num", "qty", "SIrange", "numrange", "qtyrange")
 # Mandatory brace groups per siunitx command: numbers first, then the unit.
-QUANTITY_COMMAND_ARGUMENTS = {"num": 1, "SI": 2, "qty": 2, "numrange": 2, "SIrange": 3, "qtyrange": 3}
+QUANTITY_COMMAND_ARGUMENTS = {
+    "num": 1,
+    "numlist": 1,
+    "numproduct": 1,
+    "SI": 2,
+    "qty": 2,
+    "SIlist": 2,
+    "qtylist": 2,
+    "SIproduct": 2,
+    "qtyproduct": 2,
+    "numrange": 2,
+    "SIrange": 3,
+    "qtyrange": 3,
+}
+QUANTITY_COMMANDS = tuple(QUANTITY_COMMAND_ARGUMENTS)
 NAVIGATION_COMMAND_PATTERN = re.compile(
     r"\\(part|chapter|section|subsection|subsubsection|paragraph|subparagraph|"
     r"label|ref|eqref|pageref|autoref|cref|Cref|cite|citep|citet|autocite|parencite|textcite|"
@@ -125,7 +138,7 @@ CONTROL_WORD_BEFORE_NUMBER_PATTERN = re.compile(
     r"\\(?!(?:pm|mp|times|cdot)(?![A-Za-z]))[A-Za-z]+(?=[-+\u2212]?(?:\d|\.\d))"
 )
 QUANTITY_PATTERN = re.compile(
-    r"(?<![A-Za-z0-9_.:/\\@])(?:[-+\u2212]\s*)?"
+    r"(?<![A-Za-z0-9_.:/\\@])(?:(?<!-)[-+\u2212]\s*)?"
     r"(?:\d{1,3}(?:(?:,|\{,\})\d{3})+(?:\.\d+)?|\d+\.\d+|\.\d+|\d+)(?!\d|\.\d)"
     r"(?P<uncertainty>\(\d+(?:\.\d+)?\))?"
     r"(?P<exponent>[eE][-+\u2212]?\d+)?"
@@ -134,11 +147,25 @@ QUANTITY_PATTERN = re.compile(
     r"(?P<percent>\s*\\%)?"
 )
 UNIT_POWER = r"(?:\^\s*(?:\{\s*[-+\u2212]?\s*\d+\s*\}|[-+\u2212]?\d))?"
+UNIT_SPACE = r"(?:~|\\[,;: ]|[ \t])?[ \t]?"
+UNIT_ARGUMENT = r"\s*\{(?:[^{}\n]|\{[^{}\n]{1,8}\}){1,24}\}" + UNIT_POWER
+UNIT_WORD = r"[A-Za-zÅµμ]{1,10}" + UNIT_POWER
+UNIT_SYNTAX = (
+    r"(?:\\(?:mathrm|text|textrm|rm|mbox|unit|si)" + UNIT_ARGUMENT + "|" + UNIT_WORD + "(?:/" + UNIT_WORD + ")?)"
+)
+# Past closing math, only a tie or thin space, or a math-mode or siunitx unit command, continues the value;
+# a word after a plain space is prose, as in "$p=0.05$ threshold". A unit never starts on the next line.
 QUANTITY_UNIT_PATTERN = re.compile(
-    r"\$?(?:~|\\[,;: ]|[ \t])?\s?"
-    r"(?:\\(?:mathrm|text|textrm|rm|mbox|unit|si)\s*\{(?:[^{}\n]|\{[^{}\n]{1,8}\}){1,24}\}" + UNIT_POWER + "|"
-    r"[A-Za-z\u00c5\u00b5\u03bc]{1,10}" + UNIT_POWER + r"(?:/[A-Za-z\u00c5\u00b5\u03bc]{1,10}" + UNIT_POWER + ")?)"
-    r"(?![A-Za-z])"
+    r"(?:\$(?:(?:~|\\[,;:])[ \t]?"
+    + UNIT_SYNTAX
+    + "|"
+    + UNIT_SPACE
+    + r"\\(?:mathrm|unit|si)"
+    + UNIT_ARGUMENT
+    + ")|"
+    + UNIT_SPACE
+    + UNIT_SYNTAX
+    + r")(?![A-Za-z])"
 )
 # Numbers named by a version, software release, or numbered reference are not reported values.
 NON_QUANTITY_CONTEXT_PATTERN = re.compile(
@@ -384,6 +411,51 @@ def _document_body(masked: str) -> tuple[int, int]:
     return floor, closing.start() if closing else len(masked)
 
 
+def _walk_document(
+    path: str,
+    state: str,
+    events: dict[str, list[tuple[int, str, str]]],
+    lengths: dict[str, int],
+    bounds: dict[str, tuple[int, int] | None],
+    memo: dict[tuple[str, str], str],
+) -> str:
+    """Process one source from a document state (before, body, after) and return the state it leaves."""
+    if (path, state) in memo:
+        return memo[(path, state)]
+    memo[(path, state)] = state  # An input cycle leaves the state unchanged.
+    entered = state
+    floor = 0 if state == "body" else None
+    ceiling = lengths[path]
+    for position, kind, child in events[path]:
+        previous = state
+        if kind == "input":
+            state = _walk_document(child, state, events, lengths, bounds, memo)
+        elif kind == "end" or state == "before":
+            state = "after" if kind == "end" else "body"
+        if previous != "body" and state == "body":
+            floor = position
+        elif previous == "body" and state != "body":
+            ceiling = position
+        if state == "after":
+            break
+    if floor is not None and floor < ceiling:
+        known = bounds.get(path)
+        bounds[path] = (min(known[0], floor), max(known[1], ceiling)) if known else (floor, ceiling)
+    memo[(path, entered)] = state
+    return state
+
+
+def _input_closure(path: str, events: dict[str, list[tuple[int, str, str]]]) -> set[str]:
+    tree = {path}
+    pending = [path]
+    while pending:
+        for _, kind, child in events[pending.pop()]:
+            if kind == "input" and child not in tree:
+                tree.add(child)
+                pending.append(child)
+    return tree
+
+
 def _merged_spans(spans: list[tuple[int, int]]) -> list[tuple[int, int]]:
     merged: list[tuple[int, int]] = []
     for left, right in sorted(spans):
@@ -524,9 +596,9 @@ class ManuscriptManager:
             if Path(source.path).suffix.lower() in {".tex", ".ltx"}
         }
         masks = {path: self._dependency_text(text, preserve_positions=True) for path, text in texts.items()}
-        preamble = self._preamble_sources(snapshot, masks)
+        bodies = self._document_bodies(snapshot, masks)
         for path, text in texts.items():
-            spans = self._navigation_spans(text, masks[path], preamble=path in preamble)
+            spans = self._navigation_spans(text, masks[path], bodies[path])
             breaks = [match.start() for match in re.finditer("\n", text)]
             for command, start, end, value_start, value_end in spans:
                 value = text[value_start:value_end]
@@ -556,12 +628,15 @@ class ManuscriptManager:
             + "\n"
         )
 
-    def _preamble_sources(self, snapshot: Path, masks: dict[str, str]) -> set[str]:
-        """Return sources reached only through inputs placed outside a document body or inside such sources."""
+    def _document_bodies(self, snapshot: Path, masks: dict[str, str]) -> dict[str, tuple[int, int] | None]:
+        """Follow inputs in processing order and bound each source by the document body it reaches, if any."""
         root = snapshot.resolve()
-        edges: dict[str, list[tuple[str, bool]]] = {}
+        events: dict[str, list[tuple[int, str, str]]] = {}
         for path, masked in masks.items():
-            floor, ceiling = _document_body(masked)
+            items = [
+                (match.end() if match[1] == "begin" else match.start(), match[1], "")
+                for match in re.finditer(r"\\(begin|end)\s*\{document\}", masked)
+            ]
             for match in INPUT_PATTERN.finditer(masked):
                 dependency = Path(next(group for group in match.groups() if group is not None).strip())
                 try:
@@ -570,29 +645,33 @@ class ManuscriptManager:
                     ).as_posix()
                 except InfrastructureError:
                     continue
-                edges.setdefault(path, []).append((child, not floor <= match.start() < ceiling))
-        included = {child for children in edges.values() for child, _ in children}
-        body = [path for path in masks if path not in included]
-        reached = set(body)
-        while body:
-            for child, outside in edges.get(body.pop(), []):
-                if not outside and child not in reached:
-                    reached.add(child)
-                    body.append(child)
-        return set(masks) - reached
+                if child in masks:
+                    items.append((match.start(), "input", child))
+            events[path] = sorted(items)
+        included = {child for items in events.values() for _, kind, child in items if kind == "input"}
+        lengths = {path: len(masked) for path, masked in masks.items()}
+        bounds: dict[str, tuple[int, int] | None] = {}
+        reached: set[str] = set()
+        for path in sorted(set(masks) - included):
+            tree = _input_closure(path, events)
+            reached |= tree
+            # A source tree without \begin{document} is a fragment that is typeset as a whole.
+            opens = any(kind == "begin" for member in tree for _, kind, _ in events[member])
+            _walk_document(path, "before" if opens else "body", events, lengths, bounds, {})
+        return {path: bounds.get(path) if path in reached else _document_body(masked) for path, masked in masks.items()}
 
     @classmethod
     def _navigation_spans(
-        cls, text: str, masked: str, *, preamble: bool = False
+        cls, text: str, masked: str, body: tuple[int, int] | None
     ) -> list[tuple[str, int, int, int, int]]:
-        """Return (command, start, end, value_start, value_end) in source order for one file."""
+        """Return (command, start, end, value_start, value_end) in source order; quantities only within body."""
         spans = [
             (command, start, end, end - 1 - len(value), end - 1)
             for command, start, end, value in cls._navigation_commands(masked)
         ]
         spans.extend(cls._navigation_environments(masked))
-        if not preamble:
-            floor, ceiling = _document_body(masked)
+        if body is not None:
+            floor, ceiling = body
             quantity_commands = [span for span in cls._quantity_commands(masked) if floor <= span[1] < ceiling]
             spans.extend(quantity_commands)
             covered = [(start, end) for _, start, end, _, _ in quantity_commands]

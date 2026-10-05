@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from scriptorium.manuscript import ManuscriptManager
+from scriptorium.manuscript import QUANTITY_COMMANDS, ManuscriptManager
 from scriptorium.schemas import DEFAULT_EVIDENCE_ANCHOR_CONTRACT
 
 
@@ -174,7 +174,7 @@ def _quantities(tmp_path, files):
     return [
         (entry["source_path"], entry["command"], entry["value"])
         for entry in navigation["entries"]
-        if entry["command"] in {"quantity", "SI", "alignat", "alignat*"}
+        if entry["command"] in {"quantity", "alignat", "alignat*", *QUANTITY_COMMANDS}
     ]
 
 
@@ -286,3 +286,37 @@ def test_row_spacing_split_settings_and_environment_arguments_stay_out_of_values
     assert [value for command, value in values if command == "quantity"] == ["0.5", "1.5 m"]
     assert dict(values)["tabular"].startswith("0.5 & 1.5 m")
     assert dict(values)["table"].startswith("\\begin{tabular}")
+
+
+def test_range_bounds_siunitx_lists_and_units_stop_at_prose_after_math(tmp_path):
+    body = (
+        "Gaps span 1.2--1.5 eV, \\numlist{0.1;0.2}, \\qtylist{1;2}{\\metre}, and \\SIproduct{2 x 3}{\\metre}.\n"
+        "A $p=0.05$ threshold, $0.25$~eV, and $0.5$ \\si{K}.\n"
+        "Loss 0.75\nwas low.\n"
+    )
+    quantities = _quantities(tmp_path, {"main.tex": "\\begin{document}\n" + body + "\\end{document}\n"})
+    assert [(command, value) for _, command, value in quantities] == [
+        ("quantity", "1.2"),
+        ("quantity", "1.5 eV"),
+        ("numlist", "{0.1;0.2}"),
+        ("qtylist", "{1;2}{\\metre}"),
+        ("SIproduct", "{2 x 3}{\\metre}"),
+        ("quantity", "0.05"),
+        ("quantity", "0.25$~eV"),
+        ("quantity", "0.5$ \\si{K}"),
+        ("quantity", "0.75"),
+    ]
+
+
+def test_document_state_follows_inputs_in_processing_order(tmp_path):
+    files = {
+        "main.tex": "\\documentclass{article}\n\\input{settings}\n\\input{paper}\n\\input{notes}\n",
+        "settings.tex": "\\def\\ratio{0.75}\n",
+        "paper.tex": "\\begin{document}\nThe gap is 1.25 eV.\n\\input{body}\n\\end{document}\n",
+        "body.tex": "A loss of 0.5\\%.\n",
+        "notes.tex": "Untypeset 4.5 eV.\n",
+    }
+    assert _quantities(tmp_path, files) == [
+        ("body.tex", "quantity", r"0.5\%"),
+        ("paper.tex", "quantity", "1.25 eV"),
+    ]
