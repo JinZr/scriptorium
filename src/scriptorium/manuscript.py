@@ -105,7 +105,9 @@ ENVIRONMENT_ARGUMENT_GROUPS = {
     "wrapfigure": 2,
     "wraptable": 2,
 }
-ENVIRONMENT_NAME_PATTERN = re.compile(r"[ \t]*\{([^{}]*)\}")
+# TeX skips spaces and one line break before an argument; a blank line ends the search.
+ARGUMENT_SPACE = r"[ \t]*(?:\n[ \t]*)?"
+ENVIRONMENT_NAME_PATTERN = re.compile(ARGUMENT_SPACE + r"\{([^{}]*)\}")
 # A number may directly follow a control word such as \approx; blank the word so the number is seen with its sign.
 CONTROL_WORD_BEFORE_NUMBER_PATTERN = re.compile(
     r"\\(?!(?:pm|mp|times|cdot)(?![A-Za-z]))[A-Za-z]+(?=[-+\u2212]?(?:\d|\.\d))"
@@ -114,7 +116,7 @@ QUANTITY_PATTERN = re.compile(
     r"(?<![A-Za-z0-9_.:/\\@])(?:[-+\u2212]\s*)?"
     r"(?:\d{1,3}(?:(?:,|\{,\})\d{3})+(?:\.\d+)?|\d+\.\d+|\.\d+|\d+)(?!\d|\.\d)"
     r"(?P<uncertainty>\(\d+(?:\.\d+)?\))?"
-    r"(?P<exponent>[eE][-+\u2212]?\d+(?![A-Za-z]))?"
+    r"(?P<exponent>[eE][-+\u2212]?\d+)?"
     r"(?P<pm>\s*(?:\\pm|\u00b1|\+/-)\s*(?:\d+\.\d+|\.\d+|\d+))?"
     r"(?P<times>\s*(?:\\times|\u00d7|\\cdot)\s*10\s*\^\s*(?:\{\s*[-+\u2212]?\s*\d+\s*\}|[-+\u2212]?\d))?"
     r"(?P<percent>\s*\\%)?"
@@ -319,7 +321,10 @@ def _command_argument_spans(text: str) -> Iterator[tuple[int, int]]:
         if match.group(1) == "begin" and (name := ENVIRONMENT_NAME_PATTERN.match(text, end)):
             braces = 1 + ENVIRONMENT_ARGUMENT_GROUPS.get(name.group(1).strip(), 0)
         # Optional bracket arguments after the last setting group, as in \scalebox{x}[y], are settings too.
-        while (group := re.match(r"[ \t]*([\[{])", text[end:])) and (braces is None or braces > 0 or group[1] == "["):
+        # A required group may start on the next line; trailing groups and brackets stay on the line.
+        while (
+            group := re.match((ARGUMENT_SPACE if end == start or braces else r"[ \t]*") + r"([\[{])", text[end:])
+        ) and (braces is None or braces > 0 or group[1] == "["):
             opening = end + group.end()
             if group.group(1) == "{":
                 closing = _balanced_group_end(text, opening)

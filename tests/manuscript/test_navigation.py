@@ -249,3 +249,20 @@ def test_versions_references_postscript_inputs_and_powered_units(tmp_path):
         ("main.tex", "quantity", "2.5 \\mathrm{m^{2}}"),
         ("main.tex", "SI", "{3.5}{K}"),
     ]
+
+
+def test_attached_exponent_units_and_arguments_on_the_next_line(tmp_path):
+    files = {
+        "main.tex": (
+            "\\begin{document}\n"
+            "Gaps of 1.2e-3eV and 1.2E5Pa.\n"
+            "\\ref\n{fig-1.5} \\cite\n  {study-2.0}\n"
+            "\\label{x}\n{7.5 K}\n"
+            "\\end{document}\n"
+        ),
+    }
+    assert _quantities(tmp_path, files) == [
+        ("main.tex", "quantity", "1.2e-3eV"),
+        ("main.tex", "quantity", "1.2E5Pa"),
+        ("main.tex", "quantity", "7.5 K"),
+    ]
