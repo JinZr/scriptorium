@@ -26,8 +26,21 @@ Return to the Scriptorium checkout and seal a baseline **before any task is clai
 python -m egs.external_review.collect \
   --project /absolute/manuscript-project --run RUN_ID \
   --case paper-01 --trial configuration-a \
+  --host-computation denied \
+  --labels /absolute/evaluation/labels \
   --output /absolute/evaluation/a-before
 ```
+
+`--labels` binds the sealed held-out labels of section 5 to this baseline. It is accepted only before the first
+attempt, for a trial the labels plan and the manuscript tree they describe. The after-review collection inherits
+the binding, and scoring requires it, so labels written after reviews are seen cannot be scored as held out.
+Omit it when no human-label score is planned.
+
+`--host-computation` records whether the operator plans to let the reviewer run its own calculations on the
+host (`allowed`, `denied` or `unknown`). Scriptorium has no calculation tool and does not enforce or observe
+this condition; configure the host accordingly. The after-review collection must repeat the baseline's value
+(`unknown` for a baseline sealed before this option existed). A collection without a baseline reports its host
+computation as `unknown` in comparisons and scores, whatever value was declared.
 
 Record the planned host/model/effort, tool versions, allowed corrections and existing paid budget externally
 before launching the host. A fresh conversation uses the shared Scriptorium skill to claim, retrieve and submit.
@@ -48,6 +61,7 @@ python -m egs.external_review.collect \
   --project /absolute/manuscript-project --run RUN_ID \
   --case paper-01 --trial configuration-a \
   --baseline /absolute/evaluation/a-before \
+  --host-computation denied \
   --host-record /absolute/sanitized-host-tool-events.jsonl \
   --output /absolute/evaluation/a-after
 ```
@@ -75,6 +89,7 @@ including when an input has been resealed, before prospective provenance can be 
 Each collection contains:
 
 - `collection.json`: manuscript commit/tree, frozen configuration and material identities, baseline binding,
+  planned `host_conditions`,
   collection-time code/dependency hashes, and attached host-record paths. Collection-time code is not evidence
   of which tool build an earlier reviewer used.
 - `report.json`, `inspection-calls.json`, `artifacts/`, `bundle/`: the complete report, actual collector CLI
@@ -141,10 +156,81 @@ independent context. Invalid judge results publish no aggregate. Accepted judge 
 assessments and supported consequential counts, and candidate-level disagreements without majority voting.
 `packet_digest` binds the public judge input; `packet_seal_digest` binds the entire packet, including its private
 trial mapping, collection digests and workflow records. Keep the sealed packet to verify either binding later.
-Input comparisons list differing commits, sources, prompts, schemas, PDF and page hashes within each case.
+Input comparisons list differing commits, sources, prompts, schemas, PDF and page hashes, and planned host
+computation within each case.
 Matching these does not establish equal host capabilities, effort, cost or independent model-family biases.
 
 There are no gold labels, recall/precision/F1 scores, human decisions or release claims here. Model-supported
 concerns remain candidates. Local LaTeX candidates with unresolved provenance, build fidelity, review mapping
 or rights remain exploratory; this example does not clear those prerequisites. Synthetic tests and collection
 of prior paid-run artifacts are not new paid reviewer or judge runs.
+
+## 5. Score against held-out human labels
+
+Model judgments cannot tell whether a reviewer finds the problems that matter. For that, people who never see
+the reviewer outputs write labels before any trial runs. Labels and candidate matches are human work: this
+example validates and binds them, and never writes, suggests or infers either.
+
+Write a label file per held-out manuscript set. A labeled case lists its known problems; `planted` problems were
+inserted on purpose and `documented` ones come from errata, retractions or published replies. A control case is
+a corrected copy of a labeled case and names the problems its correction removed. `tree_sha` is the Git tree of
+the committed manuscript the labels describe (`git rev-parse COMMIT^{tree}`); each case has its own tree, and
+scoring rejects a trial collected from another tree. `trials` names every planned trial arm: scoring rejects a packet that omits or adds an arm, and
+each arm must cover every labeled case, so an omitted manuscript, control or configuration cannot shrink the
+results:
+
+```json
+{
+  "label_set": "held-out-2026",
+  "annotators": ["annotator-a", "annotator-b"],
+  "trials": ["configuration-a", "configuration-b"],
+  "cases": [
+    {
+      "case": "paper-01",
+      "tree_sha": "<manuscript tree SHA>",
+      "problems": [
+        {"id": "P1", "kind": "planted", "summary": "Table 2 mean disagrees with its rows.", "locations": ["tables/results.tex:14"]}
+      ]
+    },
+    {"case": "paper-01-fixed", "tree_sha": "<corrected tree SHA>", "control_of": "paper-01", "corrected": ["P1"]}
+  ]
+}
+```
+
+Seal the labels before any trial and bind them to each baseline with `--labels` (section 1), then keep them away
+from reviewers and judges:
+
+```bash
+python -m egs.external_review.labels seal \
+  --labels /absolute/held-out/labels.json --output /absolute/evaluation/labels
+```
+
+After preparing the judging packet, a person who has the labels reads each candidate in `judging/public/input.json`
+and records which labeled problems it identifies. Every candidate is annotated exactly once; an empty list means
+it matches none. Problem IDs must belong to the case the candidate came from, and on a control case only to its
+corrected problems; scoring rejects a candidate merged from cases whose bundled material is identical, since one
+match list cannot use two cases' problem IDs. Copy `packet_digest` from the public seal and `labels_digest` from the label seal:
+
+```json
+{
+  "packet_digest": "<judging/public/seal.json digest>",
+  "labels_digest": "<labels/seal.json digest>",
+  "matchers": ["annotator-a"],
+  "matches": [{"candidate_id": "C0001", "problems": ["P1"]}, {"candidate_id": "C0002", "problems": []}]
+}
+```
+
+```bash
+python -m egs.external_review.labels score \
+  --packet /absolute/evaluation/judging --labels /absolute/evaluation/labels \
+  --matches /absolute/evaluation/matches.json --output /absolute/evaluation/scores
+```
+
+`scores/score.json` reports, per case and trial, the labeled problems found and missed (also by kind), on
+controls the distinct corrected problems still reported as false alarms (several candidates matching one
+corrected problem count once), the number of candidates matching no label,
+whether the trial had an accepted review, and its planned host computation. `by_trial` sums these across cases
+for each trial name. Trials without an accepted review keep their problems in the denominator. Recall covers only
+the labeled problems: an unmatched candidate may be a real, unlabeled concern, so it is not counted as a false
+positive. These scores measure one capability; they do not establish revision, approval, verification or
+release-gate behavior, and synthetic tests of this script are not a held-out evaluation.

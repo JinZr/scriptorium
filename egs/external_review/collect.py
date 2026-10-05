@@ -15,6 +15,7 @@ from scriptorium.domain import digest_json
 from scriptorium.tool_output import MAX_TOOL_RESPONSE_BYTES
 
 from .files import contained_file, file_records, publication, read_json, verify_seal, write_json
+from .labels import LabelSet
 
 
 def cli(project, arguments, records):
@@ -146,14 +147,35 @@ def review_summary(report):
     }
 
 
-def collect(project, run_id, output, case, trial, baseline=None, host_records=()):
+HOST_COMPUTATION = ("allowed", "denied", "unknown")
+
+
+def bind_labels(labels, case, trial, report):
+    """Return the digest of sealed labels that plan this trial, bound before its first attempt."""
+    digest = verify_seal(labels)
+    LabelSet.model_validate_json((labels / "labels.json").read_bytes()).check_planned(
+        case, trial, report["run"]["tree_sha"]
+    )
+    if any(item["attempts"] for item in report["tasks"]):
+        raise ValueError("Labels can be bound only before the first attempt")
+    if verify_seal(labels) != digest:
+        raise ValueError(f"Collection has changed: {labels}")
+    return digest
+
+
+def collect(
+    project, run_id, output, case, trial, baseline=None, host_records=(), host_computation="unknown", labels=None
+):
+    if host_computation not in HOST_COMPUTATION:
+        raise ValueError(f"Host computation must be one of {', '.join(HOST_COMPUTATION)}")
+    host_conditions = {"computation": host_computation}
     project = project.resolve()
     if not (project / ".scriptorium/state.sqlite3").is_file():
         raise ValueError("Project must have an existing Scriptorium run")
     if output.resolve().is_relative_to((project / ".scriptorium").resolve()):
         raise ValueError("Evaluation output must be outside Scriptorium state")
     records = []
-    with publication(output, [baseline] if baseline is not None else []) as stage:
+    with publication(output, [path for path in (baseline, labels) if path is not None]) as stage:
         report = report_parts(project, run_id, records)
         if report["run"]["frozen_config"].get("execution") != "external":
             raise ValueError("This example requires an external-harness run")
@@ -168,6 +190,7 @@ def collect(project, run_id, output, case, trial, baseline=None, host_records=()
             "bundle": bundle,
         }
         baseline_digest = None
+        labels_digest = None if labels is None or baseline is not None else bind_labels(labels, case, trial, report)
         if baseline is not None:
             baseline_digest = verify_seal(baseline)
             previous = read_json(baseline / "collection.json")
@@ -178,8 +201,14 @@ def collect(project, run_id, output, case, trial, baseline=None, host_records=()
                 inputs,
             ):
                 raise ValueError("Prepared trial inputs or identity changed")
+            # Baselines sealed before host conditions were recorded planned none.
+            if previous.get("host_conditions", {"computation": "unknown"}) != host_conditions:
+                raise ValueError("Baseline did not record the same planned host conditions")
             if any(item["attempts"] for item in read_json(baseline / "report.json")["tasks"]):
                 raise ValueError("Baseline must be collected before the first attempt")
+            labels_digest = previous.get("labels_digest")
+            if labels is not None and verify_seal(labels) != labels_digest:
+                raise ValueError("Baseline was not bound to these labels")
             if verify_seal(baseline) != baseline_digest:
                 raise ValueError("Collection has changed while reading baseline")
         for item in report["tasks"]:
@@ -218,6 +247,8 @@ def collect(project, run_id, output, case, trial, baseline=None, host_records=()
                 "inputs": inputs,
                 "collected_at": datetime.now(timezone.utc).isoformat(),
                 "baseline_digest": baseline_digest,
+                "labels_digest": labels_digest,
+                "host_conditions": host_conditions,
                 "prepared_before_review": baseline_digest is not None,
                 "collector_environment": {
                     "python": sys.version,
@@ -259,9 +290,28 @@ def main():
     parser.add_argument("--trial", required=True)
     parser.add_argument("--baseline", type=Path)
     parser.add_argument("--host-record", type=Path, action="append", default=[])
+    parser.add_argument("--labels", type=Path, help="Sealed held-out labels to bind to a baseline before review")
+    parser.add_argument(
+        "--host-computation",
+        choices=HOST_COMPUTATION,
+        required=True,
+        help="Whether the host let the reviewer run its own calculations, as planned for this trial",
+    )
     args = parser.parse_args()
     try:
-        print(collect(args.project, args.run, args.output, args.case, args.trial, args.baseline, args.host_record))
+        print(
+            collect(
+                args.project,
+                args.run,
+                args.output,
+                args.case,
+                args.trial,
+                args.baseline,
+                args.host_record,
+                args.host_computation,
+                args.labels,
+            )
+        )
     except (ValueError, OSError, KeyError) as exc:
         parser.exit(1, f"Collection failed: {exc}\n")
 
