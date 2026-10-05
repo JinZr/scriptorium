@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from bisect import bisect_left, bisect_right
 from dataclasses import asdict, dataclass
 import difflib
 import errno
@@ -35,6 +36,224 @@ ADDBIB_PATTERN = re.compile(r"\\addbibresource(?:\[[^\]]*\])?\s*\{([^}]+)\}")
 GRAPHICS_PATTERN = re.compile(r"\\includegraphics\*?(?:\s*\[[^\]]*\])?\s*\{([^}]+)\}")
 GRAPHICSPATH_PATTERN = re.compile(r"\\graphicspath(?![A-Za-z@])\s*(\{(?:\s*\{[^{}]*\}\s*)*\})?")
 GRAPHICS_EXTENSIONS = ("", ".pdf", ".png", ".jpg", ".jpeg", ".eps")
+TABLE_ENVIRONMENTS = (
+    "table",
+    "table*",
+    "tabular",
+    "tabular*",
+    "tabularx",
+    "tabulary",
+    "longtable",
+    "sidewaystable",
+)
+EQUATION_ENVIRONMENTS = (
+    "equation",
+    "equation*",
+    "align",
+    "align*",
+    "alignat",
+    "alignat*",
+    "gather",
+    "gather*",
+    "multline",
+    "multline*",
+    "flalign",
+    "flalign*",
+    "eqnarray",
+    "eqnarray*",
+    "displaymath",
+)
+# Mandatory brace groups per siunitx command: numbers first, then the unit.
+QUANTITY_COMMAND_ARGUMENTS = {
+    "num": 1,
+    "numlist": 1,
+    "numproduct": 1,
+    "SI": 2,
+    "qty": 2,
+    "SIlist": 2,
+    "qtylist": 2,
+    "SIproduct": 2,
+    "qtyproduct": 2,
+    "numrange": 2,
+    "SIrange": 3,
+    "qtyrange": 3,
+    "ang": 1,
+    "complexnum": 1,
+    "complexqty": 2,
+}
+QUANTITY_COMMANDS = tuple(QUANTITY_COMMAND_ARGUMENTS)
+# The index keeps a bounded literal prefix; the source range locates the rest.
+NAVIGATION_STORED_VALUE_CHARS = 2000
+NAVIGATION_COMMAND_PATTERN = re.compile(
+    r"\\(part|chapter|section|subsection|subsubsection|paragraph|subparagraph|"
+    r"label|ref|eqref|pageref|autoref|cref|Cref|cite|citep|citet|autocite|parencite|textcite|"
+    r"caption|includegraphics)\*?(?![A-Za-z@])(?:\s*\[[^\]]*\]){0,2}\s*\{"
+)
+NAVIGATION_ENVIRONMENT_PATTERN = re.compile(
+    r"\\begin\s*\{("
+    + "|".join(re.escape(name) for name in sorted({*TABLE_ENVIRONMENTS, *EQUATION_ENVIRONMENTS}, key=len, reverse=True))
+    + r")\}"
+)
+QUANTITY_COMMAND_PATTERN = re.compile(r"\\(" + "|".join(QUANTITY_COMMANDS) + r")(?![A-Za-z@])(?:\s*\[[^\]]*\])?\s*\{")
+# Arguments of these commands are labels, paths, layout or colour settings rather than reported values.
+NON_QUANTITY_ARGUMENT_PATTERN = re.compile(
+    r"\\(label|ref|eqref|pageref|autoref|cref|Cref|cite[a-zA-Z]*|[a-z]*cite|includegraphics|input|include|url|href|"
+    r"vspace|hspace|vskip|hskip|setlength|addtolength|resizebox|scalebox|rule|setcounter|addtocounter|linespread|"
+    r"fontsize|usepackage|documentclass|bibliographystyle|bibliography|addbibresource|graphicspath|newcommand|"
+    r"renewcommand|providecommand|def|gdef|edef|xdef|definecolor|color|colorbox|begin|end|multicolumn|multirow|"
+    r"cline|specialrule|cmidrule|hypersetup|geometry|tag|kern|mskip|mkern|SetKw[A-Za-z]*)\*?(?![A-Za-z@])"
+)
+# Only the leading brace groups of these commands are settings; later groups hold typeset content.
+NON_QUANTITY_GROUP_LIMITS = {
+    **dict.fromkeys(
+        (
+            "label",
+            "ref",
+            "eqref",
+            "pageref",
+            "autoref",
+            "cref",
+            "Cref",
+            "includegraphics",
+            "input",
+            "include",
+            "url",
+            "vspace",
+            "hspace",
+            "linespread",
+            "usepackage",
+            "documentclass",
+            "bibliographystyle",
+            "bibliography",
+            "addbibresource",
+            "graphicspath",
+            "cline",
+            "cmidrule",
+            "hypersetup",
+            "geometry",
+        ),
+        1,
+    ),
+    "specialrule": 3,
+    "multicolumn": 2,
+    "multirow": 2,
+    "color": 1,
+    "colorbox": 1,
+    "begin": 1,
+    "end": 1,
+    "resizebox": 2,
+    "scalebox": 1,
+    "href": 1,
+    "newcommand": 2,
+    "renewcommand": 2,
+    "providecommand": 2,
+    "def": 2,
+    "gdef": 2,
+    "edef": 2,
+    "xdef": 2,
+    "tag": 1,
+    "hskip": 0,
+    "vskip": 0,
+    "kern": 0,
+    "mskip": 0,
+    "mkern": 0,
+    "setlength": 2,
+    "addtolength": 2,
+    "setcounter": 2,
+    "addtocounter": 2,
+    "definecolor": 3,
+    "rule": 2,
+    "fontsize": 2,
+}
+# Bracket options may follow the last setting group only for these commands.
+TRAILING_OPTION_COMMANDS = frozenset({"scalebox", "begin"})
+DEFINITION_COMMANDS = frozenset({"newcommand", "renewcommand", "providecommand", "def", "gdef", "edef", "xdef"})
+# An unbraced defined name, as in \def\arraystretch{1.5}, with any parameter text before the body.
+DEFINITION_NAME_PATTERN = re.compile(r"[ \t]*(?:\r?\n[ \t]*)?\\(?:[A-Za-z@]+|.)(?:[^{}\n]*?(?=\{))?")
+# Primitive skips and kerns take an unbraced dimension, as in \hskip 1.5cm plus 1fil.
+SKIP_COMMANDS = frozenset({"hskip", "vskip", "kern", "mskip", "mkern"})
+TEX_UNIT = r"(?:true\s*)?(?:pt|pc|in|bp|cm|mm|dd|cc|sp|em|ex|mu|px)"
+TEX_DIMENSION = r"[-+]?\s*(?:\d+(?:[.,]\d*)?|[.,]\d+)\s*"
+SKIP_DIMENSION_PATTERN = re.compile(
+    r"\s*" + TEX_DIMENSION + TEX_UNIT + r"(?:\s*(?:plus|minus)\s*" + TEX_DIMENSION + r"(?:fil{1,3}|" + TEX_UNIT + "))*"
+)
+# A row break's optional spacing, as in \\[1.5mm], is a layout length rather than a reported value.
+ROW_SPACING_PATTERN = re.compile(r"(?<!\\)\\\\\*?[ \t]*\[[^\]\n]*\]")
+# Mandatory groups an environment takes after its name; other environments may open their body with a group.
+ENVIRONMENT_ARGUMENT_GROUPS = {
+    "tabular": 1,
+    "tabular*": 2,
+    "tabularx": 2,
+    "tabulary": 2,
+    "longtable": 1,
+    "array": 1,
+    "alignat": 1,
+    "alignat*": 1,
+    "minipage": 1,
+    "multicols": 1,
+    "subfigure": 1,
+    "subtable": 1,
+    "wrapfigure": 2,
+    "wraptable": 2,
+}
+# TeX skips spaces and one line break before an argument; a blank line ends the search.
+ARGUMENT_SPACE = r"[ \t]*(?:\r?\n[ \t]*)?"
+ENVIRONMENT_NAME_PATTERN = re.compile(ARGUMENT_SPACE + r"\{([^{}]*)\}")
+# A number may directly follow a control word such as \approx; blank the word so the number is seen with its sign.
+CONTROL_WORD_BEFORE_NUMBER_PATTERN = re.compile(
+    r"\\(?!(?:pm|mp|times|cdot)(?![A-Za-z]))[A-Za-z]+(?=[-+\u2212]?(?:\d|\.\d))"
+)
+QUANTITY_PATTERN = re.compile(
+    r"(?<![A-Za-z0-9_.:/\\@])(?:(?<!-)[-+\u2212]\s*)?"
+    r"(?:(?P<power>10\s*\^\s*(?:\{\s*[-+\u2212]?\s*\d+(?:\.\d+)?\s*\}|[-+\u2212]?\d))"
+    r"|\d{1,3}(?:(?:,|\{,\})\d{3})+(?:\.\d+)?|\d+\.\d+|\.\d+|\d+)(?!\d|\.\d)"
+    r"(?P<uncertainty>\(\d+(?:\.\d+)?\))?"
+    r"(?P<exponent>[eE][-+\u2212]?\d+)?"
+    r"(?P<pm>\s*(?:\\pm|\u00b1|\+/-)\s*(?:\d+\.\d+|\.\d+|\d+))?"
+    r"(?P<times>\s*(?:\\times|\u00d7|\\cdot)\s*10\s*\^\s*(?:\{\s*[-+\u2212]?\s*\d+(?:\.\d+)?\s*\}|[-+\u2212]?\d))?"
+    r"(?P<percent>\s*\\%)?"
+)
+UNIT_POWER = r"(?:\^\s*(?:\{\s*[-+\u2212]?\s*\d+\s*\}|[-+\u2212]?\d))?"
+UNIT_SPACE = r"(?:~|\\[,;: ]|[ \t])?[ \t]?"
+UNIT_ARGUMENT = r"\s*\{(?:[^{}\n]|\{[^{}\n]{1,8}\}){1,24}\}" + UNIT_POWER
+# A plain-text unit is a recognized symbol with an optional SI prefix; other words after a number are prose.
+UNIT_SYMBOL = (
+    r"(?:da|[yzafpnuµμmcdhkMGTPEZY])?"
+    r"(?:mol|cd|Hz|Pa|Wb|lm|lx|Bq|Gy|Sv|eV|Da|bar|atm|Torr|rad|sr|dB|bits?|bytes?|FLOPS|FLOPs?|ppm|ppb|min|yr|"
+    r"[mgshAKNJWCVFSTHLlBbÅΩ])" + UNIT_POWER
+)
+UNIT_WORD = r"[A-Za-zÅµμ]{1,10}" + UNIT_POWER
+UNIT_SYNTAX = (
+    r"(?:\\(?:mathrm|text|textrm|rm|mbox|unit|si)" + UNIT_ARGUMENT + "|" + UNIT_SYMBOL + "(?:/" + UNIT_WORD + ")?)"
+)
+# Past closing math ($, $$, \) or \]), only a tie or thin space, or a math-mode or siunitx unit command, continues
+# the value; a word after a plain space is prose, as in "$p=0.05$ threshold". A unit never starts on the next line.
+QUANTITY_UNIT_PATTERN = re.compile(
+    r"(?:(?:\$\$?|\\[)\]])(?:(?:~|\\[,;:])[ \t]?"
+    + UNIT_SYNTAX
+    + "|"
+    + UNIT_SPACE
+    + r"\\(?:mathrm|unit|si)"
+    + UNIT_ARGUMENT
+    + ")|"
+    + UNIT_SPACE
+    + UNIT_SYNTAX
+    + r")(?![A-Za-z])"
+)
+# Numbers named by a version, software release, or numbered reference are not reported values.
+NON_QUANTITY_CONTEXT_PATTERN = re.compile(
+    r"(?<![A-Za-z])(?:versions?|release|ver\.|v\.|python|cuda|pytorch|tensorflow|numpy|scipy|ubuntu|"
+    r"tables?|tab\.|figures?|figs?\.|sections?|secs?\.|eqs?\.|equations?|chapters?|appendix|algorithms?|"
+    r"theorems?|lemmas?|definitions?|corollar(?:y|ies)|propositions?|remarks?|\\S)(?:\s|~|\\ |\()*$",
+    re.IGNORECASE,
+)
+QUANTITY_UNIT_STOPWORDS = frozenset(
+    "a an and are as at be but by for from has in into is it of on or per than that the to was were which with".split()
+)
+LENGTH_FOLLOWER_PATTERN = re.compile(
+    r"\s*(?:\\(?:text|line|column|paper)(?:width|height)|\\hsize|\\vsize|\\baselineskip|\\parindent|"
+    r"pt|em|ex|bp|sp|pc|dd|cc)(?![A-Za-z])"
+)
 FONT_INPUT_EXTENSIONS = frozenset({".tfm", ".vf", ".pfb", ".pfa", ".otf", ".ttf", ".ttc"})
 BUILD_INPUT_EXTENSIONS = FONT_INPUT_EXTENSIONS | frozenset(
     {".cls", ".sty", ".bst", ".clo", ".def", ".cfg", ".fd", ".enc", ".map", ".bbx", ".cbx", ".lbx"}
@@ -164,6 +383,187 @@ class ManuscriptBundle:
     anchor_map: EvidenceAnchorMap | None = None
 
 
+NAVIGATION_INDEXED_COMMANDS = frozenset(
+    {
+        "part",
+        "chapter",
+        "section",
+        "subsection",
+        "subsubsection",
+        "paragraph",
+        "subparagraph",
+        "label",
+        "ref",
+        "eqref",
+        "pageref",
+        "autoref",
+        "cref",
+        "Cref",
+        "cite",
+        "citep",
+        "citet",
+        "autocite",
+        "parencite",
+        "textcite",
+        "caption",
+        "includegraphics",
+        *TABLE_ENVIRONMENTS,
+        *EQUATION_ENVIRONMENTS,
+        *QUANTITY_COMMANDS,
+        "quantity",
+    }
+)
+
+
+def _balanced_group_end(text: str, position: int) -> int | None:
+    """Return the index just past the brace closing a group whose opening brace ends at position."""
+    depth = 1
+    end = position
+    while end < len(text) and depth:
+        depth += (text[end] == "{") - (text[end] == "}")
+        end += 1
+    return end if depth == 0 else None
+
+
+def _unbraced_argument_end(text: str, name: str, position: int) -> int:
+    """Return the end of a definition's unbraced name or a primitive skip's dimension, or position if none."""
+    pattern = DEFINITION_NAME_PATTERN if name in DEFINITION_COMMANDS else SKIP_DIMENSION_PATTERN
+    argument = pattern.match(text, position) if name in DEFINITION_COMMANDS | SKIP_COMMANDS else None
+    return argument.end() if argument else position
+
+
+def _command_argument_spans(text: str) -> Iterator[tuple[int, int]]:
+    for match in NON_QUANTITY_ARGUMENT_PATTERN.finditer(text):
+        start = match.end()
+        end = _unbraced_argument_end(text, match.group(1), start)
+        # Citation commands take one key group after their optional notes; other unlisted commands take any groups.
+        braces = NON_QUANTITY_GROUP_LIMITS.get(match.group(1), 1 if "cite" in match.group(1) else None)
+        if end > start and match.group(1) in DEFINITION_COMMANDS:
+            braces -= 1
+        name = ENVIRONMENT_NAME_PATTERN.match(text, end) if match.group(1) == "begin" else None
+        groups = ENVIRONMENT_ARGUMENT_GROUPS.get(name.group(1).strip(), 0) if name else 0
+        if name:
+            braces = 1 + groups
+        # One bracket option may follow the last setting group, as in \scalebox{x}[y] or \begin{table}[h]; a body may
+        # open with a bracket after display math or a column specification, as in \begin{equation}[0.5, 1.0].
+        options = match.group(1) in TRAILING_OPTION_COMMANDS and not (
+            name and (groups or name.group(1).strip() in EQUATION_ENVIRONMENTS)
+        )
+        # A required group may start on the next line; trailing groups and brackets stay on the line.
+        while (
+            group := re.match((ARGUMENT_SPACE if end == start or braces else r"[ \t]*") + r"([\[{])", text[end:])
+        ) and (braces is None or braces > 0 or (options and group[1] == "[")):
+            opening = end + group.end()
+            if group.group(1) == "{":
+                closing = _balanced_group_end(text, opening)
+                braces = None if braces is None else braces - 1
+            else:
+                bracket = text.find("]", opening)
+                closing = None if bracket == -1 else bracket + 1
+                options = options and braces != 0
+            if closing is None:
+                break
+            end = closing
+        if end > start:
+            yield start, end
+
+
+def _row_spacing_spans(text: str, masked: str) -> list[tuple[int, int]]:
+    # Masking blanks control symbols such as \\, so find row breaks in the text and keep those outside comments.
+    return [match.span() for match in ROW_SPACING_PATTERN.finditer(text) if masked[match.end() - 1] == "]"]
+
+
+def _within(spans: list[tuple[int, int]], lefts: list[int], position: int) -> bool:
+    """Return whether position falls inside one of the merged, sorted spans whose starts are lefts."""
+    nearest = bisect_right(lefts, position) - 1
+    return nearest >= 0 and position < spans[nearest][1]
+
+
+def _environment_body_start(text: str, name: str, position: int) -> int:
+    """Return where an environment's body starts, past the placement options and mandatory arguments it takes."""
+    groups = ENVIRONMENT_ARGUMENT_GROUPS.get(name, 0)
+    options = name in TABLE_ENVIRONMENTS
+    start = position
+    # Options precede the last mandatory argument, or follow the name of a table without one, as in \begin{table}[h].
+    while (group := re.match(ARGUMENT_SPACE + r"([\[{])", text[position:])) and (
+        groups if group[1] == "{" else options and (groups or position == start)
+    ):
+        opening = position + group.end()
+        if group[1] == "{":
+            closing = _balanced_group_end(text, opening)
+            groups -= 1
+        else:
+            bracket = text.find("]", opening)
+            closing = None if bracket == -1 else bracket + 1
+        if closing is None:
+            break
+        position = closing
+    return position
+
+
+def _document_body(masked: str) -> tuple[int, int]:
+    """Return the typeset span: after \\begin{document}, if present, and before \\end{document}, where TeX stops."""
+    document = re.search(r"\\begin\s*\{document\}", masked)
+    floor = document.end() if document else 0
+    closing = re.compile(r"\\end\s*\{document\}").search(masked, floor)
+    return floor, closing.start() if closing else len(masked)
+
+
+def _walk_document(
+    path: str,
+    state: str,
+    events: dict[str, list[tuple[int, str, str]]],
+    lengths: dict[str, int],
+    bounds: dict[str, tuple[int, int] | None],
+    memo: dict[tuple[str, str], str],
+) -> str:
+    """Process one source from a document state (before, body, after) and return the state it leaves."""
+    if (path, state) in memo:
+        return memo[(path, state)]
+    memo[(path, state)] = state  # An input cycle leaves the state unchanged.
+    entered = state
+    floor = 0 if state == "body" else None
+    ceiling = lengths[path]
+    for position, kind, child in events[path]:
+        previous = state
+        if kind == "input":
+            state = _walk_document(child, state, events, lengths, bounds, memo)
+        elif kind == "end" or state == "before":
+            state = "after" if kind == "end" else "body"
+        if previous != "body" and state == "body":
+            floor = position
+        elif previous == "body" and state != "body":
+            ceiling = position
+        if state == "after":
+            break
+    if floor is not None and floor < ceiling:
+        known = bounds.get(path)
+        bounds[path] = (min(known[0], floor), max(known[1], ceiling)) if known else (floor, ceiling)
+    memo[(path, entered)] = state
+    return state
+
+
+def _input_closure(path: str, events: dict[str, list[tuple[int, str, str]]]) -> set[str]:
+    tree = {path}
+    pending = [path]
+    while pending:
+        for _, kind, child in events[pending.pop()]:
+            if kind == "input" and child not in tree:
+                tree.add(child)
+                pending.append(child)
+    return tree
+
+
+def _merged_spans(spans: list[tuple[int, int]]) -> list[tuple[int, int]]:
+    merged: list[tuple[int, int]] = []
+    for left, right in sorted(spans):
+        if merged and left <= merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], right))
+        else:
+            merged.append((left, right))
+    return merged
+
+
 class ManuscriptManager:
     def __init__(self, repo: Path) -> None:
         self.repo = repo.resolve()
@@ -286,24 +686,34 @@ class ManuscriptManager:
                     fallback=bibliography_fallback if kind in {"bibliography", "addbibresource"} else None,
                 )
 
-    def create_navigation(self, snapshot: Path, sources: tuple[SourceFile, ...]) -> str:
+    def create_navigation(
+        self, snapshot: Path, sources: tuple[SourceFile, ...], entrypoints: tuple[str, ...] = ()
+    ) -> str:
         entries = []
-        for source in sorted(sources, key=lambda item: item.path):
-            if Path(source.path).suffix.lower() not in {".tex", ".ltx"}:
-                continue
-            text = (snapshot / source.path).read_text(encoding="utf-8")
-            masked = self._dependency_text(text, preserve_positions=True)
-            for command, start, end, value in self._navigation_commands(masked):
-                value = text[end - 1 - len(value) : end - 1]
+        texts = {
+            source.path: (snapshot / source.path).read_text(encoding="utf-8")
+            for source in sorted(sources, key=lambda item: item.path)
+            if Path(source.path).suffix.lower() in {".tex", ".ltx"}
+        }
+        masks = {path: self._dependency_text(text, preserve_positions=True) for path, text in texts.items()}
+        bodies = self._document_bodies(snapshot, masks, entrypoints)
+        for path, text in texts.items():
+            spans = self._navigation_spans(text, masks[path], bodies[path])
+            breaks = [match.start() for match in re.finditer("\n", text)]
+            for command, start, end, value_start, value_end in spans:
+                value = text[value_start:value_end].strip()
                 entry = {
                     "command": command,
-                    "source_path": source.path,
-                    "start_line": text.count("\n", 0, start) + 1,
-                    "end_line": text.count("\n", 0, end - 1) + 1,
-                    "value": value.strip(),
+                    "source_path": path,
+                    "start_line": bisect_left(breaks, start) + 1,
+                    "end_line": bisect_left(breaks, end - 1) + 1,
+                    "value": value[:NAVIGATION_STORED_VALUE_CHARS],
                 }
+                # Large generated tables would otherwise be copied, once per nested environment, into the frozen run.
+                if len(value) > NAVIGATION_STORED_VALUE_CHARS:
+                    entry["value_truncated"] = True
                 if command == "includegraphics":
-                    candidates = self._navigation_graphics(value.strip(), sources)
+                    candidates = self._navigation_graphics(value, sources)
                     entry["candidate_paths"] = candidates
                     entry["target_path"] = candidates[0] if len(candidates) == 1 else None
                 entries.append(entry)
@@ -311,6 +721,7 @@ class ManuscriptManager:
             json.dumps(
                 {
                     "sources": [asdict(source) for source in sorted(sources, key=lambda item: item.path)],
+                    "commands": sorted(NAVIGATION_INDEXED_COMMANDS),
                     "entries": entries,
                 },
                 ensure_ascii=False,
@@ -320,21 +731,148 @@ class ManuscriptManager:
             + "\n"
         )
 
+    def _document_bodies(
+        self, snapshot: Path, masks: dict[str, str], entrypoints: tuple[str, ...] = ()
+    ) -> dict[str, tuple[int, int] | None]:
+        """Follow inputs in processing order and bound each source by the document body it reaches, if any."""
+        root = snapshot.resolve()
+        events: dict[str, list[tuple[int, str, str]]] = {}
+        for path, masked in masks.items():
+            items = [
+                (match.end() if match[1] == "begin" else match.start(), match[1], "")
+                for match in re.finditer(r"\\(begin|end)\s*\{document\}", masked)
+            ]
+            for match in INPUT_PATTERN.finditer(masked):
+                dependency = Path(next(group for group in match.groups() if group is not None).strip())
+                try:
+                    child = self._resolve_dependency(
+                        root, Path(path).parent, dependency.with_suffix(dependency.suffix or ".tex")
+                    ).as_posix()
+                except InfrastructureError:
+                    continue
+                if child in masks:
+                    items.append((match.start(), "input", child))
+            events[path] = sorted(items)
+        included = {child for items in events.values() for _, kind, child in items if kind == "input"}
+        lengths = {path: len(masked) for path, masked in masks.items()}
+        bounds: dict[str, tuple[int, int] | None] = {}
+        reached: set[str] = set()
+        # A configured entrypoint is typeset on its own even when another source also inputs it.
+        configured = {self._normalized_relative(root, Path(entry)).as_posix() for entry in entrypoints}
+        for path in sorted((set(masks) - included) | (configured & set(masks))):
+            tree = _input_closure(path, events)
+            reached |= tree
+            # A source tree without \begin{document} is a fragment that is typeset as a whole.
+            opens = any(kind == "begin" for member in tree for _, kind, _ in events[member])
+            _walk_document(path, "before" if opens else "body", events, lengths, bounds, {})
+        return {path: bounds.get(path) if path in reached else _document_body(masked) for path, masked in masks.items()}
+
+    @classmethod
+    def _navigation_spans(
+        cls, text: str, masked: str, body: tuple[int, int] | None
+    ) -> list[tuple[str, int, int, int, int]]:
+        """Return (command, start, end, value_start, value_end) in source order; quantities only within body."""
+        spans = [
+            (command, start, end, end - 1 - len(value), end - 1)
+            for command, start, end, value in cls._navigation_commands(masked)
+        ]
+        if body is not None:
+            floor, ceiling = body
+            # Settings and definitions, such as \newcommand{\temp}{\SI{300}{K}}, typeset no reported value.
+            arguments = _merged_spans(list(_command_argument_spans(masked)))
+            lefts = [left for left, _ in arguments]
+            # Tables and equations after \end{document}, or in a file input only outside the body, are never typeset.
+            displays = [*cls._navigation_environments(masked), *cls._navigation_displays(text)]
+            spans.extend(
+                span for span in displays if floor <= span[1] < ceiling and not _within(arguments, lefts, span[1])
+            )
+            quantity_commands = [
+                span
+                for span in cls._quantity_commands(masked)
+                if floor <= span[1] < ceiling and not _within(arguments, lefts, span[1])
+            ]
+            spans.extend(quantity_commands)
+            covered = [(start, end) for _, start, end, _, _ in quantity_commands]
+            spans.extend(cls._navigation_quantities(text, masked, [*covered, *arguments], floor, ceiling))
+        return sorted(spans, key=lambda span: span[1])
+
     @staticmethod
     def _navigation_commands(text: str) -> Iterator[tuple[str, int, int, str]]:
-        pattern = re.compile(
-            r"\\(part|chapter|section|subsection|subsubsection|paragraph|subparagraph|"
-            r"label|ref|eqref|pageref|autoref|cref|Cref|cite|citep|citet|autocite|parencite|textcite|"
-            r"caption|includegraphics)\*?(?![A-Za-z@])(?:\s*\[[^\]]*\]){0,2}\s*\{"
-        )
-        for match in pattern.finditer(text):
-            depth = 1
-            end = match.end()
-            while end < len(text) and depth:
-                depth += (text[end] == "{") - (text[end] == "}")
-                end += 1
-            if depth == 0:
+        for match in NAVIGATION_COMMAND_PATTERN.finditer(text):
+            end = _balanced_group_end(text, match.end())
+            if end is not None:
                 yield match.group(1), match.start(), end, text[match.end() : end - 1]
+
+    @staticmethod
+    def _navigation_environments(text: str) -> Iterator[tuple[str, int, int, int, int]]:
+        for match in NAVIGATION_ENVIRONMENT_PATTERN.finditer(text):
+            name = match.group(1)
+            boundary = re.compile(r"\\(begin|end)\s*\{" + re.escape(name) + r"\}")
+            depth = 1
+            for other in boundary.finditer(text, match.end()):
+                depth += 1 if other.group(1) == "begin" else -1
+                if depth == 0:
+                    yield name, match.start(), other.end(), _environment_body_start(
+                        text, name, match.end()
+                    ), other.start()
+                    break
+
+    @classmethod
+    def _navigation_displays(cls, text: str) -> Iterator[tuple[str, int, int, int, int]]:
+        # \[ ... \] is LaTeX's short form of the displaymath environment; comments and verbatim text stay masked.
+        symbols = cls._dependency_text(text, preserve_positions=True, keep_control_symbols=True)
+        opening = None
+        for token in re.finditer(r"\\(?:[A-Za-z@]+|[^\n])", symbols):
+            if token[0] == "\\[" and opening is None:
+                opening = token.start()
+            elif token[0] == "\\]" and opening is not None:
+                yield "displaymath", opening, token.end(), opening + 2, token.start()
+                opening = None
+
+    @staticmethod
+    def _quantity_commands(text: str) -> Iterator[tuple[str, int, int, int, int]]:
+        for match in QUANTITY_COMMAND_PATTERN.finditer(text):
+            end = _balanced_group_end(text, match.end())
+            if end is None:
+                continue
+            for _ in range(QUANTITY_COMMAND_ARGUMENTS[match.group(1)] - 1):
+                following = re.match(r"\s*\{", text[end:])
+                group_end = _balanced_group_end(text, end + following.end()) if following else None
+                if group_end is None:
+                    break
+                end = group_end
+            yield match.group(1), match.start(), end, match.end() - 1, end
+
+    @staticmethod
+    def _navigation_quantities(text: str, masked: str, skipped: list[tuple[int, int]], floor: int, ceiling: int):
+        # Literal numeric reports: decimals, uncertainties, exponents, plus-minus or percentages, with an adjacent unit.
+        excluded = _merged_spans([*skipped, *_row_spacing_spans(text, masked)])
+        lefts = [left for left, _ in excluded]
+        scanned = CONTROL_WORD_BEFORE_NUMBER_PATTERN.sub(lambda word: " " * len(word[0]), text)
+        for match in QUANTITY_PATTERN.finditer(scanned, floor, ceiling):
+            start, end = match.span()
+            if masked[start] != text[start] or _within(excluded, lefts, start):
+                continue
+            if LENGTH_FOLLOWER_PATTERN.match(text, end) or NON_QUANTITY_CONTEXT_PATTERN.search(
+                text, max(floor, start - 24), start
+            ):
+                continue
+            core = match.group(0)
+            if not (
+                "." in core
+                or any(match.group(name) for name in ("power", "uncertainty", "exponent", "pm", "times", "percent"))
+            ):
+                continue
+            unit = QUANTITY_UNIT_PATTERN.match(text, end)
+            word = unit.group(0).strip("$)]~\\,;: \t\r\n") if unit else ""
+            # One-letter symbols are case-sensitive: "1.5 A" reports amperes, while "1.5 a" continues the prose.
+            if (
+                not match.group("percent")
+                and unit
+                and (word if len(word) == 1 else word.casefold()) not in (QUANTITY_UNIT_STOPWORDS)
+            ):
+                end = unit.end()
+            yield "quantity", start, end, start, end
 
     @staticmethod
     def _navigation_graphics(value: str, sources: tuple[SourceFile, ...]) -> list[str]:
@@ -935,7 +1473,7 @@ class ManuscriptManager:
             return False
 
     @staticmethod
-    def _dependency_text(text: str, *, preserve_positions: bool = False) -> str:
+    def _dependency_text(text: str, *, preserve_positions: bool = False, keep_control_symbols: bool = False) -> str:
         # Consume control symbols in pairs so a line break cannot start a command.
         token_pattern = re.compile(r"%[^\n]*|\\(?:[A-Za-z@]+\*?|[^\n])")
         parts = []
@@ -945,7 +1483,7 @@ class ManuscriptManager:
             token = match.group()
             end = match.end()
             replacement = token
-            if token.startswith("%") or not token[1].isalpha():
+            if token.startswith("%") or not (token[1].isalpha() or keep_control_symbols):
                 replacement = " "
             elif token in {r"\verb", r"\verb*"}:
                 literal = re.match(r"([^\n])[^\n]*?\1", text[end:])

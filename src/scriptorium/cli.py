@@ -173,7 +173,8 @@ def build_parser() -> argparse.ArgumentParser:
         "--command",
         action="append",
         dest="commands",
-        help="repeatable: heading, reference, citation, label, caption, graphics, or an exact LaTeX command",
+        help="repeatable: heading, reference, citation, label, caption, graphics, table, equation, quantity, "
+        "or an exact LaTeX command or environment",
     )
     nav_parser.add_argument("--query", help="case-insensitive substring of the entry value")
     nav_parser.add_argument("--path", help="frozen source path or read path that contains the entries")

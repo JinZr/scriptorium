@@ -7,6 +7,7 @@ import pytest
 
 from scriptorium import cli
 from scriptorium.errors import ConfigurationError
+from scriptorium.manuscript import ManuscriptManager
 from scriptorium.service import ScriptoriumService
 from scriptorium.tool_output import MAX_TOOL_RESPONSE_BYTES
 
@@ -133,6 +134,49 @@ def test_read_paths_take_priority_over_colliding_source_paths(tmp_path):
         assert headings("sources/z.tex") == ["Root file"]
         assert headings("sources/sources/z.tex") == ["Nested file"]
         assert headings("z.tex") == ["Root file"]
+
+
+RESULT_BODY = (
+    "\\section{Results}\n"
+    "The error is 0.1 eV/atom.\n"
+    "\\begin{table}\n\\begin{tabular}{cc}\nA & 1.5\\\\\n\\end{tabular}\n\\end{table}\n"
+    "\\begin{align}\nE &= 2.25\n\\end{align}\n"
+)
+
+
+def test_tables_equations_and_quantities_are_navigable_groups(tmp_path):
+    service, attempt_id = _nav_run(tmp_path, {}, RESULT_BODY)
+    with service:
+
+        def located(group):
+            entries = service.nav_task(attempt_id, [group])["entries"]
+            return [(entry["command"], entry["start_line"], entry["end_line"]) for entry in entries]
+
+        assert located("table") == [("table", 5, 9), ("tabular", 6, 8)]
+        assert located("equation") == [("align", 10, 12)]
+        assert [entry["value"] for entry in service.nav_task(attempt_id, ["quantity"])["entries"]] == [
+            "0.1 eV/atom",
+            "1.5",
+            "2.25",
+        ]
+
+
+def test_indexes_without_table_equation_or_quantity_entries_reject_those_filters(tmp_path, monkeypatch):
+    create_navigation = ManuscriptManager.create_navigation
+
+    def predating_navigation(self, root, sources, entrypoints=()):
+        index = json.loads(create_navigation(self, root, sources, entrypoints))
+        del index["commands"]
+        index["entries"] = [entry for entry in index["entries"] if entry["command"] in {"section", "label"}]
+        return json.dumps(index, ensure_ascii=False, sort_keys=True, indent=2) + "\n"
+
+    monkeypatch.setattr(ManuscriptManager, "create_navigation", predating_navigation)
+    service, attempt_id = _nav_run(tmp_path, {}, RESULT_BODY)
+    with service:
+        assert [entry["value"] for entry in service.nav_task(attempt_id, ["heading"])["entries"]] == ["Results"]
+        for group in ("table", "equation", "quantity", "SI"):
+            with pytest.raises(ConfigurationError, match="predates table, equation, and quantity entries"):
+                service.nav_task(attempt_id, [group])
 
 
 def _pages(service, monkeypatch, capsys, arguments):

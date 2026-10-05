@@ -39,7 +39,14 @@ from .domain import (
     utc_now,
 )
 from .errors import ConfigurationError, InfrastructureError, NotFoundError, StateError
-from .manuscript import ManuscriptManager, page_text, render_page_view
+from .manuscript import (
+    EQUATION_ENVIRONMENTS,
+    QUANTITY_COMMANDS,
+    TABLE_ENVIRONMENTS,
+    ManuscriptManager,
+    page_text,
+    render_page_view,
+)
 from .schemas import (
     EvidenceAnchorContract,
     InventoriedScientificReviewOutput,
@@ -765,7 +772,14 @@ class ScriptoriumService:
         if "navigation.json" not in files:
             raise StateError("this run has no frozen navigation index")
         navigation = self.armarius._verify_retrieval_file(bundle.workspace, files, "navigation.json")
-        entries = json.loads(navigation.read_text(encoding="utf-8"))["entries"]
+        index = json.loads(navigation.read_text(encoding="utf-8"))
+        entries = index["entries"]
+        indexed = set(index.get("commands", _LEGACY_NAVIGATION_COMMANDS))
+        if selected is not None and not selected <= indexed:
+            raise ConfigurationError(
+                "this run's navigation index predates table, equation, and quantity entries; "
+                "use task search to locate them"
+            )
         folded = query.casefold() if query is not None else None
         matched = [
             entry
@@ -1695,6 +1709,13 @@ NAVIGATION_GROUPS = {
     "caption": ("caption",),
     "graphics": ("includegraphics",),
 }
+# Indexes written before table, equation, and quantity entries carry no command list and hold only these.
+_LEGACY_NAVIGATION_COMMANDS = frozenset(name for names in NAVIGATION_GROUPS.values() for name in names)
+NAVIGATION_GROUPS.update(
+    table=TABLE_ENVIRONMENTS,
+    equation=EQUATION_ENVIRONMENTS,
+    quantity=("quantity", *QUANTITY_COMMANDS),
+)
 _NAVIGATION_VALUE_CHARS = 500
 _NAVIGATION_CANDIDATES = 10
 
