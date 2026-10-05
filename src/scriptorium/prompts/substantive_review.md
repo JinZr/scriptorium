@@ -36,11 +36,11 @@ Record each check's judgment explicitly. Put the exact location of the authors' 
 conditions and qualifications in stated_scope; keep evidence for the material that decides the assessment. Set
 check_type to what the countercheck examined. Set question_answer to whether the countercheck shows the claim holds
 at its stated scope, and list in exceptions every case, condition, or value within that scope where it fails or is
-not shown. "supported" goes with question_answer "yes", and only with it, and "yes" lists no exceptions; "partly" or
-"no" leads to "finding" or "unresolved", and "not_checkable" to "unresolved". When you recompute a reported value,
-use check_type "recomputation" and record its inputs, calculation, result, the reported value, and whether they
-match; a recomputation that differs cannot answer "yes", and one that matches cannot answer "no". These fields record
-your judgment; they do not replace the countercheck.
+not shown. "supported" goes with question_answer "yes", and only with it; "yes" lists no exceptions and "partly"
+at least one; "partly" or "no" leads to "finding" or "unresolved", and "not_checkable" to "unresolved". When you
+recompute a reported value, use check_type "recomputation" and record its inputs, calculation, result, the reported
+value, and whether they match; a recomputation that differs cannot answer "yes", and one that matches cannot answer
+"no". These fields record your judgment; they do not replace the countercheck.
 
 Before submitting, revisit each drafted claim, stated_scope, critical_question, countercheck, question_answer,
 exceptions, and assessment together:

@@ -428,6 +428,8 @@ class JudgedClaimCheck(ClaimCheck):
             raise ValueError('assessment "supported" goes with question_answer "yes", and only with it')
         if self.question_answer == "yes" and self.exceptions:
             raise ValueError('question_answer "yes" lists no exceptions; use "partly"')
+        if self.question_answer == "partly" and not self.exceptions:
+            raise ValueError('question_answer "partly" lists at least one exception')
         if self.recomputation is not None and (self.recomputation.outcome, self.question_answer) in {
             ("matches", "no"),
             ("differs", "yes"),

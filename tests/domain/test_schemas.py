@@ -282,7 +282,8 @@ def test_claim_judgments_accept_consistent_answers(changes) -> None:
 @pytest.mark.parametrize(
     ("changes", "message"),
     [
-        ({"question_answer": "partly"}, 'goes with question_answer "yes"'),
+        ({"question_answer": "partly", "exceptions": ["One molecule exceeds it."]}, 'goes with question_answer "yes"'),
+        ({"assessment": "unresolved", "question_answer": "partly"}, '"partly" lists at least one exception'),
         ({"assessment": "unresolved"}, 'goes with question_answer "yes"'),
         ({"assessment": "finding", "finding_indices": [0]}, 'goes with question_answer "yes"'),
         ({"exceptions": ["One molecule exceeds it."]}, "lists no exceptions"),
