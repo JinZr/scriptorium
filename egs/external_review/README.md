@@ -32,7 +32,9 @@ python -m egs.external_review.collect \
 
 `--host-computation` records whether the operator plans to let the reviewer run its own calculations on the
 host (`allowed`, `denied` or `unknown`). Scriptorium has no calculation tool and does not enforce or observe
-this condition; configure the host accordingly. The after-review collection must repeat the baseline's value.
+this condition; configure the host accordingly. The after-review collection must repeat the baseline's value
+(`unknown` for a baseline sealed before this option existed). A collection without a baseline reports its host
+computation as `unknown` in comparisons and scores, whatever value was declared.
 
 Record the planned host/model/effort, tool versions, allowed corrections and existing paid budget externally
 before launching the host. A fresh conversation uses the shared Scriptorium skill to claim, retrieve and submit.
@@ -165,7 +167,10 @@ example validates and binds them, and never writes, suggests or infers either.
 
 Write a label file per held-out manuscript set. A labeled case lists its known problems; `planted` problems were
 inserted on purpose and `documented` ones come from errata, retractions or published replies. A control case is
-a corrected copy of a labeled case and names the problems its correction removed:
+a corrected copy of a labeled case and names the problems its correction removed. `tree_sha` is the Git tree of
+the committed manuscript the labels describe (`git rev-parse COMMIT^{tree}`); scoring rejects a trial collected
+from another tree, and every trial name must cover every labeled case, so an omitted manuscript or control
+cannot shrink the denominators:
 
 ```json
 {
@@ -174,11 +179,12 @@ a corrected copy of a labeled case and names the problems its correction removed
   "cases": [
     {
       "case": "paper-01",
+      "tree_sha": "<manuscript tree SHA>",
       "problems": [
         {"id": "P1", "kind": "planted", "summary": "Table 2 mean disagrees with its rows.", "locations": ["tables/results.tex:14"]}
       ]
     },
-    {"case": "paper-01-fixed", "control_of": "paper-01", "corrected": ["P1"]}
+    {"case": "paper-01-fixed", "tree_sha": "<corrected tree SHA>", "control_of": "paper-01", "corrected": ["P1"]}
   ]
 }
 ```

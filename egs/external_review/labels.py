@@ -10,6 +10,7 @@ from .files import publication, read_json, verify_seal, write_json
 
 Text = Annotated[str, Field(min_length=1)]
 Digest = Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")]
+GitObject = Annotated[str, Field(pattern=r"^[0-9a-f]{40}(?:[0-9a-f]{24})?$")]
 
 
 class Problem(BaseModel):
@@ -23,6 +24,7 @@ class Problem(BaseModel):
 class LabeledCase(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
     case: Text
+    tree_sha: GitObject
     problems: list[Problem] = []
     control_of: Text | None = None
     corrected: list[Text] = []
@@ -59,11 +61,29 @@ class LabelSet(BaseModel):
                 raise ValueError(f"Control case {item.case} corrects an unknown problem")
         return self
 
-    def allowed(self, case):
+    def labeled(self, case):
         item = next((value for value in self.cases if value.case == case), None)
         if item is None:
             raise ValueError(f"Case has no human labels: {case}")
+        return item
+
+    def allowed(self, case):
+        item = self.labeled(case)
         return set(item.corrected) if item.control_of else {problem.id for problem in item.problems}
+
+    def check_trials(self, trials):
+        """Each trial covers every labeled case, collected from the manuscript tree its labels describe."""
+        by_name = defaultdict(set)
+        for trial in trials:
+            tree = self.labeled(trial["case"]).tree_sha
+            if trial["comparison"]["tree"] != tree:
+                raise ValueError(
+                    f"Trial {trial['trial']} of {trial['case']} was not collected from labeled tree {tree}"
+                )
+            by_name[trial["trial"]].add(trial["case"])
+        for name, cases in sorted(by_name.items()):
+            if missing := sorted({item.case for item in self.cases} - cases):
+                raise ValueError(f"Trial {name} is missing labeled cases: {', '.join(missing)}")
 
 
 class Match(BaseModel):
@@ -169,8 +189,7 @@ def score(packet, labels_dir, matches_path, output):
     origins = mapping["candidates"]
     raw = matches_path.read_bytes()
     matched = validate_matches(raw, packet_digest, labels_digest, labels, origins)
-    for trial in mapping["trials"]:
-        labels.allowed(trial["case"])
+    labels.check_trials(mapping["trials"])
     trials = [score_trial(trial, labels, matched, origins) for trial in mapping["trials"]]
     result = {
         "packet_digest": packet_digest,
@@ -186,7 +205,8 @@ def score(packet, labels_dir, matches_path, output):
             "Recall covers only the labeled problems. Unmatched candidates are not scored as false positives.",
             "Control false alarms count candidates matched to corrected problems on the corrected manuscript.",
             "Trials without an accepted review keep their labeled problems in the denominator.",
-            "Host computation is the operator's planned condition, not an observation of tool use.",
+            "Host computation is the operator's planned condition, not an observation of tool use;"
+            " collections without a baseline sealed before review report it as unknown.",
         ],
     }
     with publication(output, [packet, labels_dir]) as stage:

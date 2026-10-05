@@ -53,7 +53,10 @@ def comparison_fields(collection):
         "evidence_contract": frozen["evidence_anchor_contract"]["digest"],
         "pdf": bundle["manuscript.pdf"],
         "pages": {name: digest for name, digest in bundle.items() if name.startswith("pages/")},
-        "host_computation": collection.get("host_conditions", {}).get("computation", "unknown"),
+        # Only a baseline sealed before review records a planned condition; a later declaration is unknown.
+        "host_computation": (
+            collection["host_conditions"]["computation"] if collection.get("prepared_before_review") else "unknown"
+        ),
     }
 
 

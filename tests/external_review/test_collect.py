@@ -7,6 +7,7 @@ import pytest
 from egs.external_review import collect as collector
 from egs.external_review.collect import collect
 from egs.external_review.files import file_records, read_json, seal, verify_seal
+from egs.external_review.judge import comparison_fields
 from scriptorium.service import ScriptoriumService
 
 from ._support import project, start, submit
@@ -16,6 +17,7 @@ def test_collect_preserves_prepared_inputs_failures_continuations_and_unknowns(t
     root = project(tmp_path)
     run_id, task_id = start(root)
     baseline = collect(root, run_id, tmp_path / "before", "paper-a", "trial-a", host_computation="denied")
+    assert comparison_fields(read_json(baseline / "collection.json"))["host_computation"] == "unknown"
     with ScriptoriumService(root) as service:
         context = service.claim_task(task_id, "codex", "model-a", "low", "review-a", "host")
         rejected = asyncio.run(service.submit_task(context["attempt"].id, context["input_digest"], "{broken"))
@@ -43,6 +45,7 @@ def test_collect_preserves_prepared_inputs_failures_continuations_and_unknowns(t
     assert metadata["baseline_digest"] == verify_seal(baseline)
     assert metadata["prepared_before_review"]
     assert metadata["host_conditions"] == {"computation": "denied"}
+    assert comparison_fields(metadata)["host_computation"] == "denied"
     assert (output / "host-records/001.bin").read_bytes() == host.read_bytes()
     assert (output / "artifacts" / rejected["attempt"].output_artifact_digest).read_text() == "{broken"
     for call in read_json(output / "inspection-calls.json"):
@@ -100,6 +103,16 @@ def test_collector_rejects_changed_baseline_and_existing_output(tmp_path):
         collect(root, run_id, tmp_path / "computed", "case", "trial", baseline, host_computation="allowed")
     with pytest.raises(ValueError, match="Host computation must be one of"):
         collect(root, run_id, tmp_path / "invalid", "case", "trial", host_computation="sometimes")
+    legacy = read_json(baseline / "collection.json")
+    del legacy["host_conditions"]
+    (baseline / "collection.json").write_text(json.dumps(legacy))
+    (baseline / "seal.json").unlink()
+    seal(baseline)
+    assert comparison_fields(legacy)["host_computation"] == "unknown"
+    with pytest.raises(ValueError, match="same planned host conditions"):
+        collect(root, run_id, tmp_path / "legacy-denied", "case", "trial", baseline, host_computation="denied")
+    after = read_json(collect(root, run_id, tmp_path / "legacy", "case", "trial", baseline) / "collection.json")
+    assert comparison_fields(after)["host_computation"] == "unknown"
     (baseline / "report.json").write_text("{}")
     with pytest.raises(ValueError, match="Collection has changed"):
         collect(root, run_id, tmp_path / "damaged", "case", "trial", baseline)

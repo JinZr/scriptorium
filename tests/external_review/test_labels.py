@@ -16,12 +16,13 @@ LABELS = {
     "cases": [
         {
             "case": "paper",
+            "tree_sha": "0" * 40,
             "problems": [
                 {"id": "P1", "kind": "planted", "summary": "Typo in the result.", "locations": ["main.tex:3"]},
                 {"id": "P2", "kind": "documented", "summary": "Unsupported scope.", "locations": ["main.tex:4"]},
             ],
         },
-        {"case": "paper-fixed", "control_of": "paper", "corrected": ["P1"]},
+        {"case": "paper-fixed", "tree_sha": "0" * 40, "control_of": "paper", "corrected": ["P1"]},
     ],
 }
 
@@ -29,6 +30,15 @@ LABELS = {
 def save(path, value):
     path.write_text(json.dumps(value))
     return path
+
+
+def bound(packet, value=LABELS):
+    """Bind each labeled case to the tree its trials were collected from."""
+    trees = {trial["case"]: trial["comparison"]["tree"] for trial in read_json(packet / "mapping.json")["trials"]}
+    value = json.loads(json.dumps(value))
+    for item in value["cases"]:
+        item["tree_sha"] = trees.get(item["case"], item["tree_sha"])
+    return value
 
 
 @pytest.fixture(scope="module")
@@ -40,12 +50,14 @@ def packet(tmp_path_factory):
         ("paper", "with-tools", "allowed", True),
         ("paper", "without-tools", "denied", False),
         ("paper-fixed", "with-tools", "allowed", True),
+        ("paper-fixed", "without-tools", "denied", False),
     ):
         run_id, task_id = start(root)
+        before = collect(root, run_id, directory / f"{case}-{trial}-before", case, trial, host_computation=computation)
         with ScriptoriumService(root) as service:
             submit(service, task_id, session=f"{case}-{trial}", findings=findings)
         output = directory / f"{case}-{trial}"
-        collections.append(collect(root, run_id, output, case, trial, host_computation=computation))
+        collections.append(collect(root, run_id, output, case, trial, before, host_computation=computation))
     return blind(collections, directory / "packet", 5)
 
 
@@ -62,7 +74,7 @@ def matches(packet, labels, problems=("P1",)):
 
 
 def test_score_reports_labeled_recall_control_false_alarms_and_host_computation(packet, tmp_path):
-    labels = seal_labels(save(tmp_path / "labels.json", LABELS), tmp_path / "labels")
+    labels = seal_labels(save(tmp_path / "labels.json", bound(packet)), tmp_path / "labels")
     result = score(packet, labels, save(tmp_path / "matches.json", matches(packet, labels)), tmp_path / "score")
     verify_seal(tmp_path / "score")
     trials = {(item["case"], item["trial"]): item for item in result["trials"]}
@@ -84,15 +96,15 @@ def test_score_reports_labeled_recall_control_false_alarms_and_host_computation(
         },
         {
             "trial": "without-tools",
-            "cases": 1,
-            "accepted_reviews": 1,
+            "cases": 2,
+            "accepted_reviews": 2,
             "host_computation": ["denied"],
             "labeled_problems_found": [0, 2],
             "labeled_recall": 0.0,
-            "control_false_alarms": [0, 0],
+            "control_false_alarms": [0, 1],
         },
     ]
-    assert read_json(tmp_path / "score/labels.json") == LABELS
+    assert read_json(tmp_path / "score/labels.json") == bound(packet)
 
 
 @pytest.mark.parametrize(
@@ -103,6 +115,7 @@ def test_score_reports_labeled_recall_control_false_alarms_and_host_computation(
         (lambda value: value["cases"][1].update(control_of="paper-fixed"), "must correct a labeled case"),
         (lambda value: value["cases"].append(value["cases"][0]), "labeled once"),
         (lambda value: value.update(annotators=[]), "annotators"),
+        (lambda value: value["cases"][0].update(tree_sha="HEAD"), "tree_sha"),
     ],
 )
 def test_invalid_labels_are_not_sealed(tmp_path, change, message):
@@ -123,7 +136,7 @@ def test_invalid_labels_are_not_sealed(tmp_path, change, message):
     ],
 )
 def test_score_rejects_unbound_or_invalid_matches(packet, tmp_path, change, message):
-    labels = seal_labels(save(tmp_path / "labels.json", LABELS), tmp_path / "labels")
+    labels = seal_labels(save(tmp_path / "labels.json", bound(packet)), tmp_path / "labels")
     value = matches(packet, labels)
     change(value)
     with pytest.raises(ValueError, match=message):
@@ -132,7 +145,7 @@ def test_score_rejects_unbound_or_invalid_matches(packet, tmp_path, change, mess
 
 
 def test_score_requires_labels_for_every_trial_case(packet, tmp_path):
-    value = json.loads(json.dumps(LABELS))
+    value = bound(packet)
     value["cases"].pop()
     labels = seal_labels(save(tmp_path / "labels.json", value), tmp_path / "labels")
     with pytest.raises(ValueError, match="no human labels: paper-fixed"):
@@ -142,3 +155,22 @@ def test_score_requires_labels_for_every_trial_case(packet, tmp_path):
 def test_planned_host_computation_is_a_compared_input(packet, tmp_path):
     comparisons = {item["case"]: item for item in summarize(packet, [], tmp_path / "summary")["input_comparisons"]}
     assert comparisons["paper"]["varying_inputs"] == ["host_computation"]
+
+
+@pytest.mark.parametrize(
+    ("change", "message"),
+    [
+        (lambda value: value["cases"][0].update(tree_sha="1" * 40), "not collected from labeled tree"),
+        (
+            lambda value: value["cases"].append({**value["cases"][0], "case": "paper-2"}),
+            "Trial with-tools is missing labeled cases: paper-2",
+        ),
+    ],
+)
+def test_score_rejects_labels_for_other_trees_or_uncollected_cases(packet, tmp_path, change, message):
+    value = bound(packet)
+    change(value)
+    labels = seal_labels(save(tmp_path / "labels.json", value), tmp_path / "labels")
+    with pytest.raises(ValueError, match=message):
+        score(packet, labels, save(tmp_path / "matches.json", matches(packet, labels, ())), tmp_path / "score")
+    assert not (tmp_path / "score").exists()

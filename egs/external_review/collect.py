@@ -184,7 +184,8 @@ def collect(project, run_id, output, case, trial, baseline=None, host_records=()
                 inputs,
             ):
                 raise ValueError("Prepared trial inputs or identity changed")
-            if previous.get("host_conditions") != host_conditions:
+            # Baselines sealed before host conditions were recorded planned none.
+            if previous.get("host_conditions", {"computation": "unknown"}) != host_conditions:
                 raise ValueError("Baseline did not record the same planned host conditions")
             if any(item["attempts"] for item in read_json(baseline / "report.json")["tasks"]):
                 raise ValueError("Baseline must be collected before the first attempt")
