@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections import deque
 from contextlib import contextmanager
 from dataclasses import asdict, is_dataclass
 from datetime import datetime, timezone
@@ -626,63 +627,48 @@ class ScriptoriumService:
         with read_path.open(encoding="utf-8") as stream:
             return sum(1 for _ in stream) == source.line_count
 
-    def search_task(self, attempt_id: str, query: str, path: str | None, cursor: int, limit: int):
+    def search_task(
+        self,
+        attempt_id: str,
+        query: str,
+        path: str | None,
+        cursor: int,
+        limit: int,
+        context: int = 0,
+        include_metadata: bool = False,
+    ):
         with self._retrieval_operation(attempt_id, "task search"):
-            return self._search_task(attempt_id, query, path, cursor, limit)
+            return self._search_task(attempt_id, query, path, cursor, limit, context, include_metadata)
 
-    def _search_task(self, attempt_id: str, query: str, path: str | None, cursor: int, limit: int):
+    def _search_task(
+        self,
+        attempt_id: str,
+        query: str,
+        path: str | None,
+        cursor: int,
+        limit: int,
+        context: int,
+        include_metadata: bool,
+    ):
         attempt, task, bundle, files = self._readable_task(attempt_id)
-        if not query or len(query) > 200 or cursor < 0 or not 1 <= limit <= 50:
-            raise ConfigurationError("invalid search query, cursor, or limit")
-        sources = [item for item in bundle.anchor_map.sources if item.text_anchorable]
-        search_items = [(item.source_path, bundle.workspace / item.read_path, item.source_digest) for item in sources]
-        path_items = {item[0]: item for item in search_items}
-        path_items.update((source.read_path, item) for source, item in zip(sources, search_items))
-        for name in _BUNDLE_METADATA:
-            read_path = bundle.workspace / name
-            item = (name, read_path, files[name]["digest"])
-            search_items.append(item)
-            path_items[name] = item
-        if path is not None:
-            item = path_items.get(path)
-            if item is None:
-                raise _unknown_text_path(path, bundle.anchor_map)
-            search_items = [item]
-            if path_items[item[0]] == item:
-                path = item[0]
+        if not query or len(query) > 200 or cursor < 0 or not 1 <= limit <= 50 or not 0 <= context <= 3:
+            raise ConfigurationError("invalid search query, cursor, limit, or context")
+        search_items, path = self._search_items(bundle, files, path, include_metadata)
         matches = []
         total_matches = 0
-        folded_query = query.casefold()
         for source_path, read_path, source_digest in search_items:
             self.armarius._verify_retrieval_file(
                 bundle.workspace, files, read_path.relative_to(bundle.workspace).as_posix()
             )
-            with read_path.open(encoding="utf-8") as source_file:
-                for number, line in enumerate(source_file, 1):
-                    line = line.removesuffix("\n")
-                    folded = line.casefold()
-                    source_offsets = (
-                        [index for index, character in enumerate(line) for _ in character.casefold()]
-                        if len(folded) != len(line)
-                        else None
-                    )
-                    position = folded.find(folded_query)
-                    while position >= 0:
-                        if cursor <= total_matches < cursor + limit:
-                            source_position = source_offsets[position] if source_offsets is not None else position
-                            excerpt_start = max(0, source_position - 100)
-                            matches.append(
-                                {
-                                    "path": source_path,
-                                    "line": number,
-                                    "column": source_position + 1,
-                                    "excerpt": line[excerpt_start : excerpt_start + 300],
-                                    "source_digest": source_digest,
-                                }
-                            )
-                        total_matches += 1
-                        position = folded.find(folded_query, position + max(1, len(folded_query)))
-        response = bound_search(matches, total_matches, attempt_id, query, path, cursor, limit)
+            for match in _scan_matches(read_path, query, cursor - total_matches, limit - len(matches), context):
+                if match is None:
+                    total_matches += 1
+                    continue
+                matches.append({"path": source_path, **match, "source_digest": source_digest})
+                total_matches += 1
+        response = bound_search(
+            matches, total_matches, attempt_id, query, path, cursor, limit, context, include_metadata
+        )
         self._record_access(
             task.run_id,
             attempt.id,
@@ -690,14 +676,28 @@ class ScriptoriumService:
             {
                 "query": query,
                 "path": path,
-                "matches": [
-                    {"path": item["path"], "line": item["line"], "source_digest": item["source_digest"]}
-                    for item in response["matches"]
-                ],
+                "include_metadata": include_metadata,
+                "matches": [_search_access(item) for item in response["matches"]],
                 "next_cursor": response["next_cursor"],
             },
         )
         return response
+
+    @staticmethod
+    def _search_items(bundle, files, path: str | None, include_metadata: bool):
+        sources = [item for item in bundle.anchor_map.sources if item.text_anchorable]
+        source_items = [(item.source_path, bundle.workspace / item.read_path, item.source_digest) for item in sources]
+        metadata_items = [(name, bundle.workspace / name, files[name]["digest"]) for name in _BUNDLE_METADATA]
+        if path is None:
+            # Generated metadata repeats every label and citation, so whole-bundle searches omit it by default.
+            return source_items + (metadata_items if include_metadata else []), None
+        path_items = {item[0]: item for item in source_items}
+        path_items.update((source.read_path, item) for source, item in zip(sources, source_items))
+        path_items.update((item[0], item) for item in metadata_items)
+        item = path_items.get(path)
+        if item is None:
+            raise _unknown_text_path(path, bundle.anchor_map)
+        return [item], item[0] if path_items[item[0]] == item else path
 
     def page_task(self, attempt_id: str, page_number: int, document: str | None = None):
         with self._retrieval_operation(attempt_id, "task page"):
@@ -1468,6 +1468,7 @@ class ScriptoriumService:
 
 
 _BUNDLE_METADATA = ("manifest.json", "navigation.json", "source-map.json")
+_CONTEXT_CHARS = 200
 
 
 def _unknown_text_path(path: str, anchor_map) -> ConfigurationError:
@@ -1480,6 +1481,58 @@ def _unknown_text_path(path: str, anchor_map) -> ConfigurationError:
     if any(item.source_path == path or item.read_path == path for item in anchor_map.sources):
         message += "; it is a frozen non-text source, so inspect the rendered pages with task page"
     return ConfigurationError(f"{message}; closest text read paths: {', '.join(candidates)}")
+
+
+def _scan_matches(path: Path, query: str, skip: int, take: int, context: int):
+    """Yield one item per match: a match record while inside the requested page, otherwise None."""
+    folded_query = query.casefold()
+    before: deque[dict[str, Any]] = deque(maxlen=context)
+    awaiting: list[dict[str, Any]] = []
+    with path.open(encoding="utf-8") as source_file:
+        for number, line in enumerate(source_file, 1):
+            line = line.removesuffix("\n")
+            if context:
+                awaiting = _attach_following(awaiting, number, line, context)
+            folded = line.casefold()
+            source_offsets = (
+                [index for index, character in enumerate(line) for _ in character.casefold()]
+                if len(folded) != len(line)
+                else None
+            )
+            pending = []
+            position = folded.find(folded_query)
+            while position >= 0:
+                if skip <= 0 < take:
+                    source_position = source_offsets[position] if source_offsets is not None else position
+                    excerpt_start = max(0, source_position - 100)
+                    match = {"line": number, "column": source_position + 1}
+                    match["excerpt"] = line[excerpt_start : excerpt_start + 300]
+                    if context:
+                        match.update(before=list(before), after=[])
+                    pending.append(match)
+                    take -= 1
+                else:
+                    yield None
+                skip -= 1
+                position = folded.find(folded_query, position + max(1, len(folded_query)))
+            awaiting.extend(pending)
+            if context:
+                before.append({"line": number, "text": line[:_CONTEXT_CHARS]})
+            yield from pending
+
+
+def _attach_following(awaiting: list[dict[str, Any]], number: int, line: str, context: int):
+    for match in awaiting:
+        match["after"].append({"line": number, "text": line[:_CONTEXT_CHARS]})
+    return [match for match in awaiting if len(match["after"]) < context]
+
+
+def _search_access(match: dict[str, Any]) -> dict[str, Any]:
+    access = {"path": match["path"], "line": match["line"], "source_digest": match["source_digest"]}
+    if "before" in match:
+        numbers = [match["line"], *(item["line"] for item in (*match["before"], *match["after"]))]
+        access["context"] = {"start_line": min(numbers), "end_line": max(numbers)}
+    return access
 
 
 def _read_text_window(path: Path, start_line: int, max_lines: int, offset: int, max_chars: int):

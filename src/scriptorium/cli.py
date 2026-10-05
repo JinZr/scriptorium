@@ -124,6 +124,14 @@ def build_parser() -> argparse.ArgumentParser:
     search_parser.add_argument("--path")
     search_parser.add_argument("--cursor", type=int, default=0)
     search_parser.add_argument("--limit", type=int, default=20)
+    search_parser.add_argument(
+        "--context", type=int, default=0, help="also return up to N (0-3) neighbouring lines before and after a match"
+    )
+    search_parser.add_argument(
+        "--include-metadata",
+        action="store_true",
+        help="without --path, also search manifest.json, navigation.json, and source-map.json",
+    )
     page_parser = task_commands.add_parser("page")
     page_parser.add_argument("attempt_id")
     page_parser.add_argument("--number", type=int, required=True)
@@ -320,7 +328,13 @@ def _dispatch_task(service: Any, arguments: argparse.Namespace) -> tuple[Any, in
     if arguments.task_command == "search":
         return (
             service.search_task(
-                arguments.attempt_id, arguments.query, arguments.path, arguments.cursor, arguments.limit
+                arguments.attempt_id,
+                arguments.query,
+                arguments.path,
+                arguments.cursor,
+                arguments.limit,
+                arguments.context,
+                arguments.include_metadata,
             ),
             0,
             None,

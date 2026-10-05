@@ -263,12 +263,16 @@ def bound_read(response, attempt_id, max_lines, max_chars, end_line=None, anchor
     return require_bounded(full)
 
 
-def bound_search(matches, total, attempt_id, query, path, cursor, limit):
+def bound_search(matches, total, attempt_id, query, path, cursor, limit, context=0, include_metadata=False):
     def build(count):
         next_cursor = cursor + count if cursor + count < total else None
         arguments = ["search", attempt_id, f"--query={query}", "--cursor", next_cursor, "--limit", limit]
         if path is not None:
             arguments.append(f"--path={path}")
+        if context:
+            arguments.extend(["--context", context])
+        if include_metadata:
+            arguments.append("--include-metadata")
         return {
             "matches": matches[:count],
             "total_matches": total,
