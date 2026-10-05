@@ -192,31 +192,52 @@ def task_view(context, part, offset):
     return response
 
 
-def bound_read(response, attempt_id, max_lines, max_chars):
+def read_anchor(response, pieces, next_line):
+    """Return an evidence anchor covering the completely returned lines of a text source, if any."""
+    if response.get("source_path") is None:
+        return None
+    complete = [piece for piece in pieces if piece["offset"] == 0 and piece["line"] != next_line]
+    quoted = "\n".join(piece["text"] for piece in complete)
+    if not quoted:
+        return None
+    return {
+        "source_path": response["source_path"],
+        "start_line": complete[0]["line"],
+        "end_line": complete[-1]["line"],
+        "source_digest": response["source_digest"],
+        "quoted_text": quoted,
+    }
+
+
+def bound_read(response, attempt_id, max_lines, max_chars, end_line=None, anchor=False):
     def build(pieces, line, offset):
-        return {
+        arguments = [
+            "read",
+            attempt_id,
+            f"--path={response['path']}",
+            "--start-line",
+            line,
+            "--offset",
+            offset,
+            "--max-lines",
+            max_lines,
+            "--max-chars",
+            max_chars,
+        ]
+        if end_line is not None:
+            arguments.extend(["--end-line", end_line])
+        if anchor:
+            arguments.append("--anchor")
+        result = {
             **response,
             "lines": pieces,
             "next_line": line,
             "next_offset": offset,
-            "next_command": (
-                tool_command(
-                    "read",
-                    attempt_id,
-                    f"--path={response['path']}",
-                    "--start-line",
-                    line,
-                    "--offset",
-                    offset,
-                    "--max-lines",
-                    max_lines,
-                    "--max-chars",
-                    max_chars,
-                )
-                if line is not None
-                else None
-            ),
+            "next_command": tool_command(*arguments) if line is not None else None,
         }
+        if anchor:
+            result["anchor"] = read_anchor(response, pieces, line)
+        return result
 
     pieces = response["lines"]
     full = build(pieces, response["next_line"], response["next_offset"])
