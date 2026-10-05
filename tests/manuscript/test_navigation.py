@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 
 from scriptorium.manuscript import ManuscriptManager
+from scriptorium.schemas import DEFAULT_EVIDENCE_ANCHOR_CONTRACT
 
 
 def test_navigation_is_deterministic_and_locations_match_literal_sources(tmp_path):
@@ -74,6 +75,30 @@ def test_navigation_preserves_escaped_argument_text_and_line_positions(tmp_path)
     assert navigation["entries"][1]["value"] == "one% ignored\ntwo"
     assert navigation["entries"][1]["start_line"] == 3
     assert navigation["entries"][1]["end_line"] == 4
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "\\section{One}\r% note\r\\section{Two}\r\\caption{a\rb}\r",
+        "\\section{One}\r\n% note\r\n\\section{Two}\r\n\\caption{a\r\nb}\r\n",
+        "\\section{One}\n\x0c\\section{Two}\r\n\u2028x\r\\caption{a\rb}\n\x85\\label{z}\n",
+    ],
+    ids=["cr", "crlf", "mixed"],
+)
+def test_navigation_lines_follow_the_frozen_line_rule(tmp_path, body):
+    # Task read numbers lines by the run's frozen rule; navigation must point at the same lines for any ending.
+    (tmp_path / "main.tex").write_text("\\input{part}\n", encoding="utf-8")
+    (tmp_path / "part.tex").write_bytes(body.encode("utf-8"))
+    manager = ManuscriptManager(tmp_path)
+    navigation = json.loads(manager.create_navigation(tmp_path, manager.scan_sources(tmp_path, "main.tex")))
+    lines = DEFAULT_EVIDENCE_ANCHOR_CONTRACT.split_lines(body)
+    entries = [entry for entry in navigation["entries"] if entry["source_path"] == "part.tex"]
+    assert [entry["command"] for entry in entries][:3] == ["section", "section", "caption"]
+    for entry in entries:
+        span = "\n".join(lines[entry["start_line"] - 1 : entry["end_line"]])
+        assert "\\" + entry["command"] in span
+        assert all(piece in span for piece in entry["value"].split("\n"))
 
 
 @pytest.mark.parametrize(
