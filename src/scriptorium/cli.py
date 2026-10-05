@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import argparse
-import asyncio
 from collections.abc import Mapping, Sequence
 from dataclasses import fields, is_dataclass
 from enum import Enum
@@ -257,11 +256,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     except ScriptoriumError as exc:
         _emit_error(exc.code, str(exc), json_output)
         return exc.exit_code
-    except (KeyboardInterrupt, asyncio.CancelledError):
-        _emit_error("interrupted", "operation interrupted", json_output)
-        return 3
     except Exception as exc:
         _emit_error("infrastructure_error", str(exc), json_output)
+        return 3
+    except BaseException as exc:
+        if not _interrupted(exc):
+            raise
+        _emit_error("interrupted", "operation interrupted", json_output)
         return 3
 
     _emit_success(payload, json_output, output_format)
@@ -306,7 +307,7 @@ def _dispatch_run(service: Any, arguments: argparse.Namespace) -> tuple[Any, int
     if arguments.run_command == "start":
         if arguments.budget_usd is not None:
             raise ConfigurationError("--budget-usd belongs to the retired internal model runner")
-        result = asyncio.run(
+        result = _run_async(
             service.start_run(
                 revision=arguments.revision,
                 profile=arguments.profile,
@@ -316,16 +317,16 @@ def _dispatch_run(service: Any, arguments: argparse.Namespace) -> tuple[Any, int
     if arguments.run_command == "status":
         return service.run_status(arguments.run_id), 0, None
     if arguments.run_command == "resume":
-        return run_overview(asyncio.run(service.resume_run(arguments.run_id))), 0, None
+        return run_overview(_run_async(service.resume_run(arguments.run_id))), 0, None
     if arguments.run_command == "retry":
         if arguments.route is not None:
             raise ConfigurationError("--route belongs to the retired internal model runner")
-        result = asyncio.run(
+        result = _run_async(
             service.retry_task(arguments.run_id, arguments.task_id, arguments.abandon_attempt, arguments.reason)
         )
         return run_overview(result), 0, None
     if arguments.run_command == "continue":
-        return run_overview(asyncio.run(service.continue_review(arguments.run_id, arguments.task_id))), 0, None
+        return run_overview(_run_async(service.continue_review(arguments.run_id, arguments.task_id))), 0, None
     if arguments.run_command == "cancel":
         return run_overview(service.cancel_run(arguments.run_id, arguments.reason)), 0, None
     if arguments.run_command == "report":
@@ -379,7 +380,7 @@ def _dispatch_task(service: Any, arguments: argparse.Namespace) -> tuple[Any, in
             contents = raw.decode("utf-8")
         except UnicodeDecodeError as exc:
             raise ConfigurationError("submission must be UTF-8") from exc
-        return asyncio.run(service.submit_task(arguments.attempt_id, arguments.input_digest, contents)), 0, None
+        return _run_async(service.submit_task(arguments.attempt_id, arguments.input_digest, contents)), 0, None
     if arguments.task_command == "read":
         return (
             service.read_task(
@@ -464,6 +465,18 @@ def _dispatch_patch(service: Any, arguments: argparse.Namespace) -> tuple[Any, i
         return result, 1 if _status_value(result) == "stale" else 0, None
 
     raise _UsageError("missing patch command")
+
+
+def _run_async(awaitable: Any) -> Any:
+    # Retrieval commands never run a coroutine, so they skip the asyncio import.
+    import asyncio
+
+    return asyncio.run(awaitable)
+
+
+def _interrupted(exc: BaseException) -> bool:
+    asyncio = sys.modules.get("asyncio")
+    return isinstance(exc, KeyboardInterrupt) or (asyncio is not None and isinstance(exc, asyncio.CancelledError))
 
 
 def _build_service(repo: Path) -> Any:
