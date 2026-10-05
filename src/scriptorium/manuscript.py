@@ -175,11 +175,12 @@ CONTROL_WORD_BEFORE_NUMBER_PATTERN = re.compile(
 )
 QUANTITY_PATTERN = re.compile(
     r"(?<![A-Za-z0-9_.:/\\@])(?:(?<!-)[-+\u2212]\s*)?"
-    r"(?:\d{1,3}(?:(?:,|\{,\})\d{3})+(?:\.\d+)?|\d+\.\d+|\.\d+|\d+)(?!\d|\.\d)"
+    r"(?:(?P<power>10\s*\^\s*(?:\{\s*[-+\u2212]?\s*\d+(?:\.\d+)?\s*\}|[-+\u2212]?\d))"
+    r"|\d{1,3}(?:(?:,|\{,\})\d{3})+(?:\.\d+)?|\d+\.\d+|\.\d+|\d+)(?!\d|\.\d)"
     r"(?P<uncertainty>\(\d+(?:\.\d+)?\))?"
     r"(?P<exponent>[eE][-+\u2212]?\d+)?"
     r"(?P<pm>\s*(?:\\pm|\u00b1|\+/-)\s*(?:\d+\.\d+|\.\d+|\d+))?"
-    r"(?P<times>\s*(?:\\times|\u00d7|\\cdot)\s*10\s*\^\s*(?:\{\s*[-+\u2212]?\s*\d+\s*\}|[-+\u2212]?\d))?"
+    r"(?P<times>\s*(?:\\times|\u00d7|\\cdot)\s*10\s*\^\s*(?:\{\s*[-+\u2212]?\s*\d+(?:\.\d+)?\s*\}|[-+\u2212]?\d))?"
     r"(?P<percent>\s*\\%)?"
 )
 UNIT_POWER = r"(?:\^\s*(?:\{\s*[-+\u2212]?\s*\d+\s*\}|[-+\u2212]?\d))?"
@@ -734,9 +735,11 @@ class ManuscriptManager:
             (command, start, end, end - 1 - len(value), end - 1)
             for command, start, end, value in cls._navigation_commands(masked)
         ]
-        spans.extend(cls._navigation_environments(masked))
         if body is not None:
             floor, ceiling = body
+            # Tables and equations after \end{document}, or in a file input only outside the body, are never typeset.
+            displays = [*cls._navigation_environments(masked), *cls._navigation_displays(text)]
+            spans.extend(span for span in displays if floor <= span[1] < ceiling)
             # Settings and definitions, such as \newcommand{\temp}{\SI{300}{K}}, typeset no reported value.
             arguments = _merged_spans(list(_command_argument_spans(masked)))
             lefts = [left for left, _ in arguments]
@@ -771,6 +774,18 @@ class ManuscriptManager:
                     ), other.start()
                     break
 
+    @classmethod
+    def _navigation_displays(cls, text: str) -> Iterator[tuple[str, int, int, int, int]]:
+        # \[ ... \] is LaTeX's short form of the displaymath environment; comments and verbatim text stay masked.
+        symbols = cls._dependency_text(text, preserve_positions=True, keep_control_symbols=True)
+        opening = None
+        for token in re.finditer(r"\\(?:[A-Za-z@]+|[^\n])", symbols):
+            if token[0] == "\\[" and opening is None:
+                opening = token.start()
+            elif token[0] == "\\]" and opening is not None:
+                yield "displaymath", opening, token.end(), opening + 2, token.start()
+                opening = None
+
     @staticmethod
     def _quantity_commands(text: str) -> Iterator[tuple[str, int, int, int, int]]:
         for match in QUANTITY_COMMAND_PATTERN.finditer(text):
@@ -801,7 +816,8 @@ class ManuscriptManager:
                 continue
             core = match.group(0)
             if not (
-                "." in core or any(match.group(name) for name in ("uncertainty", "exponent", "pm", "times", "percent"))
+                "." in core
+                or any(match.group(name) for name in ("power", "uncertainty", "exponent", "pm", "times", "percent"))
             ):
                 continue
             unit = QUANTITY_UNIT_PATTERN.match(text, end)
@@ -1414,7 +1430,7 @@ class ManuscriptManager:
             return False
 
     @staticmethod
-    def _dependency_text(text: str, *, preserve_positions: bool = False) -> str:
+    def _dependency_text(text: str, *, preserve_positions: bool = False, keep_control_symbols: bool = False) -> str:
         # Consume control symbols in pairs so a line break cannot start a command.
         token_pattern = re.compile(r"%[^\n]*|\\(?:[A-Za-z@]+\*?|[^\n])")
         parts = []
@@ -1424,7 +1440,7 @@ class ManuscriptManager:
             token = match.group()
             end = match.end()
             replacement = token
-            if token.startswith("%") or not token[1].isalpha():
+            if token.startswith("%") or not (token[1].isalpha() or keep_control_symbols):
                 replacement = " "
             elif token in {r"\verb", r"\verb*"}:
                 literal = re.match(r"([^\n])[^\n]*?\1", text[end:])

@@ -388,3 +388,26 @@ def test_long_environment_bodies_are_stored_as_a_bounded_prefix(tmp_path):
     assert len(entry["value"]) == 2000 and rows.startswith(entry["value"])
     assert entry["value_truncated"] is True
     assert (entry["start_line"], entry["end_line"]) == (1, 402)
+
+
+def test_display_brackets_powers_of_ten_and_post_document_environments(tmp_path):
+    main = (
+        "\\begin{document}\n"
+        "A rate of $10^{-3}$ and $10^{-3.5}$, row \\\\[2mm] break, % \\[ ignored \\]\n"
+        "\\[\nE = 0.5\n\\]\n"
+        "\\end{document}\n"
+        "\\begin{table}\nCleanup 0.5\n\\end{table}\n\\input{late}\n"
+    )
+    (tmp_path / "main.tex").write_text(main)
+    (tmp_path / "late.tex").write_text("\\begin{equation}x=1\\end{equation}\n")
+    manager = ManuscriptManager(tmp_path)
+    navigation = json.loads(manager.create_navigation(tmp_path, manager.scan_sources(tmp_path, "main.tex")))
+    entries = [
+        (entry["command"], entry["value"], entry["start_line"], entry["end_line"]) for entry in navigation["entries"]
+    ]
+    assert entries == [
+        ("quantity", "10^{-3}", 2, 2),
+        ("quantity", "10^{-3.5}", 2, 2),
+        ("displaymath", "E = 0.5", 3, 5),
+        ("quantity", "0.5", 4, 4),
+    ]
