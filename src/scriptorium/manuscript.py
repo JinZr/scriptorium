@@ -14,8 +14,6 @@ import sys
 import tarfile
 from typing import Iterable, Iterator
 
-import pymupdf as fitz
-
 from .config import ManuscriptConfig
 from .errors import ConfigurationError, InfrastructureError, StateError
 from .schemas import (
@@ -65,10 +63,18 @@ NON_TEXT_ANCHOR_EXTENSIONS = frozenset(
 MAX_PAGE_VIEW_PIXELS = 40_000_000
 
 
+def _pymupdf():
+    # PyMuPDF is only needed to build or render PDFs; retrieval and submission calls skip its import cost.
+    import pymupdf
+
+    return pymupdf
+
+
 def render_page_view(
     pdf_path: Path, page: int, scale: float, crop: tuple[float, float, float, float] | None, destination: Path
 ) -> None:
     """Render one 1-based page of a frozen PDF at a scale and optional fractional crop, atomically."""
+    fitz = _pymupdf()
     document = fitz.open(pdf_path)
     try:
         selected = document[page - 1]
@@ -99,6 +105,7 @@ def render_page_view(
 
 def page_text(pdf_path: Path, page: int) -> str:
     """Return the PDF text layer of one 1-based page; it is a reading aid, not manuscript evidence."""
+    fitz = _pymupdf()
     document = fitz.open(pdf_path)
     try:
         return document[page - 1].get_text("text")
@@ -345,6 +352,7 @@ class ManuscriptManager:
             shutil.rmtree(destination)
         builds = []
         documents = []
+        fitz = _pymupdf()
         with fitz.open() as combined:
             for index, entrypoint in enumerate(manuscript.entrypoints):
                 workspace = destination / f"document-{index + 1}"
@@ -707,6 +715,7 @@ class ManuscriptManager:
             shutil.copy2(snapshot / source.path, target)
         bundle_pdf = destination / "manuscript.pdf"
         shutil.copy2(pdf_path, bundle_pdf)
+        fitz = _pymupdf()
         document = fitz.open(bundle_pdf)
         try:
             for index, page in enumerate(document):

@@ -241,26 +241,25 @@ def bound_read(response, attempt_id, max_lines, max_chars, end_line=None, anchor
 
     pieces = response["lines"]
     full = build(pieces, response["next_line"], response["next_offset"])
-    if fits_response(full):
-        return full
-    returned = []
-    for index, piece in enumerate(pieces):
-        following = pieces[index + 1] if index + 1 < len(pieces) else None
-        line = following["line"] if following else response["next_line"]
-        offset = following["offset"] if following else response["next_offset"]
-        if fits_response(build([*returned, piece], line, offset)):
-            returned.append(piece)
-            continue
+    if fits_response(full) or not pieces:
+        # With no text to cut, metadata that cannot fit fails explicitly.
+        return require_bounded(full)
 
-        def fragment(length):
-            prefix = [*returned, {**piece, "text": piece["text"][:length]}] if length else returned
-            return build(prefix, piece["line"], piece["offset"] + length)
+    def whole(count):
+        return build(pieces[:count], pieces[count]["line"], pieces[count]["offset"])
 
-        length, result = _fit_prefix(len(piece["text"]), fragment)
-        if not returned and length == 0:
-            raise ConfigurationError("response metadata leaves no room for source text")
-        return result
-    return require_bounded(full)
+    # The full window does not fit, so at most every piece but the last is returned whole.
+    count, result = _fit_prefix(len(pieces) - 1, whole)
+    returned, piece = pieces[:count], pieces[count]
+
+    def fragment(length):
+        prefix = [*returned, {**piece, "text": piece["text"][:length]}] if length else returned
+        return build(prefix, piece["line"], piece["offset"] + length)
+
+    length, result = _fit_prefix(len(piece["text"]), fragment)
+    if not returned and length == 0:
+        raise ConfigurationError("response metadata leaves no room for source text")
+    return result
 
 
 def bound_search(matches, total, attempt_id, query, path, cursor, limit, context=0, include_metadata=False):
