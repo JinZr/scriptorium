@@ -174,7 +174,7 @@ def _quantities(tmp_path, files):
     return [
         (entry["source_path"], entry["command"], entry["value"])
         for entry in navigation["entries"]
-        if entry["command"] in {"quantity", "alignat", "alignat*"}
+        if entry["command"] in {"quantity", "SI", "alignat", "alignat*"}
     ]
 
 
@@ -230,4 +230,22 @@ def test_environment_bodies_grouped_digits_and_the_document_end_bound_quantities
         "1,234.5",
         "2{,}000.25",
         "1.5 eV",
+    ]
+
+
+def test_versions_references_postscript_inputs_and_powered_units(tmp_path):
+    files = {
+        "main.tex": (
+            "\\begin{document}\n"
+            "Compiled with Python 3.10 and CUDA~11.8, as in Table~2.1 and Eq.~(3.4).\n"
+            "The flux is 1.5 m^{-2} over 2.5 \\mathrm{m^{2}} at \\SI{3.5}{K}.\n"
+            "\\end{document}\n"
+            "\\SI{9.5}{K} and \\input{notes}\n"
+        ),
+        "notes.tex": "Untypeset 4.5 eV.\n",
+    }
+    assert _quantities(tmp_path, files) == [
+        ("main.tex", "quantity", "1.5 m^{-2}"),
+        ("main.tex", "quantity", "2.5 \\mathrm{m^{2}}"),
+        ("main.tex", "SI", "{3.5}{K}"),
     ]

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from bisect import bisect_right
+from bisect import bisect_left, bisect_right
 from dataclasses import asdict, dataclass
 import difflib
 import errno
@@ -119,10 +119,19 @@ QUANTITY_PATTERN = re.compile(
     r"(?P<times>\s*(?:\\times|\u00d7|\\cdot)\s*10\s*\^\s*(?:\{\s*[-+\u2212]?\s*\d+\s*\}|[-+\u2212]?\d))?"
     r"(?P<percent>\s*\\%)?"
 )
+UNIT_POWER = r"(?:\^\s*(?:\{\s*[-+\u2212]?\s*\d+\s*\}|[-+\u2212]?\d))?"
 QUANTITY_UNIT_PATTERN = re.compile(
     r"\$?(?:~|\\[,;: ]|[ \t])?\s?"
-    r"(?:\\(?:mathrm|text|textrm|rm|mbox|unit|si)\s*\{[^{}\n]{1,24}\}"
-    r"|[A-Za-z\u00c5\u00b5\u03bc]{1,10}(?:/[A-Za-z\u00c5\u00b5\u03bc]{1,10})?)(?![A-Za-z])"
+    r"(?:\\(?:mathrm|text|textrm|rm|mbox|unit|si)\s*\{(?:[^{}\n]|\{[^{}\n]{1,8}\}){1,24}\}" + UNIT_POWER + "|"
+    r"[A-Za-z\u00c5\u00b5\u03bc]{1,10}" + UNIT_POWER + r"(?:/[A-Za-z\u00c5\u00b5\u03bc]{1,10}" + UNIT_POWER + ")?)"
+    r"(?![A-Za-z])"
+)
+# Numbers named by a version, software release, or numbered reference are not reported values.
+NON_QUANTITY_CONTEXT_PATTERN = re.compile(
+    r"(?<![A-Za-z])(?:versions?|release|ver\.|v\.|python|cuda|pytorch|tensorflow|numpy|scipy|ubuntu|"
+    r"tables?|tab\.|figures?|figs?\.|sections?|secs?\.|eqs?\.|equations?|chapters?|appendix|algorithms?|"
+    r"theorems?|lemmas?|definitions?|corollar(?:y|ies)|propositions?|remarks?|\\S)(?:\s|~|\\ |\()*$",
+    re.IGNORECASE,
 )
 QUANTITY_UNIT_STOPWORDS = frozenset(
     "a an and are as at be but by for from has in into is it of on or per than that the to was were which with".split()
@@ -325,6 +334,14 @@ def _command_argument_spans(text: str) -> Iterator[tuple[int, int]]:
             yield start, end
 
 
+def _document_body(masked: str) -> tuple[int, int]:
+    """Return the typeset span: after \\begin{document}, if present, and before \\end{document}, where TeX stops."""
+    document = re.search(r"\\begin\s*\{document\}", masked)
+    floor = document.end() if document else 0
+    closing = re.compile(r"\\end\s*\{document\}").search(masked, floor)
+    return floor, closing.start() if closing else len(masked)
+
+
 def _merged_spans(spans: list[tuple[int, int]]) -> list[tuple[int, int]]:
     merged: list[tuple[int, int]] = []
     for left, right in sorted(spans):
@@ -468,13 +485,14 @@ class ManuscriptManager:
         preamble = self._preamble_sources(snapshot, masks)
         for path, text in texts.items():
             spans = self._navigation_spans(text, masks[path], preamble=path in preamble)
+            breaks = [match.start() for match in re.finditer("\n", text)]
             for command, start, end, value_start, value_end in spans:
                 value = text[value_start:value_end]
                 entry = {
                     "command": command,
                     "source_path": path,
-                    "start_line": text.count("\n", 0, start) + 1,
-                    "end_line": text.count("\n", 0, end - 1) + 1,
+                    "start_line": bisect_left(breaks, start) + 1,
+                    "end_line": bisect_left(breaks, end - 1) + 1,
                     "value": value.strip(),
                 }
                 if command == "includegraphics":
@@ -497,11 +515,11 @@ class ManuscriptManager:
         )
 
     def _preamble_sources(self, snapshot: Path, masks: dict[str, str]) -> set[str]:
-        """Return sources reached only through inputs placed before a \\begin{document} or inside such sources."""
+        """Return sources reached only through inputs placed outside a document body or inside such sources."""
         root = snapshot.resolve()
         edges: dict[str, list[tuple[str, bool]]] = {}
         for path, masked in masks.items():
-            document = re.search(r"\\begin\s*\{document\}", masked)
+            floor, ceiling = _document_body(masked)
             for match in INPUT_PATTERN.finditer(masked):
                 dependency = Path(next(group for group in match.groups() if group is not None).strip())
                 try:
@@ -510,13 +528,13 @@ class ManuscriptManager:
                     ).as_posix()
                 except InfrastructureError:
                     continue
-                edges.setdefault(path, []).append((child, bool(document) and match.start() < document.start()))
+                edges.setdefault(path, []).append((child, not floor <= match.start() < ceiling))
         included = {child for children in edges.values() for child, _ in children}
         body = [path for path in masks if path not in included]
         reached = set(body)
         while body:
-            for child, in_preamble in edges.get(body.pop(), []):
-                if not in_preamble and child not in reached:
+            for child, outside in edges.get(body.pop(), []):
+                if not outside and child not in reached:
                     reached.add(child)
                     body.append(child)
         return set(masks) - reached
@@ -531,11 +549,12 @@ class ManuscriptManager:
             for command, start, end, value in cls._navigation_commands(masked)
         ]
         spans.extend(cls._navigation_environments(masked))
-        quantity_commands = list(cls._quantity_commands(masked))
-        spans.extend(quantity_commands)
-        covered = [(start, end) for _, start, end, _, _ in quantity_commands]
         if not preamble:
-            spans.extend(cls._navigation_quantities(text, masked, covered))
+            floor, ceiling = _document_body(masked)
+            quantity_commands = [span for span in cls._quantity_commands(masked) if floor <= span[1] < ceiling]
+            spans.extend(quantity_commands)
+            covered = [(start, end) for _, start, end, _, _ in quantity_commands]
+            spans.extend(cls._navigation_quantities(text, masked, covered, floor, ceiling))
         return sorted(spans, key=lambda span: span[1])
 
     @staticmethod
@@ -572,22 +591,19 @@ class ManuscriptManager:
             yield match.group(1), match.start(), end, match.end() - 1, end
 
     @staticmethod
-    def _navigation_quantities(text: str, masked: str, skipped: list[tuple[int, int]]):
+    def _navigation_quantities(text: str, masked: str, skipped: list[tuple[int, int]], floor: int, ceiling: int):
         # Literal numeric reports: decimals, uncertainties, exponents, plus-minus or percentages, with an adjacent unit.
-        document = re.search(r"\\begin\s*\{document\}", masked)
         excluded = _merged_spans([*skipped, *_command_argument_spans(masked)])
         lefts = [left for left, _ in excluded]
-        floor = document.end() if document else 0
-        # TeX stops reading at \end{document}; text after it is never typeset.
-        closing = re.compile(r"\\end\s*\{document\}").search(masked, floor)
-        ceiling = closing.start() if closing else len(text)
         scanned = CONTROL_WORD_BEFORE_NUMBER_PATTERN.sub(lambda word: " " * len(word[0]), text)
         for match in QUANTITY_PATTERN.finditer(scanned, floor, ceiling):
             start, end = match.span()
             nearest = bisect_right(lefts, start) - 1
             if masked[start] != text[start] or (nearest >= 0 and start < excluded[nearest][1]):
                 continue
-            if LENGTH_FOLLOWER_PATTERN.match(text, end):
+            if LENGTH_FOLLOWER_PATTERN.match(text, end) or NON_QUANTITY_CONTEXT_PATTERN.search(
+                text, max(floor, start - 24), start
+            ):
                 continue
             core = match.group(0)
             if not (
