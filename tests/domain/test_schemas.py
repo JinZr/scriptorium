@@ -282,14 +282,26 @@ def test_claim_judgments_accept_consistent_answers(changes) -> None:
 @pytest.mark.parametrize(
     ("changes", "message"),
     [
-        ({"question_answer": "partly"}, '"supported" requires question_answer "yes"'),
-        ({"exceptions": ["One molecule exceeds it."]}, '"supported" requires question_answer "yes"'),
+        ({"question_answer": "partly"}, 'goes with question_answer "yes"'),
+        ({"assessment": "unresolved"}, 'goes with question_answer "yes"'),
+        ({"assessment": "finding", "finding_indices": [0]}, 'goes with question_answer "yes"'),
+        ({"exceptions": ["One molecule exceeds it."]}, "lists no exceptions"),
         ({"assessment": "finding", "finding_indices": [0], "question_answer": "not_checkable"}, "not_checkable"),
         ({"check_type": "recomputation"}, "recomputation is recorded exactly"),
         ({"recomputation": RECOMPUTATION}, "recomputation is recorded exactly"),
         (
             {"check_type": "recomputation", "recomputation": {**RECOMPUTATION, "outcome": "differs"}},
             "recomputation that differs",
+        ),
+        (
+            {
+                "assessment": "finding",
+                "finding_indices": [0],
+                "question_answer": "no",
+                "check_type": "recomputation",
+                "recomputation": RECOMPUTATION,
+            },
+            'one that matches cannot answer "no"',
         ),
     ],
 )

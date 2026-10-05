@@ -424,11 +424,17 @@ class JudgedClaimCheck(ClaimCheck):
     def validate_judgment(self) -> "JudgedClaimCheck":
         if (self.check_type == "recomputation") != (self.recomputation is not None):
             raise ValueError('a recomputation is recorded exactly when check_type is "recomputation"')
-        if self.assessment == "supported":
-            if self.question_answer != "yes" or self.exceptions:
-                raise ValueError('"supported" requires question_answer "yes" and no exceptions')
-            if self.recomputation is not None and self.recomputation.outcome != "matches":
-                raise ValueError('"supported" cannot rest on a recomputation that differs')
+        if (self.assessment == "supported") != (self.question_answer == "yes"):
+            raise ValueError('assessment "supported" goes with question_answer "yes", and only with it')
+        if self.question_answer == "yes" and self.exceptions:
+            raise ValueError('question_answer "yes" lists no exceptions; use "partly"')
+        if self.recomputation is not None and (self.recomputation.outcome, self.question_answer) in {
+            ("matches", "no"),
+            ("differs", "yes"),
+        }:
+            raise ValueError(
+                'a recomputation that differs cannot answer "yes", and one that matches cannot answer "no"'
+            )
         if self.question_answer == "not_checkable" and self.assessment != "unresolved":
             raise ValueError('question_answer "not_checkable" requires assessment "unresolved"')
         return self
