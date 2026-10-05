@@ -11,6 +11,27 @@ scriptorium --json task claim TASK_ID --client codex --model MODEL --effort EFFO
 scriptorium --json task show ATTEMPT_ID
 ```
 
+## Task command reference
+
+Every command accepts the global `--json` flag before the command name. `scriptorium task COMMAND -h` lists each
+option. Bounded responses stay within 7,000 UTF-8 bytes; run `next_command` unchanged until it is null.
+
+| Command | Use | Main response fields | Continuation |
+| --- | --- | --- | --- |
+| `task claim TASK_ID ...` | Start or reconnect to this session's attempt | `attempt`, `input_digest`, `inputs.*.command`, `source_map_command` | none |
+| `task show ATTEMPT_ID` | Attempt overview | same as claim | none |
+| `task show ATTEMPT_ID --part P` | Frozen prompt, schema, or source map text | `text`, `offset`, `total_chars`, `digest` | `next_command` |
+| `task nav ATTEMPT_ID` | Filter navigation entries | `entries`, `total_entries`, `command_counts` | `next_cursor`, `next_command` |
+| `task search ATTEMPT_ID --query Q` | Literal case-insensitive search | `matches[]` with `path`, `line`, `column`, `excerpt`, `source_digest` | `next_cursor`, `next_command` |
+| `task read ATTEMPT_ID --path P` | Bounded source or metadata lines | `lines[]` with `line`, `offset`, `text`; `source_path`, `source_digest`, optional `anchor` | `next_line`, `next_offset`, `next_command` |
+| `task page ATTEMPT_ID --number N` | Rendered page image | `page`, `path`, `digest`, `document`, `document_page` | none |
+| `task submit ATTEMPT_ID ...` | Validate one output | `attempt`, `validation_report`, `run_status`, `next_actions` | `run status` |
+| `run status RUN_ID` | Overview and next actions | `task_counts`, `next_actions`, `report_parts` | none |
+| `run report RUN_ID --part P` | One report section | `text`, `offset`, `digest`, `report_digest` | `next_command` |
+
+Errors use `{"ok": false, "error": {"code", "message"}}` with `--json`. `task read/search/nav/page` need an
+active attempt; `task show` also works for finished attempts.
+
 `run status` returns a compact run identity and status, task counts, finding/patch counts, `has_error`, current `next_actions`, and `report_parts` commands. It omits frozen configuration and attempt history; these remain available through the `run` and `tasks` report sections. Costs remain unknown for external runs. Historical SDK runs return `execution: legacy_read_only` with no executable next actions.
 
 The CLI responses for `run start/resume/retry/continue/cancel` summarize the state returned by that mutation and direct the client to `run status` for current actions. They do not include the full run configuration. After submission, use `run status` to discover continuation or human gates; `task list` retains its detailed, unbounded output for explicit inspection.

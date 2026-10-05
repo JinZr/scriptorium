@@ -7,6 +7,22 @@ description: Use Scriptorium's shared JSON CLI to review a frozen Git-managed La
 
 You are the reviewer in the current client conversation. Use the model selected by this Codex, Claude Code, or Antigravity host. Do not create or invoke subagents, delegate a role, or call another model; review each role yourself in this conversation. Scriptorium supplies frozen material and workflow state; it does not call another model. Use the installed `scriptorium --json` CLI. Never edit `.scriptorium/`, its SQLite database, artifacts, snapshot, bundle, or generated patch directly.
 
+## Quick reference
+
+```text
+run status RUN_ID                         -> next_actions; follow them
+task claim TASK_ID --client C --model M --effort E --session-id S --session-source host
+task show ATTEMPT_ID [--part prompt|schema|source-map]
+task nav ATTEMPT_ID --command heading|reference|citation|label|caption|graphics [--query Q] [--path P]
+task search ATTEMPT_ID --query Q [--path P] [--context 2] [--include-metadata]
+task read ATTEMPT_ID --path P --start-line A [--end-line B] [--anchor]
+task page ATTEMPT_ID --number N [--document ENTRYPOINT]
+task submit ATTEMPT_ID --input-digest D --file answer.json
+run continue|retry RUN_ID --task TASK_ID  -> then claim again
+```
+
+Prefix each with `scriptorium --json`. Run every `next_command` unchanged until it is null.
+
 ## Start or resume
 
 Run every command from the manuscript project that owns the run. Inspect `scriptorium --json doctor --revision REVISION --profile PROFILE` before a new run. `scriptorium --json run start --revision REVISION --profile PROFILE` freezes and compiles that commit, prepares pending review tasks, and returns a run overview. It does not spend model tokens by itself. For an existing run, inspect `run status RUN_ID` and follow its `next_actions`. After starting or changing a run, read `run status` for fresh actions; mutation acknowledgements contain only a compact state summary. Use IDs and input digests returned by the CLI, not guessed values. If a run is not found, stop and check the project directory with the caller; do not search other repositories or inspect SQLite directly.
