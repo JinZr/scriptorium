@@ -94,3 +94,58 @@ def test_long_values_are_truncated_and_bad_filters_rejected(navigator):
         service.nav_task(attempt_id, ["figure"])
     with pytest.raises(ConfigurationError, match="closest text read paths"):
         service.nav_task(attempt_id, path="result.tex")
+
+
+def _nav_run(tmp_path, files, main_body):
+    repo = make_repository(tmp_path, roles=("copyedit",))
+    for relative, content in files.items():
+        target = repo / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(content, encoding="utf-8")
+    (repo / "main.tex").write_text(
+        "\\documentclass{article}\n\\begin{document}\n" + main_body + "\\end{document}\n", encoding="utf-8"
+    )
+    subprocess.run(["git", "-C", str(repo), "add", "--all"], check=True)
+    subprocess.run(["git", "-C", str(repo), "commit", "-qm", "Navigation sources"], check=True)
+    service = ScriptoriumService(repo, manuscript_manager=PdfBuildingManuscriptManager(repo))
+    run = asyncio.run(service.start_run("HEAD", "quick"))["run"]
+    return service, claim(service, run.id, "copyedit")["attempt"].id
+
+
+def test_read_paths_take_priority_over_colliding_source_paths(tmp_path):
+    files = {"z.tex": "\\section{Root file}\n", "sources/z.tex": "\\section{Nested file}\n"}
+    service, attempt_id = _nav_run(tmp_path, files, "\\input{z}\n\\input{sources/z}\n")
+    with service:
+
+        def headings(path):
+            return [entry["value"] for entry in service.nav_task(attempt_id, ["heading"], path=path)["entries"]]
+
+        # "sources/z.tex" is the root file's read path and the nested file's source path, as in task read.
+        assert headings("sources/z.tex") == ["Root file"]
+        assert headings("sources/sources/z.tex") == ["Nested file"]
+        assert headings("z.tex") == ["Root file"]
+
+
+def test_ambiguous_graphics_candidates_are_capped_so_every_entry_fits(tmp_path, monkeypatch, capsys):
+    panels = [f"figures/panel-{index:03d}/plot.png" for index in range(250)]
+    files = {path: "png" for path in ["plot.png", *panels]}
+    body = "\\includegraphics{plot}\n" + "".join(f"\\includegraphics{{{path[:-4]}}}\n" for path in panels)
+    service, attempt_id = _nav_run(tmp_path, files, body)
+    with service:
+        monkeypatch.chdir(service.repo)
+        monkeypatch.setattr(cli, "_build_service", lambda _: service)
+        capsys.readouterr()
+        arguments = ["--json", "task", "nav", attempt_id, "--command", "graphics"]
+        entries = []
+        while arguments:
+            assert cli.main(arguments) == 0
+            output = capsys.readouterr().out
+            assert len(output.encode("utf-8")) <= MAX_TOOL_RESPONSE_BYTES
+            response = json.loads(output)["data"]
+            entries.extend(response["entries"])
+            arguments = shlex.split(response["next_command"])[1:] if response["next_command"] else None
+        assert len(entries) == response["total_entries"] == 251
+        ambiguous = next(entry for entry in entries if entry["value"] == "plot")
+        assert ambiguous["candidate_count"] == 251 and ambiguous["candidate_paths_truncated"] is True
+        assert len(ambiguous["candidate_paths"]) == 10 and ambiguous["target_path"] is None
+        assert all("candidate_count" not in entry for entry in entries if entry is not ambiguous)

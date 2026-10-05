@@ -719,9 +719,10 @@ class ScriptoriumService:
         selected = _navigation_commands(commands)
         source_path = None
         if path is not None:
-            source = next(
-                (item for item in bundle.anchor_map.sources if path in {item.source_path, item.read_path}), None
-            )
+            # Read paths take priority over a colliding source path, exactly as in task read.
+            source = next((item for item in bundle.anchor_map.sources if item.read_path == path), None)
+            if source is None:
+                source = next((item for item in bundle.anchor_map.sources if item.source_path == path), None)
             if source is None:
                 raise _unknown_text_path(path, bundle.anchor_map)
             source_path = source.source_path
@@ -1556,6 +1557,7 @@ NAVIGATION_GROUPS = {
     "graphics": ("includegraphics",),
 }
 _NAVIGATION_VALUE_CHARS = 500
+_NAVIGATION_CANDIDATES = 10
 
 
 def _navigation_commands(commands: list[str]) -> set[str] | None:
@@ -1575,9 +1577,18 @@ def _navigation_commands(commands: list[str]) -> set[str] | None:
 
 
 def _navigation_entry(entry: dict[str, Any]) -> dict[str, Any]:
-    if len(entry["value"]) <= _NAVIGATION_VALUE_CHARS:
-        return entry
-    return {**entry, "value": entry["value"][:_NAVIGATION_VALUE_CHARS], "value_truncated": True}
+    # Cut long literals and ambiguous graphics candidates so every single entry fits a bounded response.
+    trimmed = dict(entry)
+    if len(entry["value"]) > _NAVIGATION_VALUE_CHARS:
+        trimmed.update(value=entry["value"][:_NAVIGATION_VALUE_CHARS], value_truncated=True)
+    candidates = entry.get("candidate_paths") or []
+    if len(candidates) > _NAVIGATION_CANDIDATES:
+        trimmed.update(
+            candidate_paths=candidates[:_NAVIGATION_CANDIDATES],
+            candidate_count=len(candidates),
+            candidate_paths_truncated=True,
+        )
+    return trimmed
 
 
 def _scan_matches(path: Path, query: str, skip: int, take: int, context: int):
