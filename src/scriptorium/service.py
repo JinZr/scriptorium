@@ -39,7 +39,7 @@ from .domain import (
     utc_now,
 )
 from .errors import ConfigurationError, InfrastructureError, NotFoundError, StateError
-from .manuscript import ManuscriptManager
+from .manuscript import ManuscriptManager, page_text, render_page_view
 from .schemas import EvidenceAnchorContract, ScientificReviewOutput, ScopedReviewOutput
 from .storage import ConflictError, Database, NotFoundError as StorageNotFoundError, StorageError
 from .tool_output import (
@@ -47,6 +47,7 @@ from .tool_output import (
     bound_nav,
     bound_read,
     bound_search,
+    page_text_fragment,
     report_fragment,
     require_bounded,
     run_overview,
@@ -766,12 +767,35 @@ class ScriptoriumService:
         )
         return response
 
-    def page_task(self, attempt_id: str, page_number: int, document: str | None = None):
+    def page_task(
+        self,
+        attempt_id: str,
+        page_number: int,
+        document: str | None = None,
+        scale: float | None = None,
+        crop: tuple[float, float, float, float] | None = None,
+        text: bool = False,
+        offset: int = 0,
+    ):
+        _validate_page_view(scale, crop, text, offset)
         with self._retrieval_operation(attempt_id, "task page"):
-            return self._page_task(attempt_id, page_number, document)
+            attempt, task, bundle, files = self._readable_task(attempt_id)
+            location, page = self._page_location(bundle, page_number, document)
+            if text:
+                return self._page_text(attempt, task, bundle, files, location, page_number, document, offset)
+            self.armarius._verify_retrieval_file(bundle.workspace, files, page.read_path)
+            response = {**location, "path": str(bundle.workspace / page.read_path), "digest": page.page_digest}
+            access = {**location, "read_path": page.read_path}
+            if scale is not None or crop is not None:
+                view = self._page_view(task.run_id, bundle, files, location["page"], scale or 1.5, crop)
+                response.update(path=view.pop("path"), view=view)
+                access["view"] = view
+            response = require_bounded(response)
+            self._record_access(task.run_id, attempt.id, "page", access)
+            return response
 
-    def _page_task(self, attempt_id: str, page_number: int, document: str | None):
-        attempt, task, bundle, files = self._readable_task(attempt_id)
+    @staticmethod
+    def _page_location(bundle, page_number: int, document: str | None):
         pdf = bundle.anchor_map.compiled_pdf
         if document is not None:
             selected = next((item for item in pdf.documents if item.entrypoint == document), None)
@@ -783,7 +807,6 @@ class ScriptoriumService:
         page = next((item for item in pdf.pages if item.page == page_number), None)
         if page is None:
             raise ConfigurationError("page is outside the frozen PDF")
-        self.armarius._verify_retrieval_file(bundle.workspace, files, page.read_path)
         selected = next(
             (item for item in pdf.documents if item.start_page <= page_number < item.start_page + item.page_count), None
         )
@@ -793,10 +816,26 @@ class ScriptoriumService:
             "document": selected.entrypoint if selected else None,
             "document_page": page_number - selected.start_page + 1 if selected else None,
         }
-        response = require_bounded(
-            {**location, "path": str(bundle.workspace / page.read_path), "digest": page.page_digest}
+        return location, page
+
+    def _page_view(self, run_id: str, bundle, files, page: int, scale: float, crop) -> dict[str, Any]:
+        pdf = self.armarius._verify_retrieval_file(bundle.workspace, files, "manuscript.pdf")
+        view = {"scale": scale, "crop": list(crop) if crop is not None else None}
+        key = digest_json({"pdf_digest": files["manuscript.pdf"]["digest"], "page": page, **view})[:16]
+        destination = self.state_dir / "runs" / run_id / "page-views" / f"page-{page:04d}-{key}.png"
+        render_page_view(pdf, page, scale, crop, destination)
+        return {**view, "digest": ArtifactStore.digest_file(destination), "path": str(destination)}
+
+    def _page_text(self, attempt, task, bundle, files, location, page_number, document, offset):
+        pdf = self.armarius._verify_retrieval_file(bundle.workspace, files, "manuscript.pdf")
+        content = page_text(pdf, location["page"])
+        response = page_text_fragment(location, content, offset, attempt.id, page_number, document)
+        self._record_access(
+            task.run_id,
+            attempt.id,
+            "page_text",
+            {**location, "start_offset": offset, "end_offset": offset + len(response["text"])},
         )
-        self._record_access(task.run_id, attempt.id, "page", {**location, "read_path": page.read_path})
         return response
 
     def _record_access(self, run_id: str, attempt_id: str, operation: str, payload: dict[str, Any]) -> None:
@@ -1042,8 +1081,8 @@ class ScriptoriumService:
         external_run = run_view["run"].frozen_config.get("execution") == "external"
         access_counts = {}
         for event in events:
-            if event.event_type in {"tool.read", "tool.search", "tool.page", "tool.nav"}:
-                counts = access_counts.setdefault(event.entity_id, {"read": 0, "search": 0, "page": 0, "nav": 0})
+            if event.event_type in {"tool.read", "tool.search", "tool.page", "tool.nav", "tool.page_text"}:
+                counts = access_counts.setdefault(event.entity_id, dict.fromkeys(_RETURN_KINDS, 0))
                 counts[event.event_type.removeprefix("tool.")] += 1
         validation_reports = []
         review_scopes = []
@@ -1070,9 +1109,7 @@ class ScriptoriumService:
                             "role": task.role.value,
                             "status": attempt.status.value,
                             "returns": (
-                                access_counts.get(attempt.id, {"read": 0, "search": 0, "page": 0, "nav": 0})
-                                if external_run
-                                else None
+                                access_counts.get(attempt.id, dict.fromkeys(_RETURN_KINDS, 0)) if external_run else None
                             ),
                         }
                     )
@@ -1497,7 +1534,7 @@ class ScriptoriumService:
                     lines.append(
                         f"- `{item['attempt_id']}` / {item['status']}: "
                         f"read {counts['read']}, search {counts['search']}, page {counts['page']}, "
-                        f"nav {counts.get('nav', 0)}"
+                        f"nav {counts.get('nav', 0)}, page text {counts.get('page_text', 0)}"
                     )
         else:
             lines.append("- None")
@@ -1537,6 +1574,7 @@ class ScriptoriumService:
 
 _BUNDLE_METADATA = ("manifest.json", "navigation.json", "source-map.json")
 _CONTEXT_CHARS = 200
+_RETURN_KINDS = ("read", "search", "page", "nav", "page_text")
 
 
 def _unknown_text_path(path: str, anchor_map) -> ConfigurationError:
@@ -1592,6 +1630,21 @@ def _navigation_entry(entry: dict[str, Any]) -> dict[str, Any]:
             candidate_paths_truncated=True,
         )
     return trimmed
+
+
+def _validate_page_view(scale, crop, text: bool, offset: int) -> None:
+    if text and (scale is not None or crop is not None):
+        raise ConfigurationError("--text cannot be combined with --scale or --crop")
+    if offset and not text:
+        raise ConfigurationError("--offset requires --text")
+    if offset < 0:
+        raise ConfigurationError("offset must not be negative")
+    if scale is not None and not 0.5 <= scale <= 4.0:
+        raise ConfigurationError("scale must be between 0.5 and 4.0")
+    if crop is not None:
+        x0, y0, x1, y1 = crop
+        if not (0 <= x0 < x1 <= 1 and 0 <= y0 < y1 <= 1):
+            raise ConfigurationError("crop must be x0,y0,x1,y1 fractions with 0 <= x0 < x1 <= 1 and 0 <= y0 < y1 <= 1")
 
 
 def _scan_matches(path: Path, query: str, skip: int, take: int, context: int):

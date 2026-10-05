@@ -367,3 +367,30 @@ def _fit_lone_nav_entry(entry, build, path_filtered, source_indexes):
     if response is None:
         raise ConfigurationError("response metadata leaves no room for a navigation entry")
     return response
+
+
+def page_text_fragment(location, content, offset, attempt_id, number, document):
+    if not 0 <= offset <= len(content):
+        raise ConfigurationError("offset is outside the page text layer")
+
+    def fragment(length):
+        end = offset + length
+        arguments = ["page", attempt_id, "--number", number]
+        if document is not None:
+            arguments.append(f"--document={document}")
+        arguments.extend(["--text", "--offset", end])
+        return {
+            **location,
+            "text_layer": "pdf",
+            "evidence": False,
+            "offset": offset,
+            "total_chars": len(content),
+            "text": content[offset:end],
+            "next_offset": end if end < len(content) else None,
+            "next_command": tool_command(*arguments) if end < len(content) else None,
+        }
+
+    length, response = _fit_prefix(len(content) - offset, fragment)
+    if length == 0 and offset < len(content):
+        raise ConfigurationError("response metadata leaves no room for page text")
+    return response
