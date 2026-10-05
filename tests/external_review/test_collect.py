@@ -113,6 +113,8 @@ def test_collector_rejects_changed_baseline_and_existing_output(tmp_path):
         collect(root, run_id, tmp_path / "legacy-denied", "case", "trial", baseline, host_computation="denied")
     after = read_json(collect(root, run_id, tmp_path / "legacy", "case", "trial", baseline) / "collection.json")
     assert comparison_fields(after)["host_computation"] == "unknown"
+    del after["host_conditions"]
+    assert after["prepared_before_review"] and comparison_fields(after)["host_computation"] == "unknown"
     (baseline / "report.json").write_text("{}")
     with pytest.raises(ValueError, match="Collection has changed"):
         collect(root, run_id, tmp_path / "damaged", "case", "trial", baseline)
