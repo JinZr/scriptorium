@@ -183,6 +183,16 @@ def build_parser() -> argparse.ArgumentParser:
         "--number", type=int, required=True, help="1-based global page, or local page with --document"
     )
     page_parser.add_argument("--document", help="frozen LaTeX entrypoint; --number is then relative to this document")
+    page_parser.add_argument(
+        "--scale", type=float, help="render a view from the frozen PDF at this scale, 0.5-4.0 (frozen pages use 1.5)"
+    )
+    page_parser.add_argument(
+        "--crop", type=_crop, help="render only x0,y0,x1,y1 as fractions of the page width and height"
+    )
+    page_parser.add_argument(
+        "--text", action="store_true", help="return the page's PDF text layer as a reading aid, not evidence"
+    )
+    page_parser.add_argument("--offset", type=int, default=0, help="character offset in the text layer with --text")
 
     finding_parser = commands.add_parser("finding", help="inspect and decide findings")
     finding_commands = finding_parser.add_subparsers(dest="finding_command", required=True)
@@ -410,7 +420,19 @@ def _dispatch_task(service: Any, arguments: argparse.Namespace) -> tuple[Any, in
             None,
         )
     if arguments.task_command == "page":
-        return service.page_task(arguments.attempt_id, arguments.number, arguments.document), 0, None
+        return (
+            service.page_task(
+                arguments.attempt_id,
+                arguments.number,
+                arguments.document,
+                arguments.scale,
+                arguments.crop,
+                arguments.text,
+                arguments.offset,
+            ),
+            0,
+            None,
+        )
 
     raise _UsageError("missing task command")
 
@@ -541,6 +563,16 @@ def _nonnegative_float(value: str) -> float:
     if not math.isfinite(number) or number < 0:
         raise argparse.ArgumentTypeError("must be a finite non-negative number")
     return number
+
+
+def _crop(value: str) -> tuple[float, float, float, float]:
+    try:
+        numbers = tuple(float(item) for item in value.split(","))
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("must be four comma-separated numbers") from exc
+    if len(numbers) != 4 or not all(math.isfinite(number) for number in numbers):
+        raise argparse.ArgumentTypeError("must be four comma-separated numbers")
+    return numbers
 
 
 def _nonempty(value: str) -> str:

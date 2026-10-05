@@ -17,7 +17,7 @@ from typing import Iterable, Iterator
 import pymupdf as fitz
 
 from .config import ManuscriptConfig
-from .errors import InfrastructureError, StateError
+from .errors import ConfigurationError, InfrastructureError, StateError
 from .schemas import (
     DEFAULT_EVIDENCE_ANCHOR_CONTRACT,
     CompiledPdfAnchor,
@@ -60,6 +60,50 @@ NON_TEXT_ANCHOR_EXTENSIONS = frozenset(
         ".webp",
     }
 )
+
+
+MAX_PAGE_VIEW_PIXELS = 40_000_000
+
+
+def render_page_view(
+    pdf_path: Path, page: int, scale: float, crop: tuple[float, float, float, float] | None, destination: Path
+) -> None:
+    """Render one 1-based page of a frozen PDF at a scale and optional fractional crop, atomically."""
+    document = fitz.open(pdf_path)
+    try:
+        selected = document[page - 1]
+        bounds = selected.rect
+        clip = None
+        if crop is not None:
+            x0, y0, x1, y1 = crop
+            clip = fitz.Rect(
+                bounds.x0 + x0 * bounds.width,
+                bounds.y0 + y0 * bounds.height,
+                bounds.x0 + x1 * bounds.width,
+                bounds.y0 + y1 * bounds.height,
+            )
+        area = clip if clip is not None else bounds
+        # Scale is bounded, but an oversized page could still make a huge image.
+        if area.width * area.height * scale * scale > MAX_PAGE_VIEW_PIXELS:
+            limit = MAX_PAGE_VIEW_PIXELS / 1_000_000
+            raise ConfigurationError(
+                f"page view would exceed {limit:g} megapixels; lower --scale or crop a smaller region"
+            )
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        temporary = destination.with_name(f".{destination.stem}.tmp{destination.suffix}")
+        selected.get_pixmap(matrix=fitz.Matrix(scale, scale), clip=clip, alpha=False).save(temporary)
+        temporary.replace(destination)
+    finally:
+        document.close()
+
+
+def page_text(pdf_path: Path, page: int) -> str:
+    """Return the PDF text layer of one 1-based page; it is a reading aid, not manuscript evidence."""
+    document = fitz.open(pdf_path)
+    try:
+        return document[page - 1].get_text("text")
+    finally:
+        document.close()
 
 
 @dataclass(frozen=True)

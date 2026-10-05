@@ -63,7 +63,7 @@ def test_review_scope_is_reported_separately_from_tool_returns(tmp_path):
                 "attempt_id": review["attempt"].id,
                 "role": "substantive_review",
                 "status": "completed",
-                "returns": {"read": 1, "search": 0, "page": 0, "nav": 0},
+                "returns": {"read": 1, "search": 0, "page": 0, "nav": 0, "page_text": 0},
             }
         ]
         markdown = service.render_report(run.id, "markdown")
@@ -401,7 +401,13 @@ def test_old_review_report_marks_scope_as_unreported(tmp_path, monkeypatch):
         )
         report = service.render_report(run.id, "json")
         assert report["review_scopes"][0]["scope"] is None
-        assert report["review_tool_access"][0]["returns"] == {"read": 1, "search": 0, "page": 0, "nav": 0}
+        assert report["review_tool_access"][0]["returns"] == {
+            "read": 1,
+            "search": 0,
+            "page": 0,
+            "nav": 0,
+            "page_text": 0,
+        }
         assert "scope not reported by frozen contract" in service.render_report(run.id, "markdown")
         assert "read 1, search 0, page 0" in service.render_report(run.id, "markdown")
 
@@ -423,5 +429,11 @@ def test_failed_review_still_reports_tool_returns(tmp_path):
         report = service.render_report(run.id, "json")
         assert report["review_scopes"] == []
         assert report["review_tool_access"][0]["status"] == "failed"
-        assert report["review_tool_access"][0]["returns"] == {"read": 0, "search": 1, "page": 0, "nav": 0}
+        assert report["review_tool_access"][0]["returns"] == {
+            "read": 0,
+            "search": 1,
+            "page": 0,
+            "nav": 0,
+            "page_text": 0,
+        }
         assert "search 1" in service.render_report(run.id, "markdown")
