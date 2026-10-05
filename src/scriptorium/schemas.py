@@ -383,6 +383,69 @@ class ScientificReviewOutput(ScopedReviewOutput):
         return self
 
 
+class Recomputation(StrictModel):
+    inputs: list[Annotated[str, Field(min_length=1)]] = Field(
+        min_length=1, description="Each reported value used, with where the manuscript states it."
+    )
+    calculation: str = Field(min_length=1, description="The arithmetic or derivation performed on those inputs.")
+    result: str = Field(min_length=1, description="The value obtained, with its unit.")
+    reported: str = Field(min_length=1, description="The manuscript value it is compared with, with its unit.")
+    outcome: Literal["matches", "differs"] = Field(
+        description='"matches" only when the result agrees with the reported value within the stated rounding.'
+    )
+
+
+class JudgedClaimCheck(ClaimCheck):
+    claim_anchor: Evidence = Field(description="Where the authors state the claim, as an exact frozen anchor.")
+    stated_scope: str = Field(
+        min_length=1,
+        description="The population, conditions, range, threshold, and qualifications under which the authors "
+        "state the claim.",
+    )
+    check_type: Literal[
+        "reporting_consistency",
+        "recomputation",
+        "design_and_analysis",
+        "alternative_explanation",
+        "scope_and_generality",
+    ] = Field(description="What the countercheck examined.")
+    question_answer: Literal["yes", "partly", "no", "not_checkable"] = Field(
+        description="Whether the countercheck shows the claim holds at its stated scope: yes, partly, no, or "
+        "not_checkable when the frozen bundle cannot decide it."
+    )
+    exceptions: list[Annotated[str, Field(min_length=1)]] = Field(
+        description="Cases, conditions, or values within the stated scope where the claim fails or is not shown."
+    )
+    recomputation: Recomputation | None = Field(
+        default=None, description='Required when check_type is "recomputation"; omit it otherwise.'
+    )
+
+    @model_validator(mode="after")
+    def validate_judgment(self) -> "JudgedClaimCheck":
+        if (self.check_type == "recomputation") != (self.recomputation is not None):
+            raise ValueError('a recomputation is recorded exactly when check_type is "recomputation"')
+        if (self.assessment == "supported") != (self.question_answer == "yes"):
+            raise ValueError('assessment "supported" goes with question_answer "yes", and only with it')
+        if self.question_answer == "yes" and self.exceptions:
+            raise ValueError('question_answer "yes" lists no exceptions; use "partly"')
+        if self.question_answer == "partly" and not self.exceptions:
+            raise ValueError('question_answer "partly" lists at least one exception')
+        if self.recomputation is not None and (self.recomputation.outcome, self.question_answer) in {
+            ("matches", "no"),
+            ("differs", "yes"),
+        }:
+            raise ValueError(
+                'a recomputation that differs cannot answer "yes", and one that matches cannot answer "no"'
+            )
+        if self.question_answer == "not_checkable" and self.assessment != "unresolved":
+            raise ValueError('question_answer "not_checkable" requires assessment "unresolved"')
+        return self
+
+
+class JudgedScientificReviewOutput(ScientificReviewOutput):
+    claim_checks: list[JudgedClaimCheck]
+
+
 # Historical runs still deserialize these persisted outputs, but new runs never schedule this role.
 class VisualTranscriptionPage(StrictModel):
     page: int = Field(ge=1)
@@ -466,7 +529,7 @@ class ValidationReport(StrictModel):
 
 SCHEMA_MODELS: dict[str, type[StrictModel]] = {
     "review": ScopedReviewOutput,
-    "scientific_review": ScientificReviewOutput,
+    "scientific_review": JudgedScientificReviewOutput,
     "visual_transcription": VisualTranscriptionOutput,
     "revision": RevisionOutput,
     "verification": VerificationOutput,

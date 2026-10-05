@@ -126,6 +126,11 @@ def _complete_reviews(service: ScriptoriumService, run_id: str, *, skip: AgentRo
                     "evidence": output["findings"][0]["evidence"],
                     "critical_question": "Does the result support the conclusion?",
                     "countercheck": "Checked the frozen preprint source.",
+                    "claim_anchor": {"source_path": "manuscript.pdf", "page": 1},
+                    "stated_scope": "As stated in the manuscript.",
+                    "check_type": "design_and_analysis",
+                    "question_answer": "no",
+                    "exceptions": [],
                     "assessment": "finding",
                     "finding_indices": [0],
                 }

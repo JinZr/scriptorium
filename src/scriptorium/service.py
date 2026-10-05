@@ -1487,6 +1487,7 @@ class ScriptoriumService:
                     f"  - {check['claim']} — {check['assessment']}; question: {check['critical_question']}; "
                     f"countercheck: {check['countercheck']}; submitted finding indices: {check['finding_indices']}"
                 )
+                lines.extend(ScriptoriumService._markdown_claim_judgment(check))
                 for evidence in check["evidence"]:
                     location = evidence["source_path"]
                     if "page" in evidence:
@@ -1495,6 +1496,25 @@ class ScriptoriumService:
                         location += f":{evidence['start_line']}-{evidence['end_line']}"
                     lines.append(f"    - evidence: `{location}`")
         lines.append("Claim checks are reviewer declarations; valid anchors do not establish scientific correctness.")
+        return lines
+
+    @staticmethod
+    def _markdown_claim_judgment(check: dict[str, Any]) -> list[str]:
+        if "question_answer" not in check:
+            return []
+        anchor = check["claim_anchor"]
+        location = f"page {anchor['page']}" if "page" in anchor else f"{anchor['start_line']}-{anchor['end_line']}"
+        lines = [
+            f"    - claim at `{anchor['source_path']}:{location}`; stated scope: {check['stated_scope']}",
+            f"    - {check['check_type']}; answer: {check['question_answer']}",
+        ]
+        lines.extend(f"    - exception: {exception}" for exception in check["exceptions"])
+        if recomputation := check.get("recomputation"):
+            lines.append(
+                f"    - recomputation {recomputation['outcome']}: {recomputation['calculation']} = "
+                f"{recomputation['result']}; reported {recomputation['reported']}; "
+                f"inputs: {'; '.join(recomputation['inputs'])}"
+            )
         return lines
 
     @staticmethod

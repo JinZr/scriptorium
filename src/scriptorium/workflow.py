@@ -49,6 +49,8 @@ from .schemas import (
     EvidenceAnchorContract,
     EvidenceAnchorMap,
     ExactEdit,
+    JudgedClaimCheck,
+    JudgedScientificReviewOutput,
     ReviewOutput,
     RevisionOutput,
     ScientificReviewOutput,
@@ -997,7 +999,12 @@ class Armarius:
 
     def _output_model_for_schema(self, run: Run, schema_kind: str, schema: dict[str, Any]) -> type[StrictModel]:
         if schema_kind == "scientific_review":
-            return ScientificReviewOutput
+            # Runs frozen before claim-check judgments keep the claim-check shape they were given.
+            return (
+                JudgedScientificReviewOutput
+                if "JudgedClaimCheck" in schema.get("$defs", {})
+                else ScientificReviewOutput
+            )
         if schema_kind != "review":
             return SCHEMA_MODELS[schema_kind]
         properties = schema.get("properties", {})
@@ -1546,14 +1553,17 @@ class Armarius:
                 )
         if isinstance(output, ScientificReviewOutput):
             for check_index, check in enumerate(output.claim_checks):
-                for evidence_index, evidence in enumerate(check.evidence):
+                anchors = [(f"evidence/{index}", evidence) for index, evidence in enumerate(check.evidence)]
+                if isinstance(check, JudgedClaimCheck):
+                    anchors.insert(0, ("claim_anchor", check.claim_anchor))
+                for pointer, evidence in anchors:
                     issues.extend(
                         self._validate_evidence(
                             evidence,
                             source_index,
                             anchor_map,
                             source_root,
-                            f"/claim_checks/{check_index}/evidence/{evidence_index}",
+                            f"/claim_checks/{check_index}/{pointer}",
                             contract=contract,
                         )
                     )
