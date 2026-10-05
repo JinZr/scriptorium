@@ -287,8 +287,8 @@ def bound_search(matches, total, attempt_id, query, path, cursor, limit, context
 
 
 def bound_nav(entries, total, counts, attempt_id, filters, cursor, limit):
-    def build(count):
-        next_cursor = cursor + count if cursor + count < total else None
+    def build(page):
+        next_cursor = cursor + len(page) if cursor + len(page) < total else None
         arguments = ["nav", attempt_id]
         for command in filters["commands"]:
             arguments.append(f"--command={command}")
@@ -298,14 +298,29 @@ def bound_nav(entries, total, counts, attempt_id, filters, cursor, limit):
             arguments.append(f"--path={filters['path']}")
         arguments.extend(["--cursor", next_cursor, "--limit", limit])
         return {
-            "entries": entries[:count],
+            "entries": page,
             "total_entries": total,
             "command_counts": counts,
             "next_cursor": next_cursor,
             "next_command": tool_command(*arguments) if next_cursor is not None else None,
         }
 
-    count, response = _fit_prefix(len(entries), build)
-    if entries and count == 0:
+    count, response = _fit_prefix(len(entries), lambda count: build(entries[:count]))
+    if not entries or count:
+        return response
+    # A single entry can still exceed the bound through long candidate paths; keep as many as fit.
+    first = entries[0]
+    candidates = first.get("candidate_paths") or []
+    if not candidates:
         raise ConfigurationError("response metadata leaves no room for a navigation entry")
-    return response
+
+    def shrunk(keep):
+        entry = {
+            **first,
+            "candidate_paths": candidates[:keep],
+            "candidate_count": first.get("candidate_count", len(candidates)),
+            "candidate_paths_truncated": True,
+        }
+        return build([entry])
+
+    return _fit_prefix(len(candidates) - 1, shrunk)[1]

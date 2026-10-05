@@ -149,3 +149,30 @@ def test_ambiguous_graphics_candidates_are_capped_so_every_entry_fits(tmp_path, 
         assert ambiguous["candidate_count"] == 251 and ambiguous["candidate_paths_truncated"] is True
         assert len(ambiguous["candidate_paths"]) == 10 and ambiguous["target_path"] is None
         assert all("candidate_count" not in entry for entry in entries if entry is not ambiguous)
+
+
+def test_long_graphics_candidates_are_cut_to_the_response_bound(tmp_path, monkeypatch, capsys):
+    deep = [f"figures/{index}-{'a' * 220}/{'b' * 220}/{'c' * 220}/plot.png" for index in range(10)]
+    files = {path: "png" for path in ["plot.png", *deep]}
+    body = "\\includegraphics{plot}\n" + "".join(f"\\includegraphics{{{path[:-4]}}}\n" for path in deep)
+    service, attempt_id = _nav_run(tmp_path, files, body)
+    with service:
+        monkeypatch.chdir(service.repo)
+        monkeypatch.setattr(cli, "_build_service", lambda _: service)
+        capsys.readouterr()
+        arguments = ["--json", "task", "nav", attempt_id, "--command", "graphics"]
+        entries = []
+        while arguments:
+            assert cli.main(arguments) == 0
+            output = capsys.readouterr().out
+            assert len(output.encode("utf-8")) <= MAX_TOOL_RESPONSE_BYTES
+            response = json.loads(output)["data"]
+            entries.extend(response["entries"])
+            arguments = shlex.split(response["next_command"])[1:] if response["next_command"] else None
+        assert len(entries) == response["total_entries"] == 11
+        ambiguous = entries[0]
+        kept = ambiguous["candidate_paths"]
+        assert ambiguous["value"] == "plot" and ambiguous["target_path"] is None
+        assert ambiguous["candidate_count"] == 11 and ambiguous["candidate_paths_truncated"] is True
+        assert 0 < len(kept) < 10 and kept == sorted(deep)[: len(kept)]
+        assert [entry["target_path"] for entry in entries[1:]] == deep
