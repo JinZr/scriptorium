@@ -42,6 +42,7 @@ from .manuscript import (
     ManuscriptBundle,
     ManuscriptManager,
     SourceFile,
+    source_lines,
 )
 from .schemas import (
     DEFAULT_EVIDENCE_ANCHOR_CONTRACT,
@@ -1851,7 +1852,7 @@ class Armarius:
         issues: list[ValidationIssue],
     ) -> str | None:
         try:
-            lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
+            lines = source_lines(path.read_text(encoding="utf-8"), keepends=True)
         except UnicodeDecodeError:
             issues.append(
                 self._issue(
@@ -2161,6 +2162,7 @@ class Armarius:
             raise InfrastructureError(f"bundle content directories are missing or unsafe: {workspace}")
         expected_source_files: set[str] = set()
         source_anchor_records: list[SourceAnchorRecord] = []
+        frozen_counts = cls._frozen_line_counts(source_map_value)
         for source in sources:
             relative = Path(source.path)
             if (
@@ -2186,7 +2188,9 @@ class Armarius:
                     source_path=source.path,
                     read_path=(Path("sources") / relative).as_posix(),
                     source_digest=source.digest,
-                    line_count=len(text.splitlines()) if text_anchorable else None,
+                    line_count=(
+                        cls._anchor_line_count(text, frozen_counts.get(source.path)) if text_anchorable else None
+                    ),
                     text_anchorable=text_anchorable,
                 )
             )
@@ -2252,6 +2256,21 @@ class Armarius:
         if anchor_map != expected_map:
             raise InfrastructureError(f"bundle source map does not match the frozen bundle: {workspace}")
         return ManuscriptBundle(workspace, sources, pdf_pages, anchor_map)
+
+    @staticmethod
+    def _frozen_line_counts(source_map_value: Any) -> dict[str, Any]:
+        try:
+            return {item["source_path"]: item.get("line_count") for item in source_map_value["sources"]}
+        except (KeyError, TypeError, AttributeError):
+            return {}
+
+    @staticmethod
+    def _anchor_line_count(text: str, frozen: Any) -> int:
+        count = len(source_lines(text))
+        # Bundles frozen before line numbering matched retrieval keep their recorded splitlines() count.
+        if frozen != count and frozen == len(text.splitlines()):
+            return frozen
+        return count
 
     @staticmethod
     def _require_regular_bundle_file(path: Path) -> None:

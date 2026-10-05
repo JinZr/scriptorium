@@ -37,7 +37,7 @@ Read, search, and page operations hold the run lock through their access event, 
 
 ## Evidence and gates
 
-Text evidence uses a bare source path, source digest, inclusive line range, and verbatim quote. PDF evidence uses `manuscript.pdf` plus a 1-based page; a page-image path is only a read location. Tool access logs report material returned, not model comprehension or exhaustive coverage.
+Text evidence uses a bare source path, source digest, inclusive line range, and verbatim quote. Retrieval, source-map line counts, evidence validation and exact edits share one line definition: a line ends only at `\n`, `\r\n` or `\r`, so form feeds and Unicode line separators stay inside their line. A bundle frozen with the earlier `splitlines()` count keeps that recorded count. PDF evidence uses `manuscript.pdf` plus a 1-based page; a page-image path is only a read location. Tool access logs report material returned, not model comprehension or exhaustive coverage.
 
 `task page --document ENTRYPOINT --number N` resolves a document-local physical page into that global PDF page.
 The response and access event record both coordinates. Scope, evidence and coverage audits continue to use global
