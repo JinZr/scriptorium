@@ -308,19 +308,25 @@ def bound_nav(entries, total, counts, attempt_id, filters, cursor, limit):
     count, response = _fit_prefix(len(entries), lambda count: build(entries[:count]))
     if not entries or count:
         return response
-    # A single entry can still exceed the bound through long candidate paths; keep as many as fit.
-    first = entries[0]
-    candidates = first.get("candidate_paths") or []
-    if not candidates:
+
+    def fitted(entry):
+        # Keep the longest prefix of candidate paths that fits beside this lone entry.
+        candidates = entry.get("candidate_paths") or []
+
+        def shrunk(keep):
+            if keep == len(candidates):
+                return build([entry])
+            total_candidates = entry.get("candidate_count", len(candidates))
+            cut = {"candidate_paths": candidates[:keep], "candidate_count": total_candidates}
+            return build([{**entry, **cut, "candidate_paths_truncated": True}])
+
+        return _fit_prefix(len(candidates), shrunk)[1] if fits_response(shrunk(0)) else None
+
+    # Long paths can still crowd out a lone entry; --path already names the source path it repeats.
+    response = fitted(entries[0])
+    if response is None and filters["path"] is not None:
+        compact = {key: value for key, value in entries[0].items() if key != "source_path"}
+        response = fitted({**compact, "source_path_omitted": True})
+    if response is None:
         raise ConfigurationError("response metadata leaves no room for a navigation entry")
-
-    def shrunk(keep):
-        entry = {
-            **first,
-            "candidate_paths": candidates[:keep],
-            "candidate_count": first.get("candidate_count", len(candidates)),
-            "candidate_paths_truncated": True,
-        }
-        return build([entry])
-
-    return _fit_prefix(len(candidates) - 1, shrunk)[1]
+    return response
