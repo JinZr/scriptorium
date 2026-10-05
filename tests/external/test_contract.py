@@ -297,6 +297,32 @@ def test_json_cli_reads_and_submits_from_stdin_across_processes(tmp_path: Path) 
     searched = command("task", "search", attempt_id, "--query", "explains")
     assert searched["ok"] and searched["data"]["matches"][0]["path"] == "supplement.tex"
     output = _review_json("Read the supplement.")
+    unescaped = output.replace("Read the supplement.", "Read the \\AA supplement.")
+    checked = command(
+        "task",
+        "submit",
+        attempt_id,
+        "--input-digest",
+        claim["input_digest"],
+        "--file",
+        "-",
+        "--check",
+        input_text=unescaped,
+    )["data"]
+    assert checked["valid"] is False and checked["recorded"] is False
+    assert checked["validation_report"]["issues"][0]["code"] == "json.invalid"
+    checked = command(
+        "task",
+        "submit",
+        attempt_id,
+        "--input-digest",
+        claim["input_digest"],
+        "--file",
+        "-",
+        "--check",
+        input_text=output,
+    )["data"]
+    assert checked["valid"] is True and checked["validation_report"] is None
     submitted = command(
         "task",
         "submit",

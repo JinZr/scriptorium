@@ -1361,6 +1361,59 @@ class Armarius:
         return target
 
     def submit_task(self, attempt_id: str, input_digest: str, output_text: str) -> Attempt:
+        attempt, task, run, metadata, output_model = self._submission_target(attempt_id, input_digest)
+        output_digest = ArtifactStore.digest_bytes(output_text.encode("utf-8"))
+        if attempt.status != AttemptStatus.RUNNING:
+            latest = self.database.list_attempts(task.id)[-1]
+            if latest.id != attempt.id or task.status not in {TaskStatus.COMPLETED, TaskStatus.FAILED}:
+                raise StateError(f"attempt {attempt_id} was superseded")
+            if attempt.output_artifact_digest == output_digest and attempt.status in {
+                AttemptStatus.COMPLETED,
+                AttemptStatus.FAILED,
+            }:
+                self.artifacts.get_bytes(output_digest)
+                return attempt
+            raise StateError(f"attempt {attempt_id} is no longer active")
+        bundle, contract = self._active_submission_context(attempt_id, task, run, metadata)
+        output_artifact = self._record_text(output_text, "application/json")
+        parsed, issues = self._submission_issues(attempt, task, run, bundle, contract, output_model, output_text)
+        report_artifact = None
+        error = None
+        if issues:
+            report_artifact, report = self._record_validation_report(
+                metadata["schema_kind"],
+                metadata["schema_digest"],
+                metadata["bundle_digest"],
+                output_artifact.digest,
+                issues,
+            )
+            error = self._validation_error_summary(report)
+        return self.database.finish_attempt(
+            attempt.id,
+            AttemptStatus.COMPLETED if parsed is not None and not issues else AttemptStatus.FAILED,
+            output_artifact_digest=output_artifact.digest,
+            validation_report_artifact_digest=report_artifact.digest if report_artifact else None,
+            error=error,
+        )
+
+    def check_submission(self, attempt_id: str, input_digest: str, output_text: str) -> ValidationReport | None:
+        """Validate a candidate output exactly as submit would, without recording it or ending the attempt."""
+        attempt, task, run, metadata, output_model = self._submission_target(attempt_id, input_digest)
+        if attempt.status != AttemptStatus.RUNNING:
+            raise StateError(f"attempt {attempt_id} is no longer active")
+        bundle, contract = self._active_submission_context(attempt_id, task, run, metadata)
+        _, issues = self._submission_issues(attempt, task, run, bundle, contract, output_model, output_text)
+        if not issues:
+            return None
+        return ValidationReport(
+            schema_kind=metadata["schema_kind"],
+            schema_digest=metadata["schema_digest"],
+            bundle_digest=metadata["bundle_digest"],
+            output_artifact_digest=None,
+            issues=issues,
+        )
+
+    def _submission_target(self, attempt_id: str, input_digest: str):
         attempt = self.database.get_attempt(attempt_id)
         task = self.database.get_task(attempt.task_id)
         run = self.database.get_run(task.run_id)
@@ -1388,25 +1441,50 @@ class Armarius:
         }.get(task.stage)
         if run.status != expected_status and attempt.status == AttemptStatus.RUNNING:
             raise StateError(f"attempt {attempt_id} cannot submit while run is {run.status.value}")
-        output_digest = ArtifactStore.digest_bytes(output_text.encode("utf-8"))
-        if attempt.status != AttemptStatus.RUNNING:
-            latest = self.database.list_attempts(task.id)[-1]
-            if latest.id != attempt.id or task.status not in {TaskStatus.COMPLETED, TaskStatus.FAILED}:
-                raise StateError(f"attempt {attempt_id} was superseded")
-            if attempt.output_artifact_digest == output_digest and attempt.status in {
-                AttemptStatus.COMPLETED,
-                AttemptStatus.FAILED,
-            }:
-                self.artifacts.get_bytes(output_digest)
-                return attempt
-            raise StateError(f"attempt {attempt_id} is no longer active")
+        return attempt, task, run, metadata, output_model
+
+    def _active_submission_context(self, attempt_id: str, task: Task, run: Run, metadata: dict[str, Any]):
         if run.status == RunStatus.CANCELLED or task.status != TaskStatus.RUNNING:
             raise StateError(f"attempt {attempt_id} is no longer active")
         bundle = self._external_bundle(run, metadata)
         contract = self.require_evidence_anchor_contract(run.id)
         if not self._task_context_is_current(run, task):
             raise StateError("task context changed; run resume to prepare a new task")
-        output_artifact = self._record_text(output_text, "application/json")
+        return bundle, contract
+
+    def _submission_issues(
+        self,
+        attempt: Attempt,
+        task: Task,
+        run: Run,
+        bundle,
+        contract: EvidenceAnchorContract,
+        output_model: type[StrictModel],
+        output_text: str,
+    ):
+        validator = self._stage_validator(task, run, bundle, contract)
+        parsed, issues = self._parse_and_validate_output(output_model, output_text, validator)
+        if task.stage == "verification":
+            older = [
+                item
+                for item in self.database.list_tasks(run.id)
+                if item.stage in {"review", "revision"}
+                for item in self.database.list_attempts(item.id)
+                if item.external_client == attempt.external_client and item.thread_id == attempt.thread_id
+            ]
+            if attempt.session_source != "host" or older:
+                issues.append(
+                    self._issue(
+                        "verification.session_unconfirmed",
+                        "",
+                        "Verification requires a host-reported new conversation distinct from review and revision.",
+                        expected={"session_source": "host", "new_session": True},
+                        actual={"session_source": attempt.session_source, "reused": bool(older)},
+                    )
+                )
+        return parsed, issues
+
+    def _stage_validator(self, task: Task, run: Run, bundle, contract: EvidenceAnchorContract):
         if task.stage == "review":
 
             def validator(output):
@@ -1443,43 +1521,7 @@ class Armarius:
 
         else:
             raise InfrastructureError(f"unsupported external task stage: {task.stage}")
-        parsed, issues = self._parse_and_validate_output(output_model, output_text, validator)
-        if task.stage == "verification":
-            older = [
-                item
-                for item in self.database.list_tasks(run.id)
-                if item.stage in {"review", "revision"}
-                for item in self.database.list_attempts(item.id)
-                if item.external_client == attempt.external_client and item.thread_id == attempt.thread_id
-            ]
-            if attempt.session_source != "host" or older:
-                issues.append(
-                    self._issue(
-                        "verification.session_unconfirmed",
-                        "",
-                        "Verification requires a host-reported new conversation distinct from review and revision.",
-                        expected={"session_source": "host", "new_session": True},
-                        actual={"session_source": attempt.session_source, "reused": bool(older)},
-                    )
-                )
-        report_artifact = None
-        error = None
-        if issues:
-            report_artifact, report = self._record_validation_report(
-                metadata["schema_kind"],
-                metadata["schema_digest"],
-                metadata["bundle_digest"],
-                output_artifact.digest,
-                issues,
-            )
-            error = self._validation_error_summary(report)
-        return self.database.finish_attempt(
-            attempt.id,
-            AttemptStatus.COMPLETED if parsed is not None and not issues else AttemptStatus.FAILED,
-            output_artifact_digest=output_artifact.digest,
-            validation_report_artifact_digest=report_artifact.digest if report_artifact else None,
-            error=error,
-        )
+        return validator
 
     def _validate_review_output(
         self,

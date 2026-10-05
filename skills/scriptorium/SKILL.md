@@ -17,7 +17,7 @@ task nav ATTEMPT_ID --command heading|reference|citation|label|caption|graphics 
 task search ATTEMPT_ID --query Q [--path P] [--context 2] [--include-metadata]
 task read ATTEMPT_ID --path P --start-line A [--end-line B] [--anchor]
 task page ATTEMPT_ID --number N [--document ENTRYPOINT] [--scale 3 --crop x0,y0,x1,y1 | --text]
-task submit ATTEMPT_ID --input-digest D --file answer.json
+task submit ATTEMPT_ID --input-digest D --file answer.json [--check]
 run continue|retry RUN_ID --task TASK_ID  -> then claim again
 ```
 
@@ -133,11 +133,18 @@ scope declaration establishes scientific correctness. Use the existing schema fi
 self-review object. This is a review step performed by the current model, not a second model call or an automatic
 scientific-validity check by the CLI.
 
-Submit the completed answer with the exact digest from this attempt:
+Check the completed answer first, then submit the same file with the exact digest from this attempt:
 
 ```bash
+scriptorium --json task submit ATTEMPT_ID --input-digest DIGEST --file answer.json --check
 scriptorium --json task submit ATTEMPT_ID --input-digest DIGEST --file answer.json
 ```
+
+`--check` runs the same JSON, schema, evidence and session validation as a submission but records no output,
+findings or validation report and leaves the attempt active. When `data.valid` is false, fix the file against
+`data.validation_report.issues` and check again; this is the place to catch JSON escaping mistakes such as an
+unescaped LaTeX backslash. No separate JSON tool is needed. A passing check is not a receipt:
+submit the same file without `--check`, because only that records the output.
 
 `--file -` reads JSON from stdin. An invalid submission returns `data.validation_report.issues` and produces no partial findings. Read each issue and correct the answer against the same frozen schema and source map. Then explicitly run `scriptorium --json run retry RUN_ID --task TASK_ID`, claim the task again, inspect the new `task show`, and submit the corrected answer with its **new** attempt ID and input digest. Do not submit again to the failed attempt. A claim survives CLI exit; do not retry merely because a command finished.
 

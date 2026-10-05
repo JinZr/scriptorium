@@ -123,6 +123,11 @@ def build_parser() -> argparse.ArgumentParser:
     submit_parser.add_argument("attempt_id", help="active attempt ID")
     submit_parser.add_argument("--input-digest", required=True, help="input_digest returned by claim or show")
     submit_parser.add_argument("--file", required=True, help="UTF-8 JSON file up to 2 MB, or - for stdin")
+    submit_parser.add_argument(
+        "--check",
+        action="store_true",
+        help="validate exactly as submit would, without recording the output or ending the attempt",
+    )
     read_parser = task_commands.add_parser("read", help="read bounded lines of a frozen text source or metadata")
     read_parser.add_argument("attempt_id", help="active attempt ID")
     read_parser.add_argument(
@@ -380,6 +385,8 @@ def _dispatch_task(service: Any, arguments: argparse.Namespace) -> tuple[Any, in
             contents = raw.decode("utf-8")
         except UnicodeDecodeError as exc:
             raise ConfigurationError("submission must be UTF-8") from exc
+        if arguments.check:
+            return service.check_submission(arguments.attempt_id, arguments.input_digest, contents), 0, None
         return _run_async(service.submit_task(arguments.attempt_id, arguments.input_digest, contents)), 0, None
     if arguments.task_command == "read":
         return (
