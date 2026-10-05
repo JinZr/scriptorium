@@ -305,6 +305,12 @@ def bound_nav(entries, total, counts, attempt_id, filters, cursor, limit):
             "next_command": tool_command(*arguments) if next_cursor is not None else None,
         }
 
+    if entries and not fits_response(build(entries)) and not fits_response(build([])):
+        # A filter can outgrow the continuation that repeats it, e.g. a path full of characters that need quoting.
+        raise ConfigurationError(
+            "navigation filters are too long to repeat in a bounded continuation; "
+            "retry without --path and match entries by source_path"
+        )
     count, response = _fit_prefix(len(entries), lambda count: build(entries[:count]))
     if not entries or count:
         return response
