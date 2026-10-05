@@ -10,6 +10,7 @@ from scriptorium.schemas import (
     Evidence,
     EvidenceAnchorContract,
     EvidenceAnchorMap,
+    InventoriedScientificReviewOutput,
     JudgedClaimCheck,
     ReviewOutput,
     ReviewScopeArea,
@@ -315,3 +316,76 @@ def test_scientific_review_schema_requires_claim_judgments() -> None:
     check = output_schema("scientific_review")["$defs"]["JudgedClaimCheck"]
     assert {"claim_anchor", "stated_scope", "check_type", "question_answer", "exceptions"} <= set(check["required"])
     assert "recomputation" not in check["required"]
+
+
+def _inventoried_output(*, completion="complete", inventory=None):
+    return {
+        "summary": "Checked the central claim.",
+        "findings": [],
+        "scope": {"completion": completion, "checked": [], "outstanding": [], "limitations": []},
+        "claim_checks": [_judged_check()],
+        "claim_inventory": (
+            inventory
+            if inventory is not None
+            else [
+                {
+                    "claim": "The method is accurate to 0.1 eV.",
+                    "claim_anchor": {"source_path": "manuscript.pdf", "page": 1},
+                    "prominence": "headline",
+                    "check_indices": [0],
+                }
+            ]
+        ),
+    }
+
+
+def _inventory_entry(**changes):
+    entry = {
+        "claim": "The method transfers to larger molecules.",
+        "claim_anchor": {"source_path": "manuscript.pdf", "page": 1},
+        "prominence": "supporting",
+        "check_indices": [],
+        "not_checked_reason": "The larger-molecule table is on an outstanding page.",
+    }
+    return {**entry, **changes}
+
+
+def _checked_entry(**changes):
+    check = _judged_check()
+    entry = {"claim": check["claim"], "claim_anchor": check["claim_anchor"], "prominence": "headline"}
+    return {**entry, "check_indices": [0], **changes}
+
+
+def test_claim_inventory_accepts_checked_and_explained_unchecked_claims() -> None:
+    output = _inventoried_output()
+    output["claim_inventory"].append(_inventory_entry())
+    parsed = InventoriedScientificReviewOutput.model_validate(output)
+    assert [entry.check_indices for entry in parsed.claim_inventory] == [[0], []]
+    partial = _inventoried_output(completion="partial")
+    partial["claim_inventory"].append(_inventory_entry(prominence="headline"))
+    assert InventoriedScientificReviewOutput.model_validate(partial).scope.completion == "partial"
+
+
+@pytest.mark.parametrize(
+    ("inventory", "message"),
+    [
+        ([], "each claim check must assess exactly one inventoried claim"),
+        ([_checked_entry(), _checked_entry()], "each claim check must assess exactly one inventoried claim"),
+        ([_checked_entry(check_indices=[1])], "unknown claim check index"),
+        # A check linked from another claim's entry leaves both claims misreported, even on the same page.
+        (
+            [_inventory_entry(check_indices=[0], not_checked_reason=None, prominence="headline")],
+            "restate its inventoried claim and claim_anchor exactly",
+        ),
+        (
+            [_checked_entry(claim_anchor={"source_path": "manuscript.pdf", "page": 2})],
+            "restate its inventoried claim and claim_anchor exactly",
+        ),
+        ([_checked_entry(not_checked_reason="Also unchecked.")], "not both or neither"),
+        ([_checked_entry(), _inventory_entry(not_checked_reason=None)], "not both or neither"),
+        ([_checked_entry(), _inventory_entry(prominence="headline")], "must check every inventoried headline claim"),
+    ],
+)
+def test_claim_inventory_rejects_untraced_or_unexplained_claims(inventory, message) -> None:
+    with pytest.raises(ValidationError, match=message):
+        InventoriedScientificReviewOutput.model_validate(_inventoried_output(inventory=inventory))

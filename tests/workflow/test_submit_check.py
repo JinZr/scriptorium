@@ -7,12 +7,20 @@ from scriptorium.domain import AgentRole, AttemptStatus, RunStatus, TaskStatus
 from scriptorium.errors import StateError
 from scriptorium.service import ScriptoriumService
 
-from ._support import PdfBuildingManuscriptManager, claim, make_repository, prepare_verification, review_finding, submit
+from ._support import (
+    PdfBuildingManuscriptManager,
+    claim,
+    claim_inventory,
+    make_repository,
+    prepare_verification,
+    review_finding,
+    submit,
+)
 
 
 def _review_output(review, *, findings=None):
     findings = [review_finding(review)] if findings is None else findings
-    return {
+    output = {
         "summary": "Checked the reported result.",
         "findings": findings,
         "scope": {"completion": "complete", "checked": [], "outstanding": [], "limitations": []},
@@ -32,6 +40,7 @@ def _review_output(review, *, findings=None):
             }
         ],
     }
+    return {**output, "claim_inventory": claim_inventory(output["claim_checks"])}
 
 
 def _state(service, run_id, attempt_id):

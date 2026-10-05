@@ -49,6 +49,7 @@ from .schemas import (
     EvidenceAnchorContract,
     EvidenceAnchorMap,
     ExactEdit,
+    InventoriedScientificReviewOutput,
     JudgedClaimCheck,
     JudgedScientificReviewOutput,
     ReviewOutput,
@@ -999,12 +1000,11 @@ class Armarius:
 
     def _output_model_for_schema(self, run: Run, schema_kind: str, schema: dict[str, Any]) -> type[StrictModel]:
         if schema_kind == "scientific_review":
-            # Runs frozen before claim-check judgments keep the claim-check shape they were given.
-            return (
-                JudgedScientificReviewOutput
-                if "JudgedClaimCheck" in schema.get("$defs", {})
-                else ScientificReviewOutput
-            )
+            # Runs frozen before claim-check judgments or the claim inventory keep the shape they were given.
+            definitions = schema.get("$defs", {})
+            if "InventoriedClaim" in definitions:
+                return InventoriedScientificReviewOutput
+            return JudgedScientificReviewOutput if "JudgedClaimCheck" in definitions else ScientificReviewOutput
         if schema_kind != "review":
             return SCHEMA_MODELS[schema_kind]
         properties = schema.get("properties", {})
@@ -1231,6 +1231,10 @@ class Armarius:
             if isinstance(prior_output, ScientificReviewOutput):
                 context["claim_checks"] = [
                     check.model_dump(mode="json", exclude_none=True) for check in prior_output.claim_checks
+                ]
+            if isinstance(prior_output, InventoriedScientificReviewOutput):
+                context["claim_inventory"] = [
+                    entry.model_dump(mode="json", exclude_none=True) for entry in prior_output.claim_inventory
                 ]
             prompt_digest = self._record_text(
                 self._load_prompt_artifact(prompt_digest)
@@ -1493,11 +1497,12 @@ class Armarius:
 
     def _stage_validator(self, task: Task, run: Run, bundle, contract: EvidenceAnchorContract):
         if task.stage == "review":
+            accepted = self.completed_review_output(task)
 
             def validator(output):
                 return self._validate_review_output(
                     output, bundle.anchor_map, self._run_dir(run.id) / "snapshot", contract
-                )
+                ) + self._continued_inventory_issues(output, accepted[1] if accepted else None)
 
         elif task.stage == "revision":
 
@@ -1529,6 +1534,35 @@ class Armarius:
         else:
             raise InfrastructureError(f"unsupported external task stage: {task.stage}")
         return validator
+
+    def _continued_inventory_issues(self, output: ReviewOutput, prior: ReviewOutput | None) -> list[ValidationIssue]:
+        """A continuation keeps listing every claim the accepted inventory left unchecked, at its prominence."""
+        if not isinstance(output, InventoriedScientificReviewOutput) or not isinstance(
+            prior, InventoriedScientificReviewOutput
+        ):
+            return []
+        # A claim is identified by its statement, anchor, and prominence; each listed claim carries forward at most
+        # one prior claim, so a repeated open claim needs as many entries.
+        listed = [(entry.claim, entry.claim_anchor, entry.prominence) for entry in output.claim_inventory]
+        dropped = []
+        for entry in prior.claim_inventory:
+            if entry.check_indices:
+                continue
+            if (identity := (entry.claim, entry.claim_anchor, entry.prominence)) in listed:
+                listed.remove(identity)
+            else:
+                dropped.append(entry)
+        return [
+            self._issue(
+                "claim_inventory.unchecked_claim_dropped",
+                "/claim_inventory",
+                "A continuation must list every claim the accepted inventory left unchecked, with the same "
+                "claim, claim_anchor, and prominence, until a claim check assesses it.",
+                expected=entry.model_dump(mode="json", exclude_none=True),
+                actual=None,
+            )
+            for entry in dropped
+        ]
 
     def _validate_review_output(
         self,
@@ -1567,6 +1601,18 @@ class Armarius:
                             contract=contract,
                         )
                     )
+        if isinstance(output, InventoriedScientificReviewOutput):
+            for entry_index, entry in enumerate(output.claim_inventory):
+                issues.extend(
+                    self._validate_evidence(
+                        entry.claim_anchor,
+                        source_index,
+                        anchor_map,
+                        source_root,
+                        f"/claim_inventory/{entry_index}/claim_anchor",
+                        contract=contract,
+                    )
+                )
         if isinstance(output, ScopedReviewOutput):
             for group in ("checked", "outstanding"):
                 for index, area in enumerate(getattr(output.scope, group)):

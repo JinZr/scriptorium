@@ -73,6 +73,14 @@ def _review_json(summary: str, findings: list | None = None) -> str:
                     "finding_indices": list(range(len(findings))),
                 }
             ],
+            "claim_inventory": [
+                {
+                    "claim": "The manuscript reports a result.",
+                    "claim_anchor": {"source_path": "manuscript.pdf", "page": 1},
+                    "prominence": "headline",
+                    "check_indices": [0],
+                }
+            ],
         }
     )
 
@@ -135,7 +143,12 @@ def test_shared_skill_example_passes_frozen_review_validation(tmp_path: Path) ->
         claim = service.claim_task(task_id, "codex", "model", "high", "session", "host")
         attempt_id = claim["attempt"].id
         main = next(source for source in claim["source_map"]["sources"] if source["source_path"] == "main.tex")
-        output = example.replace("<MAIN_SOURCE_DIGEST>", main["source_digest"])
+        supplement = next(
+            source for source in claim["source_map"]["sources"] if source["source_path"] == "supplement.tex"
+        )
+        output = example.replace("<MAIN_SOURCE_DIGEST>", main["source_digest"]).replace(
+            "<SUPPLEMENT_SOURCE_DIGEST>", supplement["source_digest"]
+        )
         service.read_task(attempt_id, "main.tex", 3, 3, 0, 8000)
         service.read_task(attempt_id, "supplement.tex", 1, 1, 0, 8000)
         result = asyncio.run(service.submit_task(attempt_id, claim["input_digest"], output))
