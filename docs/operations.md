@@ -26,6 +26,7 @@ A claimed attempt remains active when the CLI exits. Claim and plain `task show`
 ```bash
 scriptorium --json task search ATTEMPT_ID --query phrase --cursor 0 --limit 20
 scriptorium --json task read ATTEMPT_ID --path main.tex --start-line 1 --max-lines 40
+scriptorium --json task nav ATTEMPT_ID --command heading
 scriptorium --json task page ATTEMPT_ID --number 1
 scriptorium --json task page ATTEMPT_ID --document supplement.tex --number 1
 scriptorium --json task submit ATTEMPT_ID --input-digest DIGEST --file answer.json
@@ -43,6 +44,8 @@ Configure and commit independent `.tex` entrypoints using `manuscript.supplement
 `doctor` and run preparation compile every declared document. A supplement failure cannot produce a main-only
 review task. Fix an external prerequisite and resume when possible; if the committed inputs or configuration
 need changing, commit them and start a new run. Revisions and verification rebuild all the frozen entrypoints.
+
+`task nav` filters the frozen navigation index without reading it as text. Repeat `--command` with a group (`heading`, `reference`, `citation`, `label`, `caption`, `graphics`) or an exact LaTeX command name; `--query` matches a case-insensitive substring of the literal value and `--path` limits entries to one frozen source. Each entry keeps its `command`, `source_path`, inclusive `start_line`/`end_line`, literal `value` (cut to 500 characters with `value_truncated`), and graphics candidates. The response adds `total_entries`, `command_counts` for the filtered set, and a cursor continuation. Navigation entries are literal source locations, not evidence or an interpretation of TeX; read the source range before relying on one. Runs frozen without a navigation index reject the command. Report tool-return counts include `nav`.
 
 `task read` and `task search --path` support `manifest.json`, `navigation.json`, `source-map.json`, and text sources named in the source map (either `source_path` or `read_path`). Bare metadata names select the generated bundle metadata; use the source map's `read_path` for a same-named manuscript source. Among sources, `read_path` takes priority over a colliding `source_path`, so every source remains addressable through its frozen read path. Search matches use the canonical `source_path`; continuations retain a read path whenever shortening it would select a different source or metadata. Read responses and access events include the resolved `source_path` (null for generated metadata), separately from the requested `path`. `--max-chars` is a ceiling of at most 8,000 characters, not a promised chunk size. Successful JSON responses for claim, show, read, search, and page are limited to 7,000 UTF-8 bytes including JSON escaping, metadata, envelope, and newline. Metadata that cannot fit fails explicitly. This bound leaves room under the observed host truncation threshold; it cannot guarantee delivery by every host. The same bound covers `run status`, run mutation acknowledgements, and `run report --part`. Full report exports, detailed lists, and submission diagnostics are not covered by this bound.
 

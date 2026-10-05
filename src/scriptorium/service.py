@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections import deque
+from collections import Counter, deque
 from contextlib import contextmanager
 from dataclasses import asdict, is_dataclass
 from datetime import datetime, timezone
@@ -44,6 +44,7 @@ from .schemas import EvidenceAnchorContract, ScientificReviewOutput, ScopedRevie
 from .storage import ConflictError, Database, NotFoundError as StorageNotFoundError, StorageError
 from .tool_output import (
     REPORT_PARTS,
+    bound_nav,
     bound_read,
     bound_search,
     report_fragment,
@@ -699,6 +700,68 @@ class ScriptoriumService:
             raise _unknown_text_path(path, bundle.anchor_map)
         return [item], item[0] if path_items[item[0]] == item else path
 
+    def nav_task(
+        self,
+        attempt_id: str,
+        commands: list[str] | None = None,
+        query: str | None = None,
+        path: str | None = None,
+        cursor: int = 0,
+        limit: int = 50,
+    ):
+        with self._retrieval_operation(attempt_id, "task nav"):
+            return self._nav_task(attempt_id, commands or [], query, path, cursor, limit)
+
+    def _nav_task(self, attempt_id: str, commands: list[str], query: str | None, path: str | None, cursor, limit):
+        attempt, task, bundle, files = self._readable_task(attempt_id)
+        if cursor < 0 or not 1 <= limit <= 100 or (query is not None and not 1 <= len(query) <= 200):
+            raise ConfigurationError("invalid navigation query, cursor, or limit")
+        selected = _navigation_commands(commands)
+        source_path = None
+        if path is not None:
+            source = next(
+                (item for item in bundle.anchor_map.sources if path in {item.source_path, item.read_path}), None
+            )
+            if source is None:
+                raise _unknown_text_path(path, bundle.anchor_map)
+            source_path = source.source_path
+        if "navigation.json" not in files:
+            raise StateError("this run has no frozen navigation index")
+        navigation = self.armarius._verify_retrieval_file(bundle.workspace, files, "navigation.json")
+        entries = json.loads(navigation.read_text(encoding="utf-8"))["entries"]
+        folded = query.casefold() if query is not None else None
+        matched = [
+            entry
+            for entry in entries
+            if (selected is None or entry["command"] in selected)
+            and (source_path is None or entry["source_path"] == source_path)
+            and (folded is None or folded in entry["value"].casefold())
+        ]
+        filters = {"commands": commands, "query": query, "path": path}
+        response = bound_nav(
+            [_navigation_entry(entry) for entry in matched[cursor : cursor + limit]],
+            len(matched),
+            dict(Counter(entry["command"] for entry in matched)),
+            attempt_id,
+            filters,
+            cursor,
+            limit,
+        )
+        self._record_access(
+            task.run_id,
+            attempt.id,
+            "nav",
+            {
+                **filters,
+                "entries": [
+                    {key: entry[key] for key in ("command", "source_path", "start_line", "end_line")}
+                    for entry in response["entries"]
+                ],
+                "next_cursor": response["next_cursor"],
+            },
+        )
+        return response
+
     def page_task(self, attempt_id: str, page_number: int, document: str | None = None):
         with self._retrieval_operation(attempt_id, "task page"):
             return self._page_task(attempt_id, page_number, document)
@@ -975,8 +1038,8 @@ class ScriptoriumService:
         external_run = run_view["run"].frozen_config.get("execution") == "external"
         access_counts = {}
         for event in events:
-            if event.event_type in {"tool.read", "tool.search", "tool.page"}:
-                counts = access_counts.setdefault(event.entity_id, {"read": 0, "search": 0, "page": 0})
+            if event.event_type in {"tool.read", "tool.search", "tool.page", "tool.nav"}:
+                counts = access_counts.setdefault(event.entity_id, {"read": 0, "search": 0, "page": 0, "nav": 0})
                 counts[event.event_type.removeprefix("tool.")] += 1
         validation_reports = []
         review_scopes = []
@@ -1003,7 +1066,7 @@ class ScriptoriumService:
                             "role": task.role.value,
                             "status": attempt.status.value,
                             "returns": (
-                                access_counts.get(attempt.id, {"read": 0, "search": 0, "page": 0})
+                                access_counts.get(attempt.id, {"read": 0, "search": 0, "page": 0, "nav": 0})
                                 if external_run
                                 else None
                             ),
@@ -1429,7 +1492,8 @@ class ScriptoriumService:
                 else:
                     lines.append(
                         f"- `{item['attempt_id']}` / {item['status']}: "
-                        f"read {counts['read']}, search {counts['search']}, page {counts['page']}"
+                        f"read {counts['read']}, search {counts['search']}, page {counts['page']}, "
+                        f"nav {counts.get('nav', 0)}"
                     )
         else:
             lines.append("- None")
@@ -1481,6 +1545,39 @@ def _unknown_text_path(path: str, anchor_map) -> ConfigurationError:
     if any(item.source_path == path or item.read_path == path for item in anchor_map.sources):
         message += "; it is a frozen non-text source, so inspect the rendered pages with task page"
     return ConfigurationError(f"{message}; closest text read paths: {', '.join(candidates)}")
+
+
+NAVIGATION_GROUPS = {
+    "heading": ("part", "chapter", "section", "subsection", "subsubsection", "paragraph", "subparagraph"),
+    "reference": ("ref", "eqref", "pageref", "autoref", "cref", "Cref"),
+    "citation": ("cite", "citep", "citet", "autocite", "parencite", "textcite"),
+    "label": ("label",),
+    "caption": ("caption",),
+    "graphics": ("includegraphics",),
+}
+_NAVIGATION_VALUE_CHARS = 500
+
+
+def _navigation_commands(commands: list[str]) -> set[str] | None:
+    if not commands:
+        return None
+    known = {name for names in NAVIGATION_GROUPS.values() for name in names}
+    selected: set[str] = set()
+    for command in commands:
+        if command in NAVIGATION_GROUPS:
+            selected.update(NAVIGATION_GROUPS[command])
+        elif command in known:
+            selected.add(command)
+        else:
+            choices = ", ".join([*NAVIGATION_GROUPS, *sorted(known - set(NAVIGATION_GROUPS))])
+            raise ConfigurationError(f"unknown navigation command {command[:50]!r}; use one of: {choices}")
+    return selected
+
+
+def _navigation_entry(entry: dict[str, Any]) -> dict[str, Any]:
+    if len(entry["value"]) <= _NAVIGATION_VALUE_CHARS:
+        return entry
+    return {**entry, "value": entry["value"][:_NAVIGATION_VALUE_CHARS], "value_truncated": True}
 
 
 def _scan_matches(path: Path, query: str, skip: int, take: int, context: int):

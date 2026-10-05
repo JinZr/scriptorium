@@ -284,3 +284,28 @@ def bound_search(matches, total, attempt_id, query, path, cursor, limit, context
     if matches and count == 0:
         raise ConfigurationError("response metadata leaves no room for a search match")
     return response
+
+
+def bound_nav(entries, total, counts, attempt_id, filters, cursor, limit):
+    def build(count):
+        next_cursor = cursor + count if cursor + count < total else None
+        arguments = ["nav", attempt_id]
+        for command in filters["commands"]:
+            arguments.append(f"--command={command}")
+        if filters["query"] is not None:
+            arguments.append(f"--query={filters['query']}")
+        if filters["path"] is not None:
+            arguments.append(f"--path={filters['path']}")
+        arguments.extend(["--cursor", next_cursor, "--limit", limit])
+        return {
+            "entries": entries[:count],
+            "total_entries": total,
+            "command_counts": counts,
+            "next_cursor": next_cursor,
+            "next_command": tool_command(*arguments) if next_cursor is not None else None,
+        }
+
+    count, response = _fit_prefix(len(entries), build)
+    if entries and count == 0:
+        raise ConfigurationError("response metadata leaves no room for a navigation entry")
+    return response
