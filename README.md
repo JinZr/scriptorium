@@ -51,6 +51,7 @@ scriptorium --json task nav ATTEMPT_ID --command heading
 scriptorium --json task search ATTEMPT_ID --query TERM
 scriptorium --json task read ATTEMPT_ID --path main.tex --start-line 1 --end-line 40 --anchor
 scriptorium --json task page ATTEMPT_ID --number 1
+scriptorium --json task submit ATTEMPT_ID --input-digest INPUT_DIGEST --file output.json --check
 scriptorium --json task submit ATTEMPT_ID --input-digest INPUT_DIGEST --file output.json
 ```
 

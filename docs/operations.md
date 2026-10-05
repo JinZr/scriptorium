@@ -25,6 +25,7 @@ option. Bounded responses stay within 7,000 UTF-8 bytes; run `next_command` unch
 | `task search ATTEMPT_ID --query Q` | Literal case-insensitive search | `matches[]` with `path`, `line`, `column`, `excerpt`, `source_digest` | `next_cursor`, `next_command` |
 | `task read ATTEMPT_ID --path P` | Bounded source or metadata lines | `lines[]` with `line`, `offset`, `text`; `source_path`, `source_digest`, optional `anchor` | `next_line`, `next_offset`, `next_command` |
 | `task page ATTEMPT_ID --number N` | Rendered page image, zoomed view, or text layer | `page`, `path`, `digest`, `document`, `document_page`; `view`, or `text` with `text_digest` | `next_command` with `--text` |
+| `task submit ATTEMPT_ID ... --check` | Validate without recording | `valid`, `recorded: false`, `output_digest`, `validation_report` | `task submit` without `--check` |
 | `task submit ATTEMPT_ID ...` | Validate one output | `attempt`, `validation_report`, `run_status`, `next_actions` | `run status` |
 | `run status RUN_ID` | Overview and next actions | `task_counts`, `next_actions`, `report_parts` | none |
 | `run report RUN_ID --part P` | One report section | `text`, `offset`, `digest`, `report_digest` | `next_command` |
@@ -75,6 +76,8 @@ Read returns `next_line`, `next_offset`, and a shell-quoted `next_command` when 
 External review sessions have no wall-clock deadline by default. For AGY print-mode validation, use `--print-timeout 0` and wait without a subprocess timeout. A host process exit or a success message is not review completion: inspect the accepted submission receipt and `run status`, continue accepted partial scope through `run continue`, and stop at an explicit human gate. If the host disconnects, inspect the durable attempt and reconnect to the same session before deciding whether explicit abandonment is needed. Paid-call and correction allowances remain separate from elapsed time; `--help` calls are not material retrievals.
 
 `task submit --file` accepts UTF-8 JSON up to 2 MB from a file or stdin. The CLI rejects larger input before decoding or passing it to the workflow.
+
+`task submit --check` validates the same input against the attempt's frozen schema, evidence map, task context and verifier-session rule without storing it. It requires an active attempt and the attempt's input digest, records no output or validation-report artifact, findings or attempt status, and leaves the attempt claimable for submission. It appends one `tool.submit_check` event with the input and output digests, the outcome and the issue codes. `data.valid` reports that this file would currently be accepted, not that a later submission was made; workflow state can still change before the real submission, which validates again. Coverage audits and tool-return counts do not count checks.
 
 For a new review task, include `scope` alongside `summary` and `findings`. This minimal partial output illustrates `scope` only; a new `substantive_review` also requires `claim_checks`. See the [shared skill's full JSON example](../skills/scriptorium/SKILL.md#example-substantive-review-output) for a finding, its exact text anchor, and its zero-based claim-check link. The task's reconstructed frozen schema takes precedence over either example:
 

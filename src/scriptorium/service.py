@@ -515,6 +515,36 @@ class ScriptoriumService:
                 "next_actions": self.list_tasks(task.run_id)["next_actions"],
             }
 
+    def check_submission(self, attempt_id: str, input_digest: str, output_text: str) -> dict[str, Any]:
+        if len(output_text.encode("utf-8")) > 2_000_000:
+            raise ConfigurationError("submission exceeds the 2 MB limit")
+        with self._retrieval_operation(attempt_id, "task submit --check"):
+            attempt = self._storage(self.database.get_attempt, attempt_id)
+            task = self._storage(self.database.get_task, attempt.task_id)
+            report = self._storage(self.armarius.check_submission, attempt_id, input_digest, output_text)
+            output_digest = ArtifactStore.digest_bytes(output_text.encode("utf-8"))
+            valid = report is None
+            codes = [] if valid else sorted({issue.code for issue in report.issues})
+            self._record_access(
+                task.run_id,
+                attempt_id,
+                "submit_check",
+                {"input_digest": input_digest, "output_digest": output_digest, "valid": valid, "codes": codes},
+            )
+            return {
+                "attempt_id": attempt_id,
+                "input_digest": input_digest,
+                "output_digest": output_digest,
+                "valid": valid,
+                "recorded": False,
+                "validation_report": None if valid else report.model_dump(mode="json"),
+                "next_action": (
+                    "submit this exact file without --check"
+                    if valid
+                    else "fix the reported issues and check again; the attempt remains active"
+                ),
+            }
+
     @contextmanager
     def _retrieval_operation(self, attempt_id: str, operation: str) -> Iterator[None]:
         attempt = self._storage(self.database.get_attempt, attempt_id)
