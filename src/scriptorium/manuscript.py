@@ -87,7 +87,19 @@ NON_QUANTITY_GROUP_LIMITS = {
     "resizebox": 2,
     "scalebox": 1,
     "href": 1,
+    "newcommand": 2,
+    "renewcommand": 2,
+    "providecommand": 2,
+    "setlength": 2,
+    "addtolength": 2,
+    "setcounter": 2,
+    "addtocounter": 2,
+    "definecolor": 3,
+    "rule": 2,
+    "fontsize": 2,
 }
+# A row break's optional spacing, as in \\[1.5mm], is a layout length rather than a reported value.
+ROW_SPACING_PATTERN = re.compile(r"(?<!\\)\\\\\*?[ \t]*\[[^\]\n]*\]")
 # Mandatory groups an environment takes after its name; other environments may open their body with a group.
 ENVIRONMENT_ARGUMENT_GROUPS = {
     "tabular": 1,
@@ -339,6 +351,31 @@ def _command_argument_spans(text: str) -> Iterator[tuple[int, int]]:
             yield start, end
 
 
+def _row_spacing_spans(text: str, masked: str) -> list[tuple[int, int]]:
+    # Masking blanks control symbols such as \\, so find row breaks in the text and keep those outside comments.
+    return [match.span() for match in ROW_SPACING_PATTERN.finditer(text) if masked[match.end() - 1] == "]"]
+
+
+def _environment_body_start(text: str, name: str, position: int) -> int:
+    """Return where an environment's body starts, past the placement options and mandatory arguments it takes."""
+    groups = ENVIRONMENT_ARGUMENT_GROUPS.get(name, 0)
+    options = name in TABLE_ENVIRONMENTS
+    while (group := re.match(ARGUMENT_SPACE + r"([\[{])", text[position:])) and (
+        groups if group[1] == "{" else options
+    ):
+        opening = position + group.end()
+        if group[1] == "{":
+            closing = _balanced_group_end(text, opening)
+            groups -= 1
+        else:
+            bracket = text.find("]", opening)
+            closing = None if bracket == -1 else bracket + 1
+        if closing is None:
+            break
+        position = closing
+    return position
+
+
 def _document_body(masked: str) -> tuple[int, int]:
     """Return the typeset span: after \\begin{document}, if present, and before \\end{document}, where TeX stops."""
     document = re.search(r"\\begin\s*\{document\}", masked)
@@ -578,7 +615,9 @@ class ManuscriptManager:
             for other in boundary.finditer(text, match.end()):
                 depth += 1 if other.group(1) == "begin" else -1
                 if depth == 0:
-                    yield name, match.start(), other.end(), match.end(), other.start()
+                    yield name, match.start(), other.end(), _environment_body_start(
+                        text, name, match.end()
+                    ), other.start()
                     break
 
     @staticmethod
@@ -598,7 +637,7 @@ class ManuscriptManager:
     @staticmethod
     def _navigation_quantities(text: str, masked: str, skipped: list[tuple[int, int]], floor: int, ceiling: int):
         # Literal numeric reports: decimals, uncertainties, exponents, plus-minus or percentages, with an adjacent unit.
-        excluded = _merged_spans([*skipped, *_command_argument_spans(masked)])
+        excluded = _merged_spans([*skipped, *_command_argument_spans(masked), *_row_spacing_spans(text, masked)])
         lefts = [left for left, _ in excluded]
         scanned = CONTROL_WORD_BEFORE_NUMBER_PATTERN.sub(lambda word: " " * len(word[0]), text)
         for match in QUANTITY_PATTERN.finditer(scanned, floor, ceiling):

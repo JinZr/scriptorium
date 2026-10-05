@@ -197,7 +197,7 @@ def test_wrapper_content_and_control_word_neighbours_keep_their_quantities(tmp_p
         ("quantity", r"2.0\pm0.1"),
         ("quantity", "1.5 A"),
         ("quantity", "2.5"),
-        ("alignat", "{2}\nE &= 0.113"),
+        ("alignat", "E &= 0.113"),
         ("quantity", "0.113"),
     ]
 
@@ -266,3 +266,23 @@ def test_attached_exponent_units_and_arguments_on_the_next_line(tmp_path):
         ("main.tex", "quantity", "1.2E5Pa"),
         ("main.tex", "quantity", "7.5 K"),
     ]
+
+
+def test_row_spacing_split_settings_and_environment_arguments_stay_out_of_values(tmp_path):
+    files = {
+        "main.tex": (
+            "\\begin{document}\n"
+            "\\begin{table}[h]\n\\begin{tabular}[t]{cc}\n0.5 & 1.5 m \\\\[1.5mm]\n\\end{tabular}\n\\end{table}\n"
+            "\\newcommand{\\score}\n{2.5}\n"
+            "\\end{document}\n"
+        ),
+    }
+    for name, content in files.items():
+        (tmp_path / name).write_text(content)
+    manager = ManuscriptManager(tmp_path)
+    navigation = json.loads(manager.create_navigation(tmp_path, manager.scan_sources(tmp_path, "main.tex")))
+    values = [(entry["command"], entry["value"]) for entry in navigation["entries"]]
+    assert ("quantity", "0.5") in values and ("quantity", "1.5 m") in values
+    assert [value for command, value in values if command == "quantity"] == ["0.5", "1.5 m"]
+    assert dict(values)["tabular"].startswith("0.5 & 1.5 m")
+    assert dict(values)["table"].startswith("\\begin{tabular}")
