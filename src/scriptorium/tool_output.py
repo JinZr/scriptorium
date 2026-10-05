@@ -286,7 +286,7 @@ def bound_search(matches, total, attempt_id, query, path, cursor, limit, context
     return response
 
 
-def bound_nav(entries, total, counts, attempt_id, filters, cursor, limit):
+def bound_nav(entries, total, counts, attempt_id, filters, cursor, limit, source_indexes):
     def build(page):
         next_cursor = cursor + len(page) if cursor + len(page) < total else None
         arguments = ["nav", attempt_id]
@@ -305,16 +305,21 @@ def bound_nav(entries, total, counts, attempt_id, filters, cursor, limit):
             "next_command": tool_command(*arguments) if next_cursor is not None else None,
         }
 
-    if entries and not fits_response(build(entries)) and not fits_response(build([])):
+    full = build(entries)
+    if not entries or fits_response(full):
+        return require_bounded(full)
+    path_filtered = filters["path"] is not None
+    if len(entries) == 1 and cursor + 1 >= total:
+        # The final entry needs no continuation, so only its own fields have to give way.
+        return _fit_lone_nav_entry(entries[0], build, path_filtered, source_indexes)
+    if not fits_response(build([])):
         # A filter can outgrow the continuation that repeats it, e.g. a path full of characters that need quoting.
         raise ConfigurationError(
             "navigation filters are too long to repeat in a bounded continuation; "
             "retry without --path and match entries by source_path"
         )
     count, response = _fit_prefix(len(entries), lambda count: build(entries[:count]))
-    if not entries or count:
-        return response
-    return _fit_lone_nav_entry(entries[0], build, filters["path"] is not None)
+    return response if count else _fit_lone_nav_entry(entries[0], build, path_filtered, source_indexes)
 
 
 def _nav_candidates(entry, keep):
@@ -325,30 +330,40 @@ def _nav_candidates(entry, keep):
     return {**entry, "candidate_paths": candidates[:keep], "candidate_count": total, "candidate_paths_truncated": True}
 
 
-def _fit_lone_nav_entry(entry, build, path_filtered):
-    # Long paths can still crowd out a lone entry. Keep the candidate paths that fit, then drop the source
-    # path --path already names, then the target path the candidate count and source map still identify,
-    # and finally cut the value by encoded size. Each change is flagged.
+def _without_source_path(entry):
+    return {**{key: value for key, value in entry.items() if key != "source_path"}, "source_path_omitted": True}
+
+
+def _fit_lone_nav_entry(entry, build, path_filtered, source_indexes):
+    # Long or escape-heavy paths can still crowd out a lone entry. Keep the candidate paths that fit, then drop
+    # the source path --path already names, then the target path the candidate count and source map still
+    # identify, then cut the value by encoded size. Without --path, a source path that still does not fit
+    # finally gives way to its position in the source map. Each change is flagged.
     def fitted(entry):
         def shrunk(keep):
             return build([_nav_candidates(entry, keep)])
 
         return _fit_prefix(len(entry.get("candidate_paths") or []), shrunk)[1] if fits_response(shrunk(0)) else None
 
-    response = fitted(entry)
-    if response is None and path_filtered:
-        entry = {**{key: value for key, value in entry.items() if key != "source_path"}, "source_path_omitted": True}
-        response = fitted(entry)
-    if response is None and entry.get("target_path") is not None:
-        entry = {**entry, "target_path": None, "target_path_omitted": True}
-        response = fitted(entry)
-    if response is None:
+    def value_cut(entry):
         bare, value = _nav_candidates(entry, 0), entry["value"]
 
         def cut(length):
             return build([{**bare, "value": value[:length], "value_truncated": True}])
 
-        response = _fit_prefix(len(value), cut)[1] if fits_response(cut(0)) else None
+        return _fit_prefix(len(value), cut)[1] if fits_response(cut(0)) else None
+
+    response = fitted(entry)
+    if response is None and path_filtered:
+        entry = _without_source_path(entry)
+        response = fitted(entry)
+    if response is None and entry.get("target_path") is not None:
+        entry = {**entry, "target_path": None, "target_path_omitted": True}
+        response = fitted(entry)
+    response = response or value_cut(entry)
+    if response is None and not path_filtered:
+        entry = {**_without_source_path(entry), "source_index": source_indexes[entry["source_path"]]}
+        response = fitted(entry) or value_cut(entry)
     if response is None:
         raise ConfigurationError("response metadata leaves no room for a navigation entry")
     return response

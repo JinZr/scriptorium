@@ -748,6 +748,7 @@ class ScriptoriumService:
             filters,
             cursor,
             limit,
+            {item.source_path: index for index, item in enumerate(bundle.anchor_map.sources)},
         )
         self._record_access(
             task.run_id,
@@ -755,14 +756,10 @@ class ScriptoriumService:
             "nav",
             {
                 **filters,
+                # Record the index entries themselves; returned entries may omit fields to fit the bound.
                 "entries": [
-                    {
-                        "command": entry["command"],
-                        "source_path": entry.get("source_path", source_path),
-                        "start_line": entry["start_line"],
-                        "end_line": entry["end_line"],
-                    }
-                    for entry in response["entries"]
+                    {key: entry[key] for key in ("command", "source_path", "start_line", "end_line")}
+                    for entry in matched[cursor : cursor + len(response["entries"])]
                 ],
                 "next_cursor": response["next_cursor"],
             },
