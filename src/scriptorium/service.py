@@ -755,7 +755,12 @@ class ScriptoriumService:
             {
                 **filters,
                 "entries": [
-                    {key: entry[key] for key in ("command", "source_path", "start_line", "end_line")}
+                    {
+                        "command": entry["command"],
+                        "source_path": entry.get("source_path", source_path),
+                        "start_line": entry["start_line"],
+                        "end_line": entry["end_line"],
+                    }
                     for entry in response["entries"]
                 ],
                 "next_cursor": response["next_cursor"],

@@ -126,25 +126,29 @@ def test_read_paths_take_priority_over_colliding_source_paths(tmp_path):
         assert headings("z.tex") == ["Root file"]
 
 
+def _pages(service, monkeypatch, capsys, arguments):
+    monkeypatch.chdir(service.repo)
+    monkeypatch.setattr(cli, "_build_service", lambda _: service)
+    capsys.readouterr()
+    pages = []
+    while arguments:
+        assert cli.main(arguments) == 0
+        output = capsys.readouterr().out
+        assert len(output.encode("utf-8")) <= MAX_TOOL_RESPONSE_BYTES
+        pages.append(json.loads(output)["data"])
+        arguments = shlex.split(pages[-1]["next_command"])[1:] if pages[-1]["next_command"] else None
+    return pages
+
+
 def test_ambiguous_graphics_candidates_are_capped_so_every_entry_fits(tmp_path, monkeypatch, capsys):
     panels = [f"figures/panel-{index:03d}/plot.png" for index in range(250)]
     files = {path: "png" for path in ["plot.png", *panels]}
     body = "\\includegraphics{plot}\n" + "".join(f"\\includegraphics{{{path[:-4]}}}\n" for path in panels)
     service, attempt_id = _nav_run(tmp_path, files, body)
     with service:
-        monkeypatch.chdir(service.repo)
-        monkeypatch.setattr(cli, "_build_service", lambda _: service)
-        capsys.readouterr()
-        arguments = ["--json", "task", "nav", attempt_id, "--command", "graphics"]
-        entries = []
-        while arguments:
-            assert cli.main(arguments) == 0
-            output = capsys.readouterr().out
-            assert len(output.encode("utf-8")) <= MAX_TOOL_RESPONSE_BYTES
-            response = json.loads(output)["data"]
-            entries.extend(response["entries"])
-            arguments = shlex.split(response["next_command"])[1:] if response["next_command"] else None
-        assert len(entries) == response["total_entries"] == 251
+        pages = _pages(service, monkeypatch, capsys, ["--json", "task", "nav", attempt_id, "--command", "graphics"])
+        entries = [entry for page in pages for entry in page["entries"]]
+        assert len(entries) == pages[-1]["total_entries"] == 251
         ambiguous = next(entry for entry in entries if entry["value"] == "plot")
         assert ambiguous["candidate_count"] == 251 and ambiguous["candidate_paths_truncated"] is True
         assert len(ambiguous["candidate_paths"]) == 10 and ambiguous["target_path"] is None
@@ -157,22 +161,34 @@ def test_long_graphics_candidates_are_cut_to_the_response_bound(tmp_path, monkey
     body = "\\includegraphics{plot}\n" + "".join(f"\\includegraphics{{{path[:-4]}}}\n" for path in deep)
     service, attempt_id = _nav_run(tmp_path, files, body)
     with service:
-        monkeypatch.chdir(service.repo)
-        monkeypatch.setattr(cli, "_build_service", lambda _: service)
-        capsys.readouterr()
-        arguments = ["--json", "task", "nav", attempt_id, "--command", "graphics"]
-        entries = []
-        while arguments:
-            assert cli.main(arguments) == 0
-            output = capsys.readouterr().out
-            assert len(output.encode("utf-8")) <= MAX_TOOL_RESPONSE_BYTES
-            response = json.loads(output)["data"]
-            entries.extend(response["entries"])
-            arguments = shlex.split(response["next_command"])[1:] if response["next_command"] else None
-        assert len(entries) == response["total_entries"] == 11
+        pages = _pages(service, monkeypatch, capsys, ["--json", "task", "nav", attempt_id, "--command", "graphics"])
+        entries = [entry for page in pages for entry in page["entries"]]
+        assert len(entries) == pages[-1]["total_entries"] == 11
         ambiguous = entries[0]
         kept = ambiguous["candidate_paths"]
         assert ambiguous["value"] == "plot" and ambiguous["target_path"] is None
         assert ambiguous["candidate_count"] == 11 and ambiguous["candidate_paths_truncated"] is True
         assert 0 < len(kept) < 10 and kept == sorted(deep)[: len(kept)]
         assert [entry["target_path"] for entry in entries[1:]] == deep
+        # A short path filter still fits beside trimmed candidates, so entries keep their source path.
+        (first,) = service.nav_task(attempt_id, ["graphics"], path="main.tex", limit=1)["entries"]
+        assert first["source_path"] == "main.tex" and "source_path_omitted" not in first
+
+
+def test_long_path_filters_drop_the_source_path_they_name(tmp_path, monkeypatch, capsys):
+    deep = "/".join(f"{index:02d}-" + "d" * 240 for index in range(15)) + "/chapter.tex"
+    files = {deep: "\\section{One}\n\\section{Two}\n\\subsection{Three}\n"}
+    service, attempt_id = _nav_run(tmp_path, files, f"\\input{{{deep[:-4]}}}\n")
+    with service:
+        pages = _pages(service, monkeypatch, capsys, ["--json", "task", "nav", attempt_id, f"--path={deep}"])
+        entries = [entry for page in pages for entry in page["entries"]]
+        assert [entry["value"] for entry in entries] == ["One", "Two", "Three"]
+        # Only the last page has no continuation repeating the path, so only its entry has room for it.
+        assert [entry.get("source_path_omitted", False) for entry in entries] == [True, True, False]
+        assert [entry.get("source_path") for entry in entries] == [None, None, deep]
+        # Without the filter the path appears only once, so entries keep it.
+        unfiltered, *_ = service.nav_task(attempt_id, ["heading"])["entries"]
+        assert unfiltered["source_path"] == deep and "source_path_omitted" not in unfiltered
+        run_id = service.database.get_task(service.database.get_attempt(attempt_id).task_id).run_id
+        events = [e.payload for e in service.database.list_events(run_id) if e.event_type == "tool.nav"]
+        assert {entry["source_path"] for event in events for entry in event["entries"]} == {deep}
