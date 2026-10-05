@@ -42,7 +42,6 @@ from .manuscript import (
     ManuscriptBundle,
     ManuscriptManager,
     SourceFile,
-    source_lines,
 )
 from .schemas import (
     DEFAULT_EVIDENCE_ANCHOR_CONTRACT,
@@ -393,6 +392,7 @@ class Armarius:
         role: AgentRole,
     ) -> TaskOutcome | None:
         bundle = self._bundle_for_run(run)
+        contract = self.require_evidence_anchor_contract(run.id)
         prompt = self._review_prompt(run, role)
         outcome = await self._execute_task(
             run=run,
@@ -409,6 +409,7 @@ class Armarius:
                 output,
                 bundle.anchor_map,
                 self._run_dir(run.id) / "snapshot",
+                contract,
             ),
         )
         if outcome is None:
@@ -546,6 +547,7 @@ class Armarius:
                 feedback = recovered
         prompt = self._revision_prompt(run, confirmed, feedback)
         bundle = self._bundle_for_run(run)
+        contract = self.require_evidence_anchor_contract(run.id)
         outcome = await self._execute_task(
             run=run,
             stage="revision",
@@ -558,6 +560,7 @@ class Armarius:
                 confirmed,
                 bundle.anchor_map,
                 self._run_dir(run.id) / "snapshot",
+                contract,
             ),
         )
         if outcome is None:
@@ -570,6 +573,7 @@ class Armarius:
             self._run_dir(run.id) / "snapshot",
             candidate,
             output.edits,
+            contract,
         )
         if not changed_paths:
             raise StateError("the revision contains no manuscript changes")
@@ -734,6 +738,7 @@ class Armarius:
                 confirmed,
                 verification_bundle.anchor_map,
                 patched,
+                anchor_contract,
             ),
         )
         if outcome is None:
@@ -1398,13 +1403,16 @@ class Armarius:
         if run.status == RunStatus.CANCELLED or task.status != TaskStatus.RUNNING:
             raise StateError(f"attempt {attempt_id} is no longer active")
         bundle = self._external_bundle(run, metadata)
+        contract = self.require_evidence_anchor_contract(run.id)
         if not self._task_context_is_current(run, task):
             raise StateError("task context changed; run resume to prepare a new task")
         output_artifact = self._record_text(output_text, "application/json")
         if task.stage == "review":
 
             def validator(output):
-                return self._validate_review_output(output, bundle.anchor_map, self._run_dir(run.id) / "snapshot")
+                return self._validate_review_output(
+                    output, bundle.anchor_map, self._run_dir(run.id) / "snapshot", contract
+                )
 
         elif task.stage == "revision":
 
@@ -1414,6 +1422,7 @@ class Armarius:
                     self.database.list_findings(run.id, [FindingStatus.CONFIRMED]),
                     bundle.anchor_map,
                     self._run_dir(run.id) / "snapshot",
+                    contract,
                 )
 
         elif task.stage == "verification":
@@ -1429,6 +1438,7 @@ class Armarius:
                     self.database.list_findings(run.id, [FindingStatus.CONFIRMED]),
                     bundle.anchor_map,
                     self._run_dir(run.id) / "patched" / patch.id,
+                    contract,
                 )
 
         else:
@@ -1476,6 +1486,7 @@ class Armarius:
         output: ReviewOutput,
         anchor_map: EvidenceAnchorMap,
         source_root: Path,
+        contract: EvidenceAnchorContract,
     ) -> list[ValidationIssue]:
         source_index = {source.source_path: source for source in anchor_map.sources}
         issues: list[ValidationIssue] = []
@@ -1488,6 +1499,7 @@ class Armarius:
                         anchor_map,
                         source_root,
                         f"/findings/{finding_index}/evidence/{evidence_index}",
+                        contract=contract,
                     )
                 )
         if isinstance(output, ScientificReviewOutput):
@@ -1500,6 +1512,7 @@ class Armarius:
                             anchor_map,
                             source_root,
                             f"/claim_checks/{check_index}/evidence/{evidence_index}",
+                            contract=contract,
                         )
                     )
         if isinstance(output, ScopedReviewOutput):
@@ -1548,6 +1561,7 @@ class Armarius:
         findings: list[Finding],
         anchor_map: EvidenceAnchorMap,
         snapshot: Path,
+        contract: EvidenceAnchorContract,
     ) -> list[ValidationIssue]:
         source_index = {source.source_path: source for source in anchor_map.sources}
         expected_ids = {finding.id for finding in findings}
@@ -1630,6 +1644,7 @@ class Armarius:
                     edit.end_line,
                     f"{prefix}/before",
                     issues,
+                    contract,
                 )
                 if excerpt is not None and excerpt != edit.before and excerpt.rstrip("\r\n") != edit.before:
                     candidates = (excerpt, excerpt.rstrip("\r\n"))
@@ -1701,6 +1716,7 @@ class Armarius:
         findings: list[Finding],
         anchor_map: EvidenceAnchorMap,
         source_root: Path,
+        contract: EvidenceAnchorContract,
     ) -> list[ValidationIssue]:
         expected_ids = {finding.id for finding in findings}
         issues: list[ValidationIssue] = []
@@ -1738,6 +1754,7 @@ class Armarius:
                         anchor_map,
                         source_root,
                         f"/issues/{issue_index}/evidence/{evidence_index}",
+                        contract=contract,
                     )
                 )
         return issues
@@ -1749,6 +1766,8 @@ class Armarius:
         anchor_map: EvidenceAnchorMap,
         source_root: Path,
         path: str = "",
+        *,
+        contract: EvidenceAnchorContract,
     ) -> list[ValidationIssue]:
         issues: list[ValidationIssue] = []
         pdf_pages = anchor_map.compiled_pdf.page_count
@@ -1830,6 +1849,7 @@ class Armarius:
             evidence.end_line,
             f"{path}/quoted_text",
             issues,
+            contract,
         )
         if excerpt is not None and evidence.quoted_text not in excerpt:
             issues.append(
@@ -1850,9 +1870,10 @@ class Armarius:
         end_line: int,
         pointer: str,
         issues: list[ValidationIssue],
+        contract: EvidenceAnchorContract,
     ) -> str | None:
         try:
-            lines = source_lines(path.read_text(encoding="utf-8"), keepends=True)
+            lines = contract.split_lines(path.read_text(encoding="utf-8"), keepends=True)
         except UnicodeDecodeError:
             issues.append(
                 self._issue(
@@ -2162,7 +2183,6 @@ class Armarius:
             raise InfrastructureError(f"bundle content directories are missing or unsafe: {workspace}")
         expected_source_files: set[str] = set()
         source_anchor_records: list[SourceAnchorRecord] = []
-        frozen_counts = cls._frozen_line_counts(source_map_value)
         for source in sources:
             relative = Path(source.path)
             if (
@@ -2188,9 +2208,7 @@ class Armarius:
                     source_path=source.path,
                     read_path=(Path("sources") / relative).as_posix(),
                     source_digest=source.digest,
-                    line_count=(
-                        cls._anchor_line_count(text, frozen_counts.get(source.path)) if text_anchorable else None
-                    ),
+                    line_count=cls._anchor_line_count(contract, text) if text_anchorable else None,
                     text_anchorable=text_anchorable,
                 )
             )
@@ -2258,19 +2276,9 @@ class Armarius:
         return ManuscriptBundle(workspace, sources, pdf_pages, anchor_map)
 
     @staticmethod
-    def _frozen_line_counts(source_map_value: Any) -> dict[str, Any]:
-        try:
-            return {item["source_path"]: item.get("line_count") for item in source_map_value["sources"]}
-        except (KeyError, TypeError, AttributeError):
-            return {}
-
-    @staticmethod
-    def _anchor_line_count(text: str, frozen: Any) -> int:
-        count = len(source_lines(text))
-        # Bundles frozen before line numbering matched retrieval keep their recorded splitlines() count.
-        if frozen != count and frozen == len(text.splitlines()):
-            return frozen
-        return count
+    def _anchor_line_count(contract: EvidenceAnchorContract | None, text: str) -> int:
+        # A bundle without a frozen contract is a historical SDK bundle; its anchors are never revalidated.
+        return len(contract.split_lines(text) if contract is not None else text.splitlines())
 
     @staticmethod
     def _require_regular_bundle_file(path: Path) -> None:

@@ -200,6 +200,7 @@ def test_review_semantic_validation_reports_all_independent_anchor_failures(tmp_
             output,
             _anchor_map(source),
             repo,
+            DEFAULT_EVIDENCE_ANCHOR_CONTRACT,
         )
 
     assert [issue.code for issue in issues] == [
@@ -284,6 +285,7 @@ def test_deepseek_anchor_regressions_have_consistent_schema_and_semantic_feedbac
                     output,
                     anchor_map,
                     repo,
+                    DEFAULT_EVIDENCE_ANCHOR_CONTRACT,
                 ),
             )
             assert issues[0].code == expected_code
@@ -368,12 +370,14 @@ def test_non_text_source_paths_are_diagnostic_reads_not_durable_anchors(tmp_path
             review,
             anchor_map,
             repo,
+            DEFAULT_EVIDENCE_ANCHOR_CONTRACT,
         )
         revision_issues = service.armarius._validate_revision_output(
             revision,
             [_finding("finding_1")],
             anchor_map,
             repo,
+            DEFAULT_EVIDENCE_ANCHOR_CONTRACT,
         )
 
     assert [issue.code for issue in review_issues] == [
@@ -420,6 +424,7 @@ def test_verification_evidence_uses_the_patched_source_map_digest(tmp_path):
             [_finding("finding_1")],
             _anchor_map(patched_source),
             repo,
+            DEFAULT_EVIDENCE_ANCHOR_CONTRACT,
         )
 
     assert [issue.code for issue in issues] == ["evidence.source_digest_mismatch"]
@@ -439,6 +444,7 @@ def test_pdf_page_anchor_does_not_depend_on_pdf_text_extraction(tmp_path):
             anchor_map,
             repo,
             "/findings/0/evidence/0",
+            contract=DEFAULT_EVIDENCE_ANCHOR_CONTRACT,
         )
 
     assert issues == []
@@ -498,12 +504,14 @@ def test_revision_and_verification_validators_accumulate_issues(tmp_path):
             [_finding("finding_1"), _finding("finding_2")],
             _anchor_map(source),
             repo,
+            DEFAULT_EVIDENCE_ANCHOR_CONTRACT,
         )
         verification_issues = service.armarius._validate_verification_output(
             verification,
             [_finding("finding_1"), _finding("finding_2")],
             _anchor_map(source),
             repo,
+            DEFAULT_EVIDENCE_ANCHOR_CONTRACT,
         )
 
     revision_codes = [issue.code for issue in revision_issues]

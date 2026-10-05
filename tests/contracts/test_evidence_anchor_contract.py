@@ -80,6 +80,7 @@ def test_anchor_contract_is_content_addressed_without_a_version_field() -> None:
 def test_anchor_contract_digest_changes_only_when_contract_content_changes() -> None:
     content = evidence_anchor_contract_content()
     same_content = {
+        "line_terminators": copy.deepcopy(content["line_terminators"]),
         "revision_edit": copy.deepcopy(content["revision_edit"]),
         "pdf_page": copy.deepcopy(content["pdf_page"]),
         "source_line": copy.deepcopy(content["source_line"]),

@@ -19,6 +19,7 @@ import pymupdf as fitz
 from .config import ManuscriptConfig
 from .errors import InfrastructureError, StateError
 from .schemas import (
+    DEFAULT_EVIDENCE_ANCHOR_CONTRACT,
     CompiledPdfAnchor,
     CompiledPdfDocumentRecord,
     CompiledPdfPageRecord,
@@ -59,20 +60,6 @@ NON_TEXT_ANCHOR_EXTENSIONS = frozenset(
         ".webp",
     }
 )
-# Retrieval reads text with universal newlines, so these are the only line breaks a source line may end with.
-_SOURCE_LINE_BREAK = re.compile(r"\r\n|\r|\n")
-
-
-def source_lines(text: str, *, keepends: bool = False) -> list[str]:
-    """Split text exactly where task retrieval and evidence validation number lines."""
-    lines = []
-    start = 0
-    for match in _SOURCE_LINE_BREAK.finditer(text):
-        lines.append(text[start : match.end() if keepends else match.start()])
-        start = match.end()
-    if start < len(text):
-        lines.append(text[start:])
-    return lines
 
 
 @dataclass(frozen=True)
@@ -194,7 +181,7 @@ class ManuscriptManager:
         sources = []
         for relative in sorted(included):
             data = (root / relative).read_bytes()
-            line_count = len(source_lines(data.decode("utf-8", errors="replace")))
+            line_count = len(data.decode("utf-8", errors="replace").splitlines())
             sources.append(SourceFile(relative.as_posix(), sha256(data).hexdigest(), line_count))
         return tuple(sources)
 
@@ -714,7 +701,7 @@ class ManuscriptManager:
                     # Workspace paths are read locations; persisted anchors stay relative to the frozen source map.
                     read_path=(Path("sources") / source.path).as_posix(),
                     source_digest=source.digest,
-                    line_count=len(source_lines(text)) if text_anchorable else None,
+                    line_count=len(anchor_contract.split_lines(text)) if text_anchorable else None,
                     text_anchorable=text_anchorable,
                 )
             )
@@ -753,7 +740,13 @@ class ManuscriptManager:
         source_map_temporary.replace(source_map_path)
         return ManuscriptBundle(destination, sources, page_count, anchor_map)
 
-    def apply_edits(self, snapshot: Path, patched: Path, edits: Iterable[ExactEdit]) -> tuple[str, tuple[str, ...]]:
+    def apply_edits(
+        self,
+        snapshot: Path,
+        patched: Path,
+        edits: Iterable[ExactEdit],
+        contract: EvidenceAnchorContract = DEFAULT_EVIDENCE_ANCHOR_CONTRACT,
+    ) -> tuple[str, tuple[str, ...]]:
         if patched.exists():
             shutil.rmtree(patched)
         shutil.copytree(snapshot, patched, symlinks=True)
@@ -774,7 +767,7 @@ class ManuscriptManager:
                 if current.start_line <= previous.end_line:
                     raise StateError(f"Overlapping edits for {relative}")
             text = source_bytes.decode("utf-8")
-            lines = source_lines(text, keepends=True)
+            lines = contract.split_lines(text, keepends=True)
             for edit in reversed(ordered):
                 start = sum(len(line) for line in lines[: edit.start_line - 1])
                 end = sum(len(line) for line in lines[: edit.end_line])
@@ -785,7 +778,7 @@ class ManuscriptManager:
                         raise StateError(f"Exact replacement mismatch in {relative}:{edit.start_line}-{edit.end_line}")
                     replacement += existing[len(existing.rstrip("\r\n")) :]
                 text = f"{text[:start]}{replacement}{text[end:]}"
-                lines = source_lines(text, keepends=True)
+                lines = contract.split_lines(text, keepends=True)
             target_path.write_text(text, encoding="utf-8")
             changed_paths.append(relative)
         return self.diff(snapshot, patched, changed_paths), tuple(changed_paths)
