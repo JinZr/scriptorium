@@ -192,3 +192,37 @@ def test_long_path_filters_drop_the_source_path_they_name(tmp_path, monkeypatch,
         run_id = service.database.get_task(service.database.get_attempt(attempt_id).task_id).run_id
         events = [e.payload for e in service.database.list_events(run_id) if e.event_type == "tool.nav"]
         assert {entry["source_path"] for event in events for entry in event["entries"]} == {deep}
+
+
+def test_long_source_and_target_paths_drop_the_target_path(tmp_path, monkeypatch, capsys):
+    def nested(name, leaf):
+        return "/".join(f"{name}{index:02d}-" + "d" * 240 for index in range(14)) + "/" + leaf
+
+    chapter, figure = nested("s", "chapter.tex"), nested("f", "plot.png")
+    # Name the extension so resolution finds the root-relative figure before joining the long directories.
+    files = {chapter: f"\\includegraphics{{{figure}}}\n" * 2, figure: "png"}
+    service, attempt_id = _nav_run(tmp_path, files, f"\\input{{{chapter[:-4]}}}\n")
+    with service:
+        arguments = ["--json", "task", "nav", attempt_id, "--command=graphics"]
+        unfiltered = [entry for page in _pages(service, monkeypatch, capsys, arguments) for entry in page["entries"]]
+        assert [(entry["source_path"], entry["target_path"]) for entry in unfiltered] == [(chapter, None)] * 2
+        assert all(entry["target_path_omitted"] and entry["candidate_count"] == 1 for entry in unfiltered)
+        # With --path the source path goes first; the target stays unless a continuation repeats the path.
+        pages = _pages(service, monkeypatch, capsys, [*arguments, f"--path={chapter}"])
+        filtered = [entry for page in pages for entry in page["entries"]]
+        assert all(entry["source_path_omitted"] and "source_path" not in entry for entry in filtered)
+        assert [entry["target_path"] for entry in filtered] == [None, figure]
+        assert [entry.get("target_path_omitted", False) for entry in filtered] == [True, False]
+
+
+def test_values_are_cut_by_encoded_size_beside_a_long_path(tmp_path, monkeypatch, capsys):
+    chapter = "/".join(f"{index:02d}-" + "d" * 240 for index in range(15)) + "/chapter.tex"
+    # Each control character takes six bytes once JSON-escaped, so 500 of them crowd the long path.
+    files = {chapter: "\\section{" + "\x01" * 600 + "}\n\\section{Next}\n"}
+    service, attempt_id = _nav_run(tmp_path, files, f"\\input{{{chapter[:-4]}}}\n")
+    with service:
+        pages = _pages(service, monkeypatch, capsys, ["--json", "task", "nav", attempt_id, "--command=heading"])
+        first, second = [entry for page in pages for entry in page["entries"]]
+        assert first["source_path"] == chapter and first["value_truncated"] is True
+        assert 0 < len(first["value"]) < 500 and set(first["value"]) == {"\x01"}
+        assert second["value"] == "Next" and "value_truncated" not in second

@@ -308,25 +308,41 @@ def bound_nav(entries, total, counts, attempt_id, filters, cursor, limit):
     count, response = _fit_prefix(len(entries), lambda count: build(entries[:count]))
     if not entries or count:
         return response
+    return _fit_lone_nav_entry(entries[0], build, filters["path"] is not None)
 
+
+def _nav_candidates(entry, keep):
+    candidates = entry.get("candidate_paths") or []
+    if keep == len(candidates):
+        return entry
+    total = entry.get("candidate_count", len(candidates))
+    return {**entry, "candidate_paths": candidates[:keep], "candidate_count": total, "candidate_paths_truncated": True}
+
+
+def _fit_lone_nav_entry(entry, build, path_filtered):
+    # Long paths can still crowd out a lone entry. Keep the candidate paths that fit, then drop the source
+    # path --path already names, then the target path the candidate count and source map still identify,
+    # and finally cut the value by encoded size. Each change is flagged.
     def fitted(entry):
-        # Keep the longest prefix of candidate paths that fits beside this lone entry.
-        candidates = entry.get("candidate_paths") or []
-
         def shrunk(keep):
-            if keep == len(candidates):
-                return build([entry])
-            total_candidates = entry.get("candidate_count", len(candidates))
-            cut = {"candidate_paths": candidates[:keep], "candidate_count": total_candidates}
-            return build([{**entry, **cut, "candidate_paths_truncated": True}])
+            return build([_nav_candidates(entry, keep)])
 
-        return _fit_prefix(len(candidates), shrunk)[1] if fits_response(shrunk(0)) else None
+        return _fit_prefix(len(entry.get("candidate_paths") or []), shrunk)[1] if fits_response(shrunk(0)) else None
 
-    # Long paths can still crowd out a lone entry; --path already names the source path it repeats.
-    response = fitted(entries[0])
-    if response is None and filters["path"] is not None:
-        compact = {key: value for key, value in entries[0].items() if key != "source_path"}
-        response = fitted({**compact, "source_path_omitted": True})
+    response = fitted(entry)
+    if response is None and path_filtered:
+        entry = {**{key: value for key, value in entry.items() if key != "source_path"}, "source_path_omitted": True}
+        response = fitted(entry)
+    if response is None and entry.get("target_path") is not None:
+        entry = {**entry, "target_path": None, "target_path_omitted": True}
+        response = fitted(entry)
+    if response is None:
+        bare, value = _nav_candidates(entry, 0), entry["value"]
+
+        def cut(length):
+            return build([{**bare, "value": value[:length], "value_truncated": True}])
+
+        response = _fit_prefix(len(value), cut)[1] if fits_response(cut(0)) else None
     if response is None:
         raise ConfigurationError("response metadata leaves no room for a navigation entry")
     return response
