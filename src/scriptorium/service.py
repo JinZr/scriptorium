@@ -738,7 +738,8 @@ class ScriptoriumService:
             and (source_path is None or entry["source_path"] == source_path)
             and (folded is None or folded in entry["value"].casefold())
         ]
-        filters = {"commands": commands, "query": query, "path": path}
+        # A repeated filter selects nothing new; keep one of each so continuations stay bounded.
+        filters = {"commands": list(dict.fromkeys(commands)), "query": query, "path": path}
         response = bound_nav(
             [_navigation_entry(entry) for entry in matched[cursor : cursor + limit]],
             len(matched),
