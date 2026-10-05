@@ -132,6 +132,20 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="without --path, also search manifest.json, navigation.json, and source-map.json",
     )
+    nav_parser = task_commands.add_parser("nav", help="list frozen navigation entries with filters")
+    nav_parser.add_argument("attempt_id")
+    nav_parser.add_argument(
+        "--command",
+        action="append",
+        dest="commands",
+        help="repeatable: heading, reference, citation, label, caption, graphics, or an exact LaTeX command",
+    )
+    nav_parser.add_argument("--query", help="case-insensitive substring of the entry value")
+    nav_parser.add_argument("--path", help="frozen source path or read path that contains the entries")
+    nav_parser.add_argument("--cursor", type=int, default=0)
+    nav_parser.add_argument(
+        "--limit", type=int, default=50, help="at most 100 entries; the byte bound may return fewer"
+    )
     page_parser = task_commands.add_parser("page")
     page_parser.add_argument("attempt_id")
     page_parser.add_argument("--number", type=int, required=True)
@@ -335,6 +349,19 @@ def _dispatch_task(service: Any, arguments: argparse.Namespace) -> tuple[Any, in
                 arguments.limit,
                 arguments.context,
                 arguments.include_metadata,
+            ),
+            0,
+            None,
+        )
+    if arguments.task_command == "nav":
+        return (
+            service.nav_task(
+                arguments.attempt_id,
+                arguments.commands,
+                arguments.query,
+                arguments.path,
+                arguments.cursor,
+                arguments.limit,
             ),
             0,
             None,
