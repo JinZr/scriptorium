@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pytest
 
+from scriptorium.config import ManuscriptConfig
 from scriptorium.manuscript import QUANTITY_COMMANDS, ManuscriptManager
 from scriptorium.schemas import DEFAULT_EVIDENCE_ANCHOR_CONTRACT
 
@@ -320,3 +321,44 @@ def test_document_state_follows_inputs_in_processing_order(tmp_path):
         ("body.tex", "quantity", r"0.5\%"),
         ("paper.tex", "quantity", "1.25 eV"),
     ]
+
+
+def test_primitive_skips_definitions_and_tags_are_not_quantities_and_siunitx_angles_are(tmp_path):
+    body = (
+        "\\hskip 1.5cm\\vskip 2.5mm plus 1fil\\kern-0.5em\n"
+        "\\def\\arraystretch{1.5}\n"
+        "\\begin{equation}E=mc^2\\tag{2.1}\\end{equation}\n"
+        "\\ang{30} and \\complexqty{1+2i}{\\ohm} with \\complexnum{3-4i}.\n"
+        "\\(1.5\\)~eV and \\[2.5\\]~eV but \\(3.5\\) eV prose.\n"
+        "\\begin{tabulary}{\\linewidth}{LC}\nGap & 0.5 \\\\\n\\end{tabulary}\n"
+    )
+    quantities = _quantities(tmp_path, {"main.tex": "\\begin{document}\n" + body + "\\end{document}\n"})
+    assert [(command, value) for _, command, value in quantities] == [
+        ("ang", "{30}"),
+        ("complexqty", "{1+2i}{\\ohm}"),
+        ("complexnum", "{3-4i}"),
+        ("quantity", "1.5\\)~eV"),
+        ("quantity", "2.5\\]~eV"),
+        ("quantity", "3.5"),
+        ("quantity", "0.5"),
+    ]
+    manager = ManuscriptManager(tmp_path)
+    navigation = json.loads(manager.create_navigation(tmp_path, manager.scan_sources(tmp_path, "main.tex")))
+    assert "tabulary" in {entry["command"] for entry in navigation["entries"]}
+
+
+def test_configured_entrypoints_stay_document_roots_when_another_source_inputs_them(tmp_path):
+    (tmp_path / "main.tex").write_text("\\begin{document}\nGap 1.25 eV.\n\\end{document}\n\\input{supplement}\n")
+    (tmp_path / "supplement.tex").write_text("\\begin{document}\nLoss 0.5\\%.\n\\end{document}\n")
+    manager = ManuscriptManager(tmp_path)
+    config = ManuscriptConfig(main="main.tex", engine="pdflatex", supplements=("./supplement.tex",))
+    sources = manager.scan_project_sources(tmp_path, config)
+    navigation = json.loads(manager.create_navigation(tmp_path, sources, config.entrypoints))
+    assert [
+        (entry["source_path"], entry["value"]) for entry in navigation["entries"] if entry["command"] == "quantity"
+    ] == [
+        ("main.tex", "1.25 eV"),
+        ("supplement.tex", "0.5\\%"),
+    ]
+    unconfigured = json.loads(manager.create_navigation(tmp_path, sources))
+    assert [entry["source_path"] for entry in unconfigured["entries"] if entry["command"] == "quantity"] == ["main.tex"]

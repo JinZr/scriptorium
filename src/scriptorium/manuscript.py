@@ -36,7 +36,16 @@ ADDBIB_PATTERN = re.compile(r"\\addbibresource(?:\[[^\]]*\])?\s*\{([^}]+)\}")
 GRAPHICS_PATTERN = re.compile(r"\\includegraphics\*?(?:\s*\[[^\]]*\])?\s*\{([^}]+)\}")
 GRAPHICSPATH_PATTERN = re.compile(r"\\graphicspath(?![A-Za-z@])\s*(\{(?:\s*\{[^{}]*\}\s*)*\})?")
 GRAPHICS_EXTENSIONS = ("", ".pdf", ".png", ".jpg", ".jpeg", ".eps")
-TABLE_ENVIRONMENTS = ("table", "table*", "tabular", "tabular*", "tabularx", "longtable", "sidewaystable")
+TABLE_ENVIRONMENTS = (
+    "table",
+    "table*",
+    "tabular",
+    "tabular*",
+    "tabularx",
+    "tabulary",
+    "longtable",
+    "sidewaystable",
+)
 EQUATION_ENVIRONMENTS = (
     "equation",
     "equation*",
@@ -68,6 +77,9 @@ QUANTITY_COMMAND_ARGUMENTS = {
     "numrange": 2,
     "SIrange": 3,
     "qtyrange": 3,
+    "ang": 1,
+    "complexnum": 1,
+    "complexqty": 2,
 }
 QUANTITY_COMMANDS = tuple(QUANTITY_COMMAND_ARGUMENTS)
 NAVIGATION_COMMAND_PATTERN = re.compile(
@@ -86,8 +98,8 @@ NON_QUANTITY_ARGUMENT_PATTERN = re.compile(
     r"\\(label|ref|eqref|pageref|autoref|cref|Cref|cite[a-zA-Z]*|[a-z]*cite|includegraphics|input|include|url|href|"
     r"vspace|hspace|vskip|hskip|setlength|addtolength|resizebox|scalebox|rule|setcounter|addtocounter|linespread|"
     r"fontsize|usepackage|documentclass|bibliographystyle|bibliography|addbibresource|graphicspath|newcommand|"
-    r"renewcommand|providecommand|definecolor|color|colorbox|begin|end|multicolumn|multirow|cline|specialrule|"
-    r"cmidrule|hypersetup|geometry|SetKw[A-Za-z]*)\*?(?![A-Za-z@])"
+    r"renewcommand|providecommand|def|gdef|edef|xdef|definecolor|color|colorbox|begin|end|multicolumn|multirow|"
+    r"cline|specialrule|cmidrule|hypersetup|geometry|tag|kern|mskip|mkern|SetKw[A-Za-z]*)\*?(?![A-Za-z@])"
 )
 # Only the leading brace groups of these commands are settings; later groups hold typeset content.
 NON_QUANTITY_GROUP_LIMITS = {
@@ -103,6 +115,16 @@ NON_QUANTITY_GROUP_LIMITS = {
     "newcommand": 2,
     "renewcommand": 2,
     "providecommand": 2,
+    "def": 2,
+    "gdef": 2,
+    "edef": 2,
+    "xdef": 2,
+    "tag": 1,
+    "hskip": 0,
+    "vskip": 0,
+    "kern": 0,
+    "mskip": 0,
+    "mkern": 0,
     "setlength": 2,
     "addtolength": 2,
     "setcounter": 2,
@@ -111,6 +133,16 @@ NON_QUANTITY_GROUP_LIMITS = {
     "rule": 2,
     "fontsize": 2,
 }
+DEFINITION_COMMANDS = frozenset({"newcommand", "renewcommand", "providecommand", "def", "gdef", "edef", "xdef"})
+# An unbraced defined name, as in \def\arraystretch{1.5}, with any parameter text before the body.
+DEFINITION_NAME_PATTERN = re.compile(r"[ \t]*(?:\n[ \t]*)?\\(?:[A-Za-z@]+|.)(?:[^{}\n]*?(?=\{))?")
+# Primitive skips and kerns take an unbraced dimension, as in \hskip 1.5cm plus 1fil.
+SKIP_COMMANDS = frozenset({"hskip", "vskip", "kern", "mskip", "mkern"})
+TEX_UNIT = r"(?:true\s*)?(?:pt|pc|in|bp|cm|mm|dd|cc|sp|em|ex|mu|px)"
+TEX_DIMENSION = r"[-+]?\s*(?:\d+(?:[.,]\d*)?|[.,]\d+)\s*"
+SKIP_DIMENSION_PATTERN = re.compile(
+    r"\s*" + TEX_DIMENSION + TEX_UNIT + r"(?:\s*(?:plus|minus)\s*" + TEX_DIMENSION + r"(?:fil{1,3}|" + TEX_UNIT + "))*"
+)
 # A row break's optional spacing, as in \\[1.5mm], is a layout length rather than a reported value.
 ROW_SPACING_PATTERN = re.compile(r"(?<!\\)\\\\\*?[ \t]*\[[^\]\n]*\]")
 # Mandatory groups an environment takes after its name; other environments may open their body with a group.
@@ -153,10 +185,10 @@ UNIT_WORD = r"[A-Za-zÅµμ]{1,10}" + UNIT_POWER
 UNIT_SYNTAX = (
     r"(?:\\(?:mathrm|text|textrm|rm|mbox|unit|si)" + UNIT_ARGUMENT + "|" + UNIT_WORD + "(?:/" + UNIT_WORD + ")?)"
 )
-# Past closing math, only a tie or thin space, or a math-mode or siunitx unit command, continues the value;
-# a word after a plain space is prose, as in "$p=0.05$ threshold". A unit never starts on the next line.
+# Past closing math ($, $$, \) or \]), only a tie or thin space, or a math-mode or siunitx unit command, continues
+# the value; a word after a plain space is prose, as in "$p=0.05$ threshold". A unit never starts on the next line.
 QUANTITY_UNIT_PATTERN = re.compile(
-    r"(?:\$(?:(?:~|\\[,;:])[ \t]?"
+    r"(?:(?:\$\$?|\\[)\]])(?:(?:~|\\[,;:])[ \t]?"
     + UNIT_SYNTAX
     + "|"
     + UNIT_SPACE
@@ -352,11 +384,20 @@ def _balanced_group_end(text: str, position: int) -> int | None:
     return end if depth == 0 else None
 
 
+def _unbraced_argument_end(text: str, name: str, position: int) -> int:
+    """Return the end of a definition's unbraced name or a primitive skip's dimension, or position if none."""
+    pattern = DEFINITION_NAME_PATTERN if name in DEFINITION_COMMANDS else SKIP_DIMENSION_PATTERN
+    argument = pattern.match(text, position) if name in DEFINITION_COMMANDS | SKIP_COMMANDS else None
+    return argument.end() if argument else position
+
+
 def _command_argument_spans(text: str) -> Iterator[tuple[int, int]]:
     for match in NON_QUANTITY_ARGUMENT_PATTERN.finditer(text):
-        end = match.end()
-        start = end
+        start = match.end()
+        end = _unbraced_argument_end(text, match.group(1), start)
         braces = NON_QUANTITY_GROUP_LIMITS.get(match.group(1))
+        if end > start and match.group(1) in DEFINITION_COMMANDS:
+            braces -= 1
         if match.group(1) == "begin" and (name := ENVIRONMENT_NAME_PATTERN.match(text, end)):
             braces = 1 + ENVIRONMENT_ARGUMENT_GROUPS.get(name.group(1).strip(), 0)
         # Optional bracket arguments after the last setting group, as in \scalebox{x}[y], are settings too.
@@ -588,7 +629,9 @@ class ManuscriptManager:
                     fallback=bibliography_fallback if kind in {"bibliography", "addbibresource"} else None,
                 )
 
-    def create_navigation(self, snapshot: Path, sources: tuple[SourceFile, ...]) -> str:
+    def create_navigation(
+        self, snapshot: Path, sources: tuple[SourceFile, ...], entrypoints: tuple[str, ...] = ()
+    ) -> str:
         entries = []
         texts = {
             source.path: (snapshot / source.path).read_text(encoding="utf-8")
@@ -596,7 +639,7 @@ class ManuscriptManager:
             if Path(source.path).suffix.lower() in {".tex", ".ltx"}
         }
         masks = {path: self._dependency_text(text, preserve_positions=True) for path, text in texts.items()}
-        bodies = self._document_bodies(snapshot, masks)
+        bodies = self._document_bodies(snapshot, masks, entrypoints)
         for path, text in texts.items():
             spans = self._navigation_spans(text, masks[path], bodies[path])
             breaks = [match.start() for match in re.finditer("\n", text)]
@@ -628,7 +671,9 @@ class ManuscriptManager:
             + "\n"
         )
 
-    def _document_bodies(self, snapshot: Path, masks: dict[str, str]) -> dict[str, tuple[int, int] | None]:
+    def _document_bodies(
+        self, snapshot: Path, masks: dict[str, str], entrypoints: tuple[str, ...] = ()
+    ) -> dict[str, tuple[int, int] | None]:
         """Follow inputs in processing order and bound each source by the document body it reaches, if any."""
         root = snapshot.resolve()
         events: dict[str, list[tuple[int, str, str]]] = {}
@@ -652,7 +697,9 @@ class ManuscriptManager:
         lengths = {path: len(masked) for path, masked in masks.items()}
         bounds: dict[str, tuple[int, int] | None] = {}
         reached: set[str] = set()
-        for path in sorted(set(masks) - included):
+        # A configured entrypoint is typeset on its own even when another source also inputs it.
+        configured = {self._normalized_relative(root, Path(entry)).as_posix() for entry in entrypoints}
+        for path in sorted((set(masks) - included) | (configured & set(masks))):
             tree = _input_closure(path, events)
             reached |= tree
             # A source tree without \begin{document} is a fragment that is typeset as a whole.
@@ -734,7 +781,7 @@ class ManuscriptManager:
             ):
                 continue
             unit = QUANTITY_UNIT_PATTERN.match(text, end)
-            word = unit.group(0).strip("$~\\,;: \t\r\n") if unit else ""
+            word = unit.group(0).strip("$)]~\\,;: \t\r\n") if unit else ""
             # One-letter symbols are case-sensitive: "1.5 A" reports amperes, while "1.5 a" continues the prose.
             if (
                 not match.group("percent")

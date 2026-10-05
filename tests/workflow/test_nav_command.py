@@ -164,8 +164,8 @@ def test_tables_equations_and_quantities_are_navigable_groups(tmp_path):
 def test_indexes_without_table_equation_or_quantity_entries_reject_those_filters(tmp_path, monkeypatch):
     create_navigation = ManuscriptManager.create_navigation
 
-    def predating_navigation(self, root, sources):
-        index = json.loads(create_navigation(self, root, sources))
+    def predating_navigation(self, root, sources, entrypoints=()):
+        index = json.loads(create_navigation(self, root, sources, entrypoints))
         del index["commands"]
         index["entries"] = [entry for entry in index["entries"] if entry["command"] in {"section", "label"}]
         return json.dumps(index, ensure_ascii=False, sort_keys=True, indent=2) + "\n"

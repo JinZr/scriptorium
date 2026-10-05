@@ -116,7 +116,7 @@ class Armarius:
             profile,
             sources,
             (snapshot / "scriptorium.toml").read_text(encoding="utf-8"),
-            self.manuscript.create_navigation(snapshot, sources),
+            self.manuscript.create_navigation(snapshot, sources, project.manuscript.entrypoints),
         )
         run = Run(
             id=run_id,
@@ -708,7 +708,7 @@ class Armarius:
             )
             patched_sources = self.manuscript.scan_project_sources(patched, self._manuscript_config(run))
             navigation = (
-                self.manuscript.create_navigation(patched, patched_sources)
+                self.manuscript.create_navigation(patched, patched_sources, self._manuscript_config(run).entrypoints)
                 if "navigation" in run.frozen_config
                 else None
             )
