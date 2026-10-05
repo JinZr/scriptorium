@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from decimal import Decimal
 from enum import Enum
+import re
 import sys
 from typing import Annotated, Any, Literal
 
@@ -24,15 +25,37 @@ class _EvidenceRule(StrictModel):
     source_path: str | None = None
 
 
+UNIVERSAL_LINE_TERMINATORS = ("\r\n", "\r", "\n")
+_LINE_BREAK = re.compile(r"\r\n|\r|\n")
+
+
 class EvidenceAnchorContract(StrictModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     source_line: _EvidenceRule
     pdf_page: _EvidenceRule
     revision_edit: _EvidenceRule
+    # Contracts frozen before task retrieval and validation shared a line definition omit this field; their runs
+    # keep str.splitlines(), which also breaks at form feeds and Unicode line separators.
+    line_terminators: tuple[str, ...] | None = None
+
+    def split_lines(self, text: str, *, keepends: bool = False) -> list[str]:
+        """Split source text into the numbered lines this frozen contract anchors."""
+        if self.line_terminators is None:
+            return text.splitlines(keepends)
+        lines = []
+        start = 0
+        for match in _LINE_BREAK.finditer(text):
+            lines.append(text[start : match.end() if keepends else match.start()])
+            start = match.end()
+        if start < len(text):
+            lines.append(text[start:])
+        return lines
 
     @model_validator(mode="after")
     def validate_shapes(self) -> "EvidenceAnchorContract":
+        if self.line_terminators is not None and self.line_terminators != UNIVERSAL_LINE_TERMINATORS:
+            raise ValueError("source line terminators do not match the local parser")
         if (
             self.source_line.required_fields
             != (
@@ -103,6 +126,7 @@ DEFAULT_EVIDENCE_ANCHOR_CONTRACT = EvidenceAnchorContract(
             "terminator or without that terminator"
         ),
     ),
+    line_terminators=UNIVERSAL_LINE_TERMINATORS,
 )
 
 
