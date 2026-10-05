@@ -16,6 +16,11 @@ CLAIM_CHECK = {
     "evidence": [{"source_path": "manuscript.pdf", "page": 1}],
     "critical_question": "Does the evidence support the result?",
     "countercheck": "Checked the rendered manuscript.",
+    "claim_anchor": {"source_path": "manuscript.pdf", "page": 1},
+    "stated_scope": "As stated in the manuscript.",
+    "check_type": "design_and_analysis",
+    "question_answer": "yes",
+    "exceptions": [],
     "assessment": "supported",
     "finding_indices": [],
 }

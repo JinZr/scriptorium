@@ -10,6 +10,7 @@ from scriptorium.schemas import (
     Evidence,
     EvidenceAnchorContract,
     EvidenceAnchorMap,
+    JudgedClaimCheck,
     ReviewOutput,
     ReviewScopeArea,
     VisualTranscriptionOutput,
@@ -234,3 +235,70 @@ def test_visual_transcription_schema_accepts_empty_page_text() -> None:
 
     assert output.pages[0].text == ""
     assert output_schema("visual_transcription")["additionalProperties"] is False
+
+
+def _judged_check(**changes):
+    page = {"source_path": "manuscript.pdf", "page": 1}
+    check = {
+        "claim": "The method is accurate to 0.1 eV.",
+        "evidence": [page],
+        "critical_question": "Do the tabulated errors stay within 0.1 eV?",
+        "countercheck": "Recomputed the error column.",
+        "assessment": "supported",
+        "finding_indices": [],
+        "claim_anchor": page,
+        "stated_scope": "All tabulated molecules.",
+        "check_type": "reporting_consistency",
+        "question_answer": "yes",
+        "exceptions": [],
+    }
+    return {**check, **changes}
+
+
+RECOMPUTATION = {
+    "inputs": ["E_ref = -1.20 eV (Table 1)", "E_calc = -1.12 eV (Table 1)"],
+    "calculation": "|E_calc - E_ref|",
+    "result": "0.08 eV",
+    "reported": "below 0.1 eV",
+    "outcome": "matches",
+}
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {},
+        {"assessment": "unresolved", "question_answer": "partly", "exceptions": ["One molecule exceeds it."]},
+        {"assessment": "unresolved", "question_answer": "not_checkable"},
+        {"check_type": "recomputation", "recomputation": RECOMPUTATION},
+        {"assessment": "finding", "finding_indices": [0], "question_answer": "no"},
+    ],
+)
+def test_claim_judgments_accept_consistent_answers(changes) -> None:
+    check = JudgedClaimCheck.model_validate(_judged_check(**changes))
+    assert check.assessment == changes.get("assessment", "supported")
+
+
+@pytest.mark.parametrize(
+    ("changes", "message"),
+    [
+        ({"question_answer": "partly"}, '"supported" requires question_answer "yes"'),
+        ({"exceptions": ["One molecule exceeds it."]}, '"supported" requires question_answer "yes"'),
+        ({"assessment": "finding", "finding_indices": [0], "question_answer": "not_checkable"}, "not_checkable"),
+        ({"check_type": "recomputation"}, "recomputation is recorded exactly"),
+        ({"recomputation": RECOMPUTATION}, "recomputation is recorded exactly"),
+        (
+            {"check_type": "recomputation", "recomputation": {**RECOMPUTATION, "outcome": "differs"}},
+            "recomputation that differs",
+        ),
+    ],
+)
+def test_claim_judgments_reject_contradictory_answers(changes, message) -> None:
+    with pytest.raises(ValidationError, match=message):
+        JudgedClaimCheck.model_validate(_judged_check(**changes))
+
+
+def test_scientific_review_schema_requires_claim_judgments() -> None:
+    check = output_schema("scientific_review")["$defs"]["JudgedClaimCheck"]
+    assert {"claim_anchor", "stated_scope", "check_type", "question_answer", "exceptions"} <= set(check["required"])
+    assert "recomputation" not in check["required"]

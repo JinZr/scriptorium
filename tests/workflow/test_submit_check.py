@@ -22,6 +22,11 @@ def _review_output(review, *, findings=None):
                 "evidence": [{"source_path": "manuscript.pdf", "page": 1}],
                 "critical_question": "Does the reported result support the conclusion?",
                 "countercheck": "Checked the frozen manuscript page.",
+                "claim_anchor": {"source_path": "manuscript.pdf", "page": 1},
+                "stated_scope": "As stated in the manuscript.",
+                "check_type": "design_and_analysis",
+                "question_answer": "no" if findings else "yes",
+                "exceptions": [],
                 "assessment": "finding" if findings else "supported",
                 "finding_indices": list(range(len(findings))),
             }

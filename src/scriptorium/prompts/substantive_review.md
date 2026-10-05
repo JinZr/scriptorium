@@ -32,7 +32,18 @@ numbers supports that narrow consistency question, not a broader scientific conc
 evidence chain remains unexamined, name its frozen source or page in scope.outstanding when present and explain
 the gap in scope.limitations rather than declaring the broader claim supported.
 
-Before submitting, revisit each drafted claim, critical_question, countercheck, and assessment together:
+Record each check's judgment explicitly. Put the exact location of the authors' claim in claim_anchor and its
+conditions and qualifications in stated_scope; keep evidence for the material that decides the assessment. Set
+check_type to what the countercheck examined. Set question_answer to whether the countercheck shows the claim holds
+at its stated scope, and list in exceptions every case, condition, or value within that scope where it fails or is
+not shown. "supported" requires question_answer "yes" and no exceptions; "partly" or "no" leads to "finding" or
+"unresolved", and "not_checkable" to "unresolved". When you recompute a reported value, use check_type
+"recomputation" and record its inputs, calculation, result, the reported value, and whether they match; a
+recomputation that differs cannot support the claim. These fields record your judgment; they do not replace the
+countercheck.
+
+Before submitting, revisit each drafted claim, stated_scope, critical_question, countercheck, question_answer,
+exceptions, and assessment together:
 
 - Check that population, conditions, range, threshold, and certainty agree across the entry. If a countercheck
   identifies an exception, carry it into the assessment and conclusion. An exception cannot support an unqualified
