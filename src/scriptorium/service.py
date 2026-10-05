@@ -40,7 +40,12 @@ from .domain import (
 )
 from .errors import ConfigurationError, InfrastructureError, NotFoundError, StateError
 from .manuscript import ManuscriptManager, page_text, render_page_view
-from .schemas import EvidenceAnchorContract, ScientificReviewOutput, ScopedReviewOutput
+from .schemas import (
+    EvidenceAnchorContract,
+    InventoriedScientificReviewOutput,
+    ScientificReviewOutput,
+    ScopedReviewOutput,
+)
 from .storage import ConflictError, Database, NotFoundError as StorageNotFoundError, StorageError
 from .tool_output import (
     REPORT_PARTS,
@@ -1198,6 +1203,16 @@ class ScriptoriumService:
                                             check.model_dump(mode="json", exclude_none=True)
                                             for check in output.claim_checks
                                         ],
+                                        **(
+                                            {
+                                                "claim_inventory": [
+                                                    entry.model_dump(mode="json", exclude_none=True)
+                                                    for entry in output.claim_inventory
+                                                ]
+                                            }
+                                            if isinstance(output, InventoriedScientificReviewOutput)
+                                            else {}
+                                        ),
                                     }
                                 )
                     review_scopes.append(
@@ -1482,30 +1497,40 @@ class ScriptoriumService:
             lines.append(f"- `{item['attempt_id']}`: {len(item['claim_checks'])} checks")
             for index, finding in enumerate(item["submitted_findings"]):
                 lines.append(f"  - submitted finding [{index}]: {finding['severity']} — {finding['title']}")
-            for check in item["claim_checks"]:
+            for entry in item.get("claim_inventory", []):
+                location = ScriptoriumService._markdown_location(entry["claim_anchor"])
+                status = (
+                    f"claim checks {entry['check_indices']}"
+                    if entry["check_indices"]
+                    else f"not checked: {entry['not_checked_reason']}"
+                )
                 lines.append(
-                    f"  - {check['claim']} — {check['assessment']}; question: {check['critical_question']}; "
+                    f"  - inventoried {entry['prominence']} claim at `{location}`: {entry['claim']} — {status}"
+                )
+            for index, check in enumerate(item["claim_checks"]):
+                lines.append(
+                    f"  - [{index}] {check['claim']} — {check['assessment']}; question: {check['critical_question']}; "
                     f"countercheck: {check['countercheck']}; submitted finding indices: {check['finding_indices']}"
                 )
                 lines.extend(ScriptoriumService._markdown_claim_judgment(check))
                 for evidence in check["evidence"]:
-                    location = evidence["source_path"]
-                    if "page" in evidence:
-                        location += f":page {evidence['page']}"
-                    else:
-                        location += f":{evidence['start_line']}-{evidence['end_line']}"
-                    lines.append(f"    - evidence: `{location}`")
+                    lines.append(f"    - evidence: `{ScriptoriumService._markdown_location(evidence)}`")
         lines.append("Claim checks are reviewer declarations; valid anchors do not establish scientific correctness.")
         return lines
+
+    @staticmethod
+    def _markdown_location(anchor: dict[str, Any]) -> str:
+        if "page" in anchor:
+            return f"{anchor['source_path']}:page {anchor['page']}"
+        return f"{anchor['source_path']}:{anchor['start_line']}-{anchor['end_line']}"
 
     @staticmethod
     def _markdown_claim_judgment(check: dict[str, Any]) -> list[str]:
         if "question_answer" not in check:
             return []
-        anchor = check["claim_anchor"]
-        location = f"page {anchor['page']}" if "page" in anchor else f"{anchor['start_line']}-{anchor['end_line']}"
+        location = ScriptoriumService._markdown_location(check["claim_anchor"])
         lines = [
-            f"    - claim at `{anchor['source_path']}:{location}`; stated scope: {check['stated_scope']}",
+            f"    - claim at `{location}`; stated scope: {check['stated_scope']}",
             f"    - {check['check_type']}; answer: {check['question_answer']}",
         ]
         lines.extend(f"    - exception: {exception}" for exception in check["exceptions"])

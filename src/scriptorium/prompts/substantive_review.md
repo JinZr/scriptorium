@@ -27,6 +27,14 @@ the zero-based indices of its entries in findings; the other assessments use an 
 in at least one claim check. A partial review may submit an empty claim_checks list; a complete review must include
 the central claims it assessed.
 
+List the manuscript's central claims in claim_inventory before checking them: each headline claim the authors
+state in the abstract, stated contributions, or conclusions, and the supporting claims those headline claims depend
+on. Anchor each entry where the authors state it. Link each entry to the zero-based indices of the claim_checks that
+assess it; every claim check must assess an inventoried claim. When this submission does not check a claim, give
+not_checked_reason instead of indices. A complete review must check every inventoried headline claim, even when the
+check can only conclude "unresolved". In a continuation, list the claims this submission assesses and those still
+unchecked; claims checked in an earlier accepted attempt need not be repeated.
+
 Phrase each critical question so the reported countercheck can answer it. A check that only confirms repeated
 numbers supports that narrow consistency question, not a broader scientific conclusion. If a material link in the
 evidence chain remains unexamined, name its frozen source or page in scope.outstanding when present and explain

@@ -135,6 +135,14 @@ def _complete_reviews(service: ScriptoriumService, run_id: str, *, skip: AgentRo
                     "finding_indices": [0],
                 }
             ]
+            output["claim_inventory"] = [
+                {
+                    "claim": "The reported result needs review.",
+                    "claim_anchor": {"source_path": "manuscript.pdf", "page": 1},
+                    "prominence": "headline",
+                    "check_indices": [0],
+                }
+            ]
         receipt = asyncio.run(service.submit_task(claim["attempt"].id, claim["input_digest"], json.dumps(output)))
         assert receipt["attempt"].status.value == "completed"
 

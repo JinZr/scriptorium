@@ -49,6 +49,7 @@ from .schemas import (
     EvidenceAnchorContract,
     EvidenceAnchorMap,
     ExactEdit,
+    InventoriedScientificReviewOutput,
     JudgedClaimCheck,
     JudgedScientificReviewOutput,
     ReviewOutput,
@@ -999,12 +1000,11 @@ class Armarius:
 
     def _output_model_for_schema(self, run: Run, schema_kind: str, schema: dict[str, Any]) -> type[StrictModel]:
         if schema_kind == "scientific_review":
-            # Runs frozen before claim-check judgments keep the claim-check shape they were given.
-            return (
-                JudgedScientificReviewOutput
-                if "JudgedClaimCheck" in schema.get("$defs", {})
-                else ScientificReviewOutput
-            )
+            # Runs frozen before claim-check judgments or the claim inventory keep the shape they were given.
+            definitions = schema.get("$defs", {})
+            if "InventoriedClaim" in definitions:
+                return InventoriedScientificReviewOutput
+            return JudgedScientificReviewOutput if "JudgedClaimCheck" in definitions else ScientificReviewOutput
         if schema_kind != "review":
             return SCHEMA_MODELS[schema_kind]
         properties = schema.get("properties", {})
@@ -1231,6 +1231,10 @@ class Armarius:
             if isinstance(prior_output, ScientificReviewOutput):
                 context["claim_checks"] = [
                     check.model_dump(mode="json", exclude_none=True) for check in prior_output.claim_checks
+                ]
+            if isinstance(prior_output, InventoriedScientificReviewOutput):
+                context["claim_inventory"] = [
+                    entry.model_dump(mode="json", exclude_none=True) for entry in prior_output.claim_inventory
                 ]
             prompt_digest = self._record_text(
                 self._load_prompt_artifact(prompt_digest)
@@ -1567,6 +1571,18 @@ class Armarius:
                             contract=contract,
                         )
                     )
+        if isinstance(output, InventoriedScientificReviewOutput):
+            for entry_index, entry in enumerate(output.claim_inventory):
+                issues.extend(
+                    self._validate_evidence(
+                        entry.claim_anchor,
+                        source_index,
+                        anchor_map,
+                        source_root,
+                        f"/claim_inventory/{entry_index}/claim_anchor",
+                        contract=contract,
+                    )
+                )
         if isinstance(output, ScopedReviewOutput):
             for group in ("checked", "outstanding"):
                 for index, area in enumerate(getattr(output.scope, group)):

@@ -4,7 +4,7 @@ import pytest
 
 from scriptorium.domain import AgentRole, AttemptStatus, RunStatus
 import scriptorium.schemas
-from scriptorium.schemas import ScientificReviewOutput
+from scriptorium.schemas import JudgedScientificReviewOutput, ScientificReviewOutput
 from scriptorium.service import ScriptoriumService
 
 from ._support import PdfBuildingManuscriptManager, claim, make_repository, review_finding, submit
@@ -246,6 +246,94 @@ def test_runs_frozen_before_claim_judgments_keep_their_claim_check_shape(tmp_pat
         assert "stated scope" not in markdown
 
 
+def test_claim_inventory_anchor_is_validated_and_rendered(tmp_path):
+    repo = make_repository(tmp_path, roles=("substantive_review",))
+    with ScriptoriumService(repo, manuscript_manager=PdfBuildingManuscriptManager(repo)) as service:
+        run = asyncio.run(service.start_run("HEAD", "quick"))["run"]
+        review = claim(service, run.id, AgentRole.SUBSTANTIVE_REVIEW)
+        assert "claim_inventory" in review["schema"]["required"]
+        assert "claim_inventory" in review["prompt"]
+        anchor = review_finding(review)["evidence"][0]
+        headline = {
+            "claim": "The result is clear.",
+            "claim_anchor": anchor,
+            "prominence": "headline",
+            "check_indices": [0],
+        }
+        unchecked = {
+            "claim": "The result generalizes.",
+            "claim_anchor": {"source_path": "manuscript.pdf", "page": 1},
+            "prominence": "supporting",
+            "check_indices": [],
+            "not_checked_reason": "The general case is outside the frozen bundle.",
+        }
+        output = {"summary": "Checked the result.", "findings": [], "claim_checks": [_claim_check()]}
+        bad = {**headline, "claim_anchor": {**anchor, "quoted_text": "This text is not in the manuscript."}}
+        rejected = submit(service, review, {**output, "claim_inventory": [bad, unchecked]})
+        assert rejected["attempt"].status == AttemptStatus.FAILED
+        assert any("/claim_inventory/0/claim_anchor" in str(issue) for issue in rejected["validation_report"]["issues"])
+        asyncio.run(service.retry_task(run.id, review["task"].id))
+        review = claim(service, run.id, AgentRole.SUBSTANTIVE_REVIEW, session="second")
+        receipt = submit(service, review, {**output, "claim_inventory": [headline, unchecked]})
+        assert receipt["attempt"].status == AttemptStatus.COMPLETED
+        report = service.render_report(run.id, "json")
+        assert (
+            report["review_claim_checks"][0]["claim_inventory"][1]["not_checked_reason"]
+            == unchecked["not_checked_reason"]
+        )
+        markdown = service.render_report(run.id, "markdown")
+        assert "inventoried headline claim at `main.tex:3-3`: The result is clear. — claim checks [0]" in markdown
+        assert (
+            "inventoried supporting claim at `manuscript.pdf:page 1`: The result generalizes. — not checked: "
+            "The general case is outside the frozen bundle." in markdown
+        )
+        assert "  - [0] The manuscript reports a clear result. — supported" in markdown
+
+
+def test_complete_review_must_check_every_inventoried_headline_claim(tmp_path):
+    repo = make_repository(tmp_path, roles=("substantive_review",))
+    with ScriptoriumService(repo, manuscript_manager=PdfBuildingManuscriptManager(repo)) as service:
+        run = asyncio.run(service.start_run("HEAD", "quick"))["run"]
+        review = claim(service, run.id, AgentRole.SUBSTANTIVE_REVIEW)
+        page = {"source_path": "manuscript.pdf", "page": 1}
+        inventory = [
+            {"claim": "The result is clear.", "claim_anchor": page, "prominence": "headline", "check_indices": [0]},
+            {
+                "claim": "The result generalizes.",
+                "claim_anchor": page,
+                "prominence": "headline",
+                "check_indices": [],
+                "not_checked_reason": "Not reached yet.",
+            },
+        ]
+        receipt = submit(
+            service,
+            review,
+            {
+                "summary": "Checked one claim.",
+                "findings": [],
+                "claim_checks": [_claim_check()],
+                "claim_inventory": inventory,
+            },
+        )
+        assert receipt["attempt"].status == AttemptStatus.FAILED
+        assert "must check every inventoried headline claim" in str(receipt["validation_report"]["issues"])
+
+
+def test_runs_frozen_before_the_claim_inventory_accept_judged_checks_alone(tmp_path, monkeypatch):
+    repo = make_repository(tmp_path, roles=("substantive_review",))
+    with ScriptoriumService(repo, manuscript_manager=PdfBuildingManuscriptManager(repo)) as service:
+        with monkeypatch.context() as patch:
+            patch.setitem(scriptorium.schemas.SCHEMA_MODELS, "scientific_review", JudgedScientificReviewOutput)
+            run = asyncio.run(service.start_run("HEAD", "quick"))["run"]
+        review = claim(service, run.id, AgentRole.SUBSTANTIVE_REVIEW)
+        assert "claim_inventory" not in review["schema"]["properties"]
+        output = {"summary": "Checked the result.", "findings": [], "claim_checks": [_claim_check()]}
+        receipt = submit(service, review, output)
+        assert receipt["attempt"].status == AttemptStatus.COMPLETED
+        assert "claim_inventory" not in service.render_report(run.id, "json")["review_claim_checks"][0]
+
+
 def test_continuation_preserves_prior_claim_checks_and_accepts_new_checks(tmp_path):
     repo = make_repository(tmp_path, roles=("substantive_review",))
     with ScriptoriumService(repo, manuscript_manager=PdfBuildingManuscriptManager(repo)) as service:
@@ -267,6 +355,7 @@ def test_continuation_preserves_prior_claim_checks_and_accepts_new_checks(tmp_pa
         asyncio.run(service.continue_review(run.id, first["task"].id))
         second = claim(service, run.id, AgentRole.SUBSTANTIVE_REVIEW)
         assert "claim_checks" in second["prompt"]
+        assert '"claim_inventory":[{"check_indices":[0]' in second["prompt"]
         assert "except when a newly assessed claim check must link to an existing concern" in second["prompt"]
         assert second["attempt"].id != first["attempt"].id
         assert (

@@ -29,7 +29,15 @@ def test_review_scope_is_reported_separately_from_tool_returns(tmp_path):
             service.submit_task(
                 review["attempt"].id,
                 review["input_digest"],
-                json.dumps({"summary": "Reviewed source text.", "findings": [], "scope": scope, "claim_checks": []}),
+                json.dumps(
+                    {
+                        "summary": "Reviewed source text.",
+                        "findings": [],
+                        "scope": scope,
+                        "claim_checks": [],
+                        "claim_inventory": [],
+                    }
+                ),
             )
         )
         assert receipt["attempt"].status == AttemptStatus.COMPLETED
@@ -353,6 +361,7 @@ def test_finalized_scoped_run_keeps_prior_gate_result(tmp_path, monkeypatch, com
                             "summary": "Reviewed available material.",
                             "findings": [],
                             "claim_checks": [],
+                            "claim_inventory": [],
                             "scope": {
                                 "completion": completion,
                                 "checked": [],

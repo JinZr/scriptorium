@@ -338,6 +338,22 @@ class ScopedReviewOutput(ReviewOutput):
     scope: ReviewScope
 
 
+def _integral_indices(value: Any) -> Any:
+    if not isinstance(value, list):
+        return value
+    return [
+        (
+            int(index)
+            if isinstance(index, Decimal)
+            and index.is_finite()
+            and 0 <= index <= sys.maxsize
+            and index == index.to_integral_value()
+            else index
+        )
+        for index in value
+    ]
+
+
 class ClaimCheck(StrictModel):
     claim: str = Field(min_length=1)
     evidence: list[Evidence] = Field(min_length=1)
@@ -349,19 +365,7 @@ class ClaimCheck(StrictModel):
     @field_validator("finding_indices", mode="before")
     @classmethod
     def accept_integral_indices(cls, value: Any) -> Any:
-        if not isinstance(value, list):
-            return value
-        return [
-            (
-                int(index)
-                if isinstance(index, Decimal)
-                and index.is_finite()
-                and 0 <= index <= sys.maxsize
-                and index == index.to_integral_value()
-                else index
-            )
-            for index in value
-        ]
+        return _integral_indices(value)
 
 
 class ScientificReviewOutput(ScopedReviewOutput):
@@ -444,6 +448,56 @@ class JudgedClaimCheck(ClaimCheck):
 
 class JudgedScientificReviewOutput(ScientificReviewOutput):
     claim_checks: list[JudgedClaimCheck]
+
+
+class InventoriedClaim(StrictModel):
+    claim: str = Field(min_length=1, description="The central claim as the authors state it.")
+    claim_anchor: Evidence = Field(description="Where the authors state the claim, as an exact frozen anchor.")
+    prominence: Literal["headline", "supporting"] = Field(
+        description='"headline" for a claim in the abstract, stated contributions, or conclusions; "supporting" '
+        "for a claim the headline claims depend on."
+    )
+    check_indices: list[Annotated[int, Field(ge=0, strict=True)]] = Field(
+        description="Zero-based positions in this output's claim_checks that assess this claim."
+    )
+    not_checked_reason: str | None = Field(
+        default=None,
+        min_length=1,
+        description="Why this submission has no claim check for the claim; omit it when check_indices is not empty.",
+    )
+
+    @field_validator("check_indices", mode="before")
+    @classmethod
+    def accept_integral_indices(cls, value: Any) -> Any:
+        return _integral_indices(value)
+
+    @model_validator(mode="after")
+    def validate_status(self) -> "InventoriedClaim":
+        if bool(self.check_indices) == (self.not_checked_reason is not None):
+            raise ValueError("an inventoried claim lists check_indices or a not_checked_reason, not both or neither")
+        return self
+
+
+class InventoriedScientificReviewOutput(JudgedScientificReviewOutput):
+    claim_inventory: list[InventoriedClaim] = Field(
+        description="The central claims identified in the manuscript, each linked to its claim checks or left "
+        "unchecked with a reason."
+    )
+
+    @model_validator(mode="after")
+    def validate_claim_inventory(self) -> "InventoriedScientificReviewOutput":
+        listed: set[int] = set()
+        for entry in self.claim_inventory:
+            if any(index >= len(self.claim_checks) for index in entry.check_indices):
+                raise ValueError("an inventoried claim refers to an unknown claim check index")
+            listed.update(entry.check_indices)
+        if listed != set(range(len(self.claim_checks))):
+            raise ValueError("every claim check must assess an inventoried claim")
+        if self.scope.completion == "complete" and any(
+            entry.prominence == "headline" and not entry.check_indices for entry in self.claim_inventory
+        ):
+            raise ValueError("a complete substantive review must check every inventoried headline claim")
+        return self
 
 
 # Historical runs still deserialize these persisted outputs, but new runs never schedule this role.
@@ -529,7 +583,7 @@ class ValidationReport(StrictModel):
 
 SCHEMA_MODELS: dict[str, type[StrictModel]] = {
     "review": ScopedReviewOutput,
-    "scientific_review": JudgedScientificReviewOutput,
+    "scientific_review": InventoriedScientificReviewOutput,
     "visual_transcription": VisualTranscriptionOutput,
     "revision": RevisionOutput,
     "verification": VerificationOutput,

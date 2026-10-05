@@ -100,7 +100,15 @@ def test_benchmark_prepares_external_tasks_and_collects_validated_reviews(tmp_pa
                                             "assessment": "supported",
                                             "finding_indices": [],
                                         }
-                                    ]
+                                    ],
+                                    "claim_inventory": [
+                                        {
+                                            "claim": "The paper reports a result.",
+                                            "claim_anchor": {"source_path": "manuscript.pdf", "page": 1},
+                                            "prominence": "headline",
+                                            "check_indices": [0],
+                                        }
+                                    ],
                                 }
                                 if item["task"].role.value == "substantive_review"
                                 else {}
