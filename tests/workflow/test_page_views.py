@@ -1,5 +1,6 @@
 import asyncio
 import json
+from pathlib import Path
 import shlex
 
 import fitz
@@ -8,6 +9,7 @@ import pytest
 from scriptorium import cli, manuscript
 from scriptorium.artifacts import ArtifactStore
 from scriptorium.errors import ConfigurationError
+from scriptorium.manuscript import BuildResult
 from scriptorium.service import ScriptoriumService
 
 from ._support import PdfBuildingManuscriptManager, claim, make_repository, submit
@@ -64,6 +66,35 @@ def test_oversized_views_are_rejected_before_rendering(pages, monkeypatch):
         service.page_task(attempt_id, 1, scale=4.0)
     assert not (service.repo / ".scriptorium/runs" / run.id / "page-views").exists()
     assert service.page_task(attempt_id, 1, scale=4.0, crop=(0, 0, 0.25, 0.25))["view"]["scale"] == 4.0
+
+
+class RotatedPageManager(PdfBuildingManuscriptManager):
+    def build(self, workspace, manuscript):
+        # A portrait page marked at its unrotated top-left and displayed in landscape through /Rotate 90.
+        pdf_path = workspace / Path(manuscript.main).with_suffix(".pdf")
+        pdf_path.unlink(missing_ok=True)
+        with fitz.open() as document:
+            page = document.new_page(width=600, height=800)
+            page.draw_rect(fitz.Rect(0, 0, 100, 100), color=(0, 0, 0), fill=(0, 0, 0))
+            page.set_rotation(90)
+            document.save(pdf_path)
+        return BuildResult(pdf_path=pdf_path, log="fake rotated build succeeded")
+
+
+def test_crops_select_the_displayed_region_of_a_rotated_page(tmp_path):
+    repo = make_repository(tmp_path, roles=("copyedit",))
+    with ScriptoriumService(repo, manuscript_manager=RotatedPageManager(repo)) as service:
+        run = asyncio.run(service.start_run("HEAD", "quick"))["run"]
+        attempt_id = claim(service, run.id, "copyedit")["attempt"].id
+
+        def dark_pixels(crop):
+            image = fitz.Pixmap(service.page_task(attempt_id, 1, scale=1.0, crop=crop)["path"])
+            assert (image.width, image.height) == (160, 120)
+            return sum(image.pixel(x, y)[0] < 50 for x in range(image.width) for y in range(image.height))
+
+        # The mark shows at the top right of the displayed landscape page, so crops follow what a reader sees.
+        assert dark_pixels((0.8, 0, 1, 0.2)) == 100 * 100
+        assert dark_pixels((0, 0, 0.2, 0.2)) == 0
 
 
 def test_text_layer_is_bounded_and_not_counted_as_a_page_view(pages):
