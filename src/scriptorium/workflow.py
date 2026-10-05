@@ -1541,7 +1541,16 @@ class Armarius:
             prior, InventoriedScientificReviewOutput
         ):
             return []
+        # Each listed claim carries forward at most one prior claim, so two open claims on one page need two entries.
         listed = [(entry.claim_anchor, entry.prominence) for entry in output.claim_inventory]
+        dropped = []
+        for entry in prior.claim_inventory:
+            if entry.check_indices:
+                continue
+            if (entry.claim_anchor, entry.prominence) in listed:
+                listed.remove((entry.claim_anchor, entry.prominence))
+            else:
+                dropped.append(entry)
         return [
             self._issue(
                 "claim_inventory.unchecked_claim_dropped",
@@ -1551,8 +1560,7 @@ class Armarius:
                 expected=entry.model_dump(mode="json", exclude_none=True),
                 actual=None,
             )
-            for entry in prior.claim_inventory
-            if not entry.check_indices and (entry.claim_anchor, entry.prominence) not in listed
+            for entry in dropped
         ]
 
     def _validate_review_output(

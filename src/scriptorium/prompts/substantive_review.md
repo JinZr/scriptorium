@@ -30,10 +30,10 @@ the central claims it assessed.
 List the manuscript's central claims in claim_inventory before checking them: each headline claim the authors
 state in the abstract, stated contributions, or conclusions, and the supporting claims those headline claims depend
 on. Anchor each entry where the authors state it. Link each entry to the zero-based indices of the claim_checks that
-assess it; every claim check must assess an inventoried claim. When this submission does not check a claim, submit an
+assess it; each claim check must assess exactly one inventoried claim. When this submission does not check a claim, submit an
 empty check_indices list with a not_checked_reason. A complete review must check every inventoried headline claim, even when the
 check can only conclude "unresolved". In a continuation, list the claims this submission assesses and every claim the
-prior inventory left unchecked, with the same claim_anchor and prominence; claims checked in an earlier accepted
+prior inventory left unchecked, one entry per claim with the same claim_anchor and prominence; claims checked in an earlier accepted
 attempt need not be repeated.
 
 Phrase each critical question so the reported countercheck can answer it. A check that only confirms repeated

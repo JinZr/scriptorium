@@ -363,7 +363,14 @@ def test_claim_inventory_accepts_checked_and_explained_unchecked_claims() -> Non
 @pytest.mark.parametrize(
     ("inventory", "message"),
     [
-        ([], "every claim check must assess an inventoried claim"),
+        ([], "each claim check must assess exactly one inventoried claim"),
+        (
+            [
+                _inventory_entry(check_indices=[0], not_checked_reason=None, prominence="headline"),
+                _inventory_entry(check_indices=[0], not_checked_reason=None, prominence="headline"),
+            ],
+            "each claim check must assess exactly one inventoried claim",
+        ),
         ([_inventory_entry(check_indices=[1], not_checked_reason=None)], "unknown claim check index"),
         ([_inventory_entry(check_indices=[0])], "not both or neither"),
         (

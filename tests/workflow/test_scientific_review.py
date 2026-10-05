@@ -383,7 +383,7 @@ def test_continuation_must_keep_listing_claims_the_accepted_inventory_left_unche
         first = claim(service, run.id, AgentRole.SUBSTANTIVE_REVIEW)
         page = {"source_path": "manuscript.pdf", "page": 1}
         assert "empty check_indices list with a not_checked_reason" in first["prompt"]
-        assert "prior inventory left unchecked" in first["prompt"]
+        assert "prior inventory left unchecked, one entry per claim" in first["prompt"]
         checked = {
             "claim": "The result is clear.",
             "claim_anchor": page,
@@ -397,41 +397,42 @@ def test_continuation_must_keep_listing_claims_the_accepted_inventory_left_unche
             "check_indices": [],
             "not_checked_reason": "Not reached yet.",
         }
+        second_open = {**open_headline, "claim": "The result scales."}
         partial = {
             "summary": "Checked one headline claim.",
             "findings": [],
             "claim_checks": [_claim_check()],
-            "claim_inventory": [checked, open_headline],
+            "claim_inventory": [checked, open_headline, second_open],
             "scope": {
                 "completion": "partial",
                 "checked": [{"source_path": "main.tex", "start_line": 1, "end_line": 4}],
                 "outstanding": [{"source_path": "manuscript.pdf", "page": 1}],
-                "limitations": ["The general claim remains unchecked."],
+                "limitations": ["The general claims remain unchecked."],
             },
         }
         assert submit(service, first, partial)["attempt"].status == AttemptStatus.COMPLETED
         asyncio.run(service.continue_review(run.id, first["task"].id))
         second = claim(service, run.id, AgentRole.SUBSTANTIVE_REVIEW)
         complete = {"summary": "Checked the page.", "findings": [], "claim_checks": [_claim_check()]}
-        dropped = submit(service, second, {**complete, "claim_inventory": [{**checked, "claim": "Another claim."}]})
+        resumed = {**open_headline, "check_indices": [0]}
+        del resumed["not_checked_reason"]
+        # One entry on the shared anchor carries forward only one of the two open claims.
+        dropped = submit(service, second, {**complete, "claim_inventory": [resumed]})
         assert dropped["attempt"].status == AttemptStatus.FAILED
         issues = dropped["validation_report"]["issues"]
         assert [issue["code"] for issue in issues] == ["claim_inventory.unchecked_claim_dropped"]
-        assert issues[0]["expected"]["claim"] == "The result generalizes."
+        assert issues[0]["expected"]["claim"] == "The result scales."
         asyncio.run(service.retry_task(run.id, second["task"].id))
         third = claim(service, run.id, AgentRole.SUBSTANTIVE_REVIEW, session="third")
-        demoted = {**open_headline, "prominence": "supporting"}
-        assert (
-            submit(service, third, {**complete, "claim_inventory": [{**checked, "claim": "Another claim."}, demoted]})[
-                "attempt"
-            ].status
-            == AttemptStatus.FAILED
-        )
+        demoted = {**second_open, "prominence": "supporting"}
+        receipt = submit(service, third, {**complete, "claim_inventory": [resumed, demoted]})
+        assert receipt["attempt"].status == AttemptStatus.FAILED
         asyncio.run(service.retry_task(run.id, second["task"].id))
         fourth = claim(service, run.id, AgentRole.SUBSTANTIVE_REVIEW, session="fourth")
-        resumed = {**open_headline, "check_indices": [0]}
-        del resumed["not_checked_reason"]
-        receipt = submit(service, fourth, {**complete, "claim_inventory": [resumed]})
+        both = [resumed, {**resumed, "claim": "The result scales.", "check_indices": [1]}]
+        receipt = submit(
+            service, fourth, {**complete, "claim_checks": [_claim_check(), _claim_check()], "claim_inventory": both}
+        )
         assert receipt["attempt"].status == AttemptStatus.COMPLETED
 
 
