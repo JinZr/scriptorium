@@ -86,6 +86,15 @@ def test_filters_combine_and_continuations_keep_them(navigator):
     assert report["review_tool_access"][0]["returns"]["nav"] == len(events)
 
 
+def test_repeated_command_filters_collapse_in_continuations(navigator):
+    service, run, attempt_id, follow = navigator
+    pages = follow(["--json", "task", "nav", attempt_id, *["--command=heading"] * 400, "--limit", "1"])
+    assert [entry["value"] for page in pages for entry in page["entries"]] == ["Introduction", "Results", "Accuracy"]
+    assert all(page["next_command"].count("--command=heading") == 1 for page in pages[:-1])
+    events = [e.payload for e in service.database.list_events(run.id) if e.event_type == "tool.nav"]
+    assert {tuple(event["commands"]) for event in events} == {("heading",)}
+
+
 def test_long_values_are_truncated_and_bad_filters_rejected(navigator):
     service, _, attempt_id, _ = navigator
     (caption,) = service.nav_task(attempt_id, ["caption"])["entries"]
