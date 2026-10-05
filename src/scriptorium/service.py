@@ -776,13 +776,15 @@ class ScriptoriumService:
         crop: tuple[float, float, float, float] | None = None,
         text: bool = False,
         offset: int = 0,
+        text_digest: str | None = None,
     ):
-        _validate_page_view(scale, crop, text, offset)
+        _validate_page_view(scale, crop, text, offset, text_digest)
         with self._retrieval_operation(attempt_id, "task page"):
             attempt, task, bundle, files = self._readable_task(attempt_id)
             location, page = self._page_location(bundle, page_number, document)
             if text:
-                return self._page_text(attempt, task, bundle, files, location, page_number, document, offset)
+                request = {"number": page_number, "document": document, "offset": offset, "text_digest": text_digest}
+                return self._page_text(attempt, task, bundle, files, location, request)
             self.armarius._verify_retrieval_file(bundle.workspace, files, page.read_path)
             response = {**location, "path": str(bundle.workspace / page.read_path), "digest": page.page_digest}
             access = {**location, "read_path": page.read_path}
@@ -821,20 +823,40 @@ class ScriptoriumService:
     def _page_view(self, run_id: str, bundle, files, page: int, scale: float, crop) -> dict[str, Any]:
         pdf = self.armarius._verify_retrieval_file(bundle.workspace, files, "manuscript.pdf")
         view = {"scale": scale, "crop": list(crop) if crop is not None else None}
-        key = digest_json({"pdf_digest": files["manuscript.pdf"]["digest"], "page": page, **view})[:16]
-        destination = self.state_dir / "runs" / run_id / "page-views" / f"page-{page:04d}-{key}.png"
-        render_page_view(pdf, page, scale, crop, destination)
-        return {**view, "digest": ArtifactStore.digest_file(destination), "path": str(destination)}
+        views = self.state_dir / "runs" / run_id / "page-views"
+        pending = views / ".pending.png"
+        render_page_view(pdf, page, scale, crop, pending)
+        # A returned path keeps its bytes: views are named by digest, never overwritten, and bounded per run.
+        digest = ArtifactStore.digest_file(pending)
+        destination = views / f"{digest}.png"
+        if destination.exists():
+            pending.unlink()
+            return {**view, "digest": digest, "path": str(destination)}
+        kept = sum(path.stat().st_size for path in views.glob("*.png") if not path.name.startswith("."))
+        if kept + pending.stat().st_size > MAX_RUN_PAGE_VIEW_BYTES:
+            pending.unlink()
+            limit = MAX_RUN_PAGE_VIEW_BYTES // (1024 * 1024)
+            raise StateError(f"page views for this run reached the {limit} MiB limit; reuse an earlier view")
+        pending.replace(destination)
+        return {**view, "digest": digest, "path": str(destination)}
 
-    def _page_text(self, attempt, task, bundle, files, location, page_number, document, offset):
+    def _page_text(self, attempt, task, bundle, files, location, request):
         pdf = self.armarius._verify_retrieval_file(bundle.workspace, files, "manuscript.pdf")
         content = page_text(pdf, location["page"])
-        response = page_text_fragment(location, content, offset, attempt.id, page_number, document)
+        offset = request["offset"]
+        response = page_text_fragment(
+            location, content, offset, attempt.id, request["number"], request["document"], request["text_digest"]
+        )
         self._record_access(
             task.run_id,
             attempt.id,
             "page_text",
-            {**location, "start_offset": offset, "end_offset": offset + len(response["text"])},
+            {
+                **location,
+                "text_digest": response["text_digest"],
+                "start_offset": offset,
+                "end_offset": offset + len(response["text"]),
+            },
         )
         return response
 
@@ -1575,6 +1597,7 @@ class ScriptoriumService:
 _BUNDLE_METADATA = ("manifest.json", "navigation.json", "source-map.json")
 _CONTEXT_CHARS = 200
 _RETURN_KINDS = ("read", "search", "page", "nav", "page_text")
+MAX_RUN_PAGE_VIEW_BYTES = 512 * 1024 * 1024
 
 
 def _unknown_text_path(path: str, anchor_map) -> ConfigurationError:
@@ -1632,11 +1655,11 @@ def _navigation_entry(entry: dict[str, Any]) -> dict[str, Any]:
     return trimmed
 
 
-def _validate_page_view(scale, crop, text: bool, offset: int) -> None:
+def _validate_page_view(scale, crop, text: bool, offset: int, text_digest: str | None) -> None:
     if text and (scale is not None or crop is not None):
         raise ConfigurationError("--text cannot be combined with --scale or --crop")
-    if offset and not text:
-        raise ConfigurationError("--offset requires --text")
+    if (offset or text_digest is not None) and not text:
+        raise ConfigurationError("--offset and --text-digest require --text")
     if offset < 0:
         raise ConfigurationError("offset must not be negative")
     if scale is not None and not 0.5 <= scale <= 4.0:

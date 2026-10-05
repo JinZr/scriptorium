@@ -369,7 +369,13 @@ def _fit_lone_nav_entry(entry, build, path_filtered, source_indexes):
     return response
 
 
-def page_text_fragment(location, content, offset, attempt_id, number, document):
+def page_text_fragment(location, content, offset, attempt_id, number, document, expected_digest):
+    # Extraction is derived, not frozen, so continuations must come from the same text.
+    text_digest = digest_json(content)
+    if expected_digest is not None and expected_digest != text_digest:
+        raise ConfigurationError("page text layer changed; restart at offset 0 without --text-digest")
+    if offset != 0 and expected_digest is None:
+        raise ConfigurationError("a nonzero text offset requires --text-digest from the previous fragment")
     if not 0 <= offset <= len(content):
         raise ConfigurationError("offset is outside the page text layer")
 
@@ -378,11 +384,12 @@ def page_text_fragment(location, content, offset, attempt_id, number, document):
         arguments = ["page", attempt_id, "--number", number]
         if document is not None:
             arguments.append(f"--document={document}")
-        arguments.extend(["--text", "--offset", end])
+        arguments.extend(["--text", "--offset", end, "--text-digest", text_digest])
         return {
             **location,
             "text_layer": "pdf",
             "evidence": False,
+            "text_digest": text_digest,
             "offset": offset,
             "total_chars": len(content),
             "text": content[offset:end],
