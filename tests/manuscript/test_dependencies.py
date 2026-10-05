@@ -120,6 +120,20 @@ def test_input_command_boundary(tmp_path: Path) -> None:
     assert len(ManuscriptManager(tmp_path).scan_sources(tmp_path, "main.tex")) == 1
 
 
+def test_candidates_longer_than_the_path_limit_are_not_matches(tmp_path: Path) -> None:
+    # Joining a deep including directory with a long reference makes a candidate the filesystem cannot name.
+    chapter = Path(*[f"s{index:02d}-" + "d" * 240 for index in range(14)], "chapter.tex")
+    figure = Path(*[f"f{index:02d}-" + "d" * 240 for index in range(14)], "plot.png")
+    for path, text in ((chapter, f"\\includegraphics{{{figure.with_suffix('').as_posix()}}}\n"), (figure, "png")):
+        (tmp_path / path).parent.mkdir(parents=True)
+        (tmp_path / path).write_text(text, encoding="utf-8")
+    (tmp_path / "main.tex").write_text(f"\\input{{{chapter.with_suffix('').as_posix()}}}\n", encoding="utf-8")
+
+    sources = ManuscriptManager(tmp_path).scan_sources(tmp_path, "main.tex")
+
+    assert {source.path for source in sources} == {"main.tex", chapter.as_posix(), figure.as_posix()}
+
+
 def test_root_dependency_wins_over_including_directory(tmp_path: Path) -> None:
     (tmp_path / "sections").mkdir()
     (tmp_path / "main.tex").write_text(r"\input{sections/body}")

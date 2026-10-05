@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 import difflib
+import errno
 from hashlib import sha256
 import json
 import os
@@ -915,13 +916,23 @@ class ManuscriptManager:
                     candidates.append(candidate)
         for candidate in candidates:
             normalized = cls._normalized_relative(root, candidate)
-            if (root / normalized).is_file():
+            if cls._is_existing_file(root / normalized):
                 return normalized
         if fallback is not None:
             normalized = cls._normalized_relative(root, fallback)
-            if (root / normalized).is_file():
+            if cls._is_existing_file(root / normalized):
                 return normalized
         raise InfrastructureError(f"Referenced manuscript file is missing: {dependency}")
+
+    @staticmethod
+    def _is_existing_file(path: Path) -> bool:
+        # A candidate too long for the filesystem to name cannot exist; other access errors still surface.
+        try:
+            return path.is_file()
+        except OSError as exc:
+            if exc.errno != errno.ENAMETOOLONG:
+                raise
+            return False
 
     @staticmethod
     def _dependency_text(text: str, *, preserve_positions: bool = False) -> str:
