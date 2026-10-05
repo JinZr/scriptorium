@@ -52,6 +52,44 @@ def _finding(source, line, quote):
     }
 
 
+def _revise_verify_apply(service, run, source, line, before, after):
+    findings = service.list_findings(run.id)
+    finding = next(item for item in findings if item.evidence[0]["start_line"] == line)
+    for other in findings:
+        if other.id != finding.id:
+            service.decide_finding(other.id, "reject", "Out of scope for this edit.")
+    service.decide_finding(finding.id, "confirm", "Capitalize it.")
+    asyncio.run(service.resume_run(run.id))
+    revision = claim(service, run.id, AgentRole.REVISION, session="revision-session")
+    edit = {
+        "finding_ids": [finding.id],
+        "path": "main.tex",
+        "source_digest": source["source_digest"],
+        "start_line": line,
+        "end_line": line,
+        "before": before,
+        "after": after,
+        "rationale": "Capitalize the quoted word.",
+    }
+    receipt = submit(service, revision, {"summary": "Capitalized.", "edits": [edit]})
+    assert receipt["validation_report"] is None
+    patch = service.database.list_patches(run.id)[-1]
+    diff = service.artifacts.get_bytes(patch.diff_digest).decode("utf-8")
+    service.decide_patch(patch.id, "approve", "Apply the exact edit.")
+    asyncio.run(service.resume_run(run.id))
+    verification = claim(service, run.id, AgentRole.VERIFICATION, session="verification-session")
+    receipt = submit(
+        service,
+        verification,
+        {"verdict": "pass", "summary": "Resolved.", "resolved_finding_ids": [finding.id], "issues": []},
+    )
+    assert receipt["validation_report"] is None
+    assert receipt["run_status"].value == "ready_to_apply"
+    # Applying recomputes the diff from the frozen snapshot and compares it with the immutable artifact.
+    service.apply_patch(patch.id)
+    return diff, (service.repo / "main.tex").read_text(encoding="utf-8")
+
+
 def test_read_tool_line_numbers_produce_accepted_evidence(tmp_path, monkeypatch):
     service, run = _start(tmp_path, monkeypatch)
     with service:
@@ -68,6 +106,11 @@ def test_read_tool_line_numbers_produce_accepted_evidence(tmp_path, monkeypatch)
         )
         assert receipt["validation_report"] is None
         assert receipt["attempt"].status.value == "completed"
+        diff, applied = _revise_verify_apply(service, run, source, 3, "alpha\fbeta", "alpha\fBETA")
+        # Each hunk line starts on its own physical line; the form feed stays inside the changed line.
+        assert "-alpha\fbeta\n+alpha\fBETA\n" in diff
+        assert all(line[:1] in {" ", "-", "+", "@"} for line in diff.split("\n")[2:] if line)
+        assert applied == FORM_FEED_SOURCE.replace("beta", "BETA")
 
 
 def test_bundle_count_must_match_its_frozen_contract(tmp_path, monkeypatch):
@@ -97,21 +140,7 @@ def test_run_frozen_before_the_line_rule_keeps_its_numbering_through_replay_and_
         receipt = submit(service, context, {"summary": "Checked.", "findings": [_finding(source, 4, "beta")]})
         assert receipt["validation_report"] is None
         assert receipt["run_status"].value == "awaiting_decision"
-        finding = service.list_findings(run.id)[0]
-        service.decide_finding(finding.id, "confirm", "Capitalize it.")
-        asyncio.run(service.resume_run(run.id))
-        revision = claim(service, run.id, AgentRole.REVISION, session="revision-session")
-        edit = {
-            "finding_ids": [finding.id],
-            "path": "main.tex",
-            "source_digest": source["source_digest"],
-            "start_line": 4,
-            "end_line": 4,
-            "before": "beta",
-            "after": "BETA",
-            "rationale": "Capitalize the quoted word.",
-        }
-        receipt = submit(service, revision, {"summary": "Capitalized.", "edits": [edit]})
-        assert receipt["validation_report"] is None
-        patch = service.database.list_patches(run.id)[-1]
-        assert "-beta\n+BETA\n" in service.artifacts.get_bytes(patch.diff_digest).decode("utf-8")
+        diff, applied = _revise_verify_apply(service, run, source, 4, "beta", "BETA")
+        # Diffs of runs frozen under the earlier contract keep their historical bytes.
+        assert "-beta\n+BETA\n" in diff
+        assert applied == FORM_FEED_SOURCE.replace("beta", "BETA")

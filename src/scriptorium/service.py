@@ -38,7 +38,7 @@ from .domain import (
 )
 from .errors import ConfigurationError, InfrastructureError, NotFoundError, StateError
 from .manuscript import ManuscriptManager
-from .schemas import ScientificReviewOutput, ScopedReviewOutput
+from .schemas import EvidenceAnchorContract, ScientificReviewOutput, ScopedReviewOutput
 from .storage import ConflictError, Database, NotFoundError as StorageNotFoundError, StorageError
 from .tool_output import (
     REPORT_PARTS,
@@ -785,7 +785,8 @@ class ScriptoriumService:
             paths = tuple(sorted({str(edit["path"]) for edit in patch.edits}))
             snapshot = self.state_dir / "runs" / run.id / "snapshot"
             patched = self.state_dir / "runs" / run.id / "patched" / patch.id
-            self._validate_patch_materialization(patch, snapshot, patched, paths)
+            contract = self.armarius.require_evidence_anchor_contract(run.id)
+            self._validate_patch_materialization(patch, snapshot, patched, paths, contract)
             try:
                 self.manuscript.apply_to_worktree(snapshot, patched, paths)
             except StateError as exc:
@@ -1268,13 +1269,14 @@ class ScriptoriumService:
         snapshot: Path,
         patched: Path,
         paths: tuple[str, ...],
+        contract: EvidenceAnchorContract,
     ) -> None:
         for edit in patch.edits:
             source = snapshot / str(edit["path"])
             if not source.is_file() or sha256(source.read_bytes()).hexdigest() != edit["source_digest"]:
                 raise InfrastructureError(f"frozen patch source is corrupt: {edit['path']}")
         expected_diff = self.artifacts.get_bytes(patch.diff_digest).decode("utf-8")
-        actual_diff = self.manuscript.diff(snapshot, patched, paths)
+        actual_diff = self.manuscript.diff(snapshot, patched, paths, contract)
         if actual_diff != expected_diff:
             raise InfrastructureError(f"patched snapshot does not match immutable diff {patch.diff_digest}")
 
