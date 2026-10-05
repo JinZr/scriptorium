@@ -1577,7 +1577,7 @@ def _navigation_commands(commands: list[str]) -> set[str] | None:
 
 
 def _navigation_entry(entry: dict[str, Any]) -> dict[str, Any]:
-    # Cut long literals and ambiguous graphics candidates so every single entry fits a bounded response.
+    # Cut long literals and long candidate lists; the response bound trims candidates further by encoded size.
     trimmed = dict(entry)
     if len(entry["value"]) > _NAVIGATION_VALUE_CHARS:
         trimmed.update(value=entry["value"][:_NAVIGATION_VALUE_CHARS], value_truncated=True)
