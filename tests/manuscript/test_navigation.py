@@ -164,3 +164,53 @@ def test_retrieval_comparison_cases_keep_supplementary_context_reachable(tmp_pat
     assert any(entry["command"] == "label" and entry["value"] == "sec:supp" for entry in navigation["entries"])
     for location in case["relevant_locations"]:
         assert (tmp_path / location["source_path"]).read_text().splitlines()[location["start_line"] - 1]
+
+
+def _quantities(tmp_path, files):
+    for name, content in files.items():
+        (tmp_path / name).write_text(content)
+    manager = ManuscriptManager(tmp_path)
+    navigation = json.loads(manager.create_navigation(tmp_path, manager.scan_sources(tmp_path, "main.tex")))
+    return [
+        (entry["source_path"], entry["command"], entry["value"])
+        for entry in navigation["entries"]
+        if entry["command"] in {"quantity", "alignat", "alignat*"}
+    ]
+
+
+def test_wrapper_content_and_control_word_neighbours_keep_their_quantities(tmp_path):
+    body = (
+        "\\resizebox{0.9\\textwidth}{!}{Gap 1.5 eV}\n"
+        "\\scalebox{0.8}[1.2]{Loss 0.25}\n"
+        "\\href{https://example.org/v2.1}{Rate 3.5\\%}\n"
+        "$x\\approx0.5$ and $y\\approx-0.7$ but $\\pm0.3$ stays attached in $2.0\\pm0.1$\n"
+        "The current was 1.5 A and 2.5 a day.\n"
+        "\\begin{alignat}{2}\nE &= 0.113\n\\end{alignat}\n"
+    )
+    quantities = _quantities(tmp_path, {"main.tex": "\\begin{document}\n" + body + "\\end{document}\n"})
+    assert [(command, value) for _, command, value in quantities] == [
+        ("quantity", "1.5 eV"),
+        ("quantity", "0.25"),
+        ("quantity", r"3.5\%"),
+        ("quantity", "0.5"),
+        ("quantity", "-0.7"),
+        ("quantity", r"2.0\pm0.1"),
+        ("quantity", "1.5 A"),
+        ("quantity", "2.5"),
+        ("alignat", "{2}\nE &= 0.113"),
+        ("quantity", "0.113"),
+    ]
+
+
+def test_sources_input_before_the_document_report_no_quantities(tmp_path):
+    files = {
+        "main.tex": "\\documentclass{article}\n\\input{preamble}\n\\begin{document}\n\\input{body}\n\\end{document}\n",
+        "preamble.tex": "\\pgfplotsset{compat=1.18}\n\\input{macros}\n",
+        "macros.tex": "\\def\\ratio{0.75}\n",
+        "body.tex": "The gap is 1.25 eV.\n\\input{shared}\n",
+        "shared.tex": "A loss of 0.5\\%.\n",
+    }
+    assert _quantities(tmp_path, files) == [
+        ("body.tex", "quantity", "1.25 eV"),
+        ("shared.tex", "quantity", r"0.5\%"),
+    ]

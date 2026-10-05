@@ -42,6 +42,8 @@ EQUATION_ENVIRONMENTS = (
     "equation*",
     "align",
     "align*",
+    "alignat",
+    "alignat*",
     "gather",
     "gather*",
     "multline",
@@ -75,7 +77,21 @@ NON_QUANTITY_ARGUMENT_PATTERN = re.compile(
     r"cmidrule|hypersetup|geometry|SetKw[A-Za-z]*)\*?(?![A-Za-z@])"
 )
 # Only the leading brace groups of these commands are settings; later groups hold typeset content.
-NON_QUANTITY_GROUP_LIMITS = {"multicolumn": 2, "multirow": 2, "color": 1, "colorbox": 1, "begin": 2, "end": 1}
+NON_QUANTITY_GROUP_LIMITS = {
+    "multicolumn": 2,
+    "multirow": 2,
+    "color": 1,
+    "colorbox": 1,
+    "begin": 2,
+    "end": 1,
+    "resizebox": 2,
+    "scalebox": 1,
+    "href": 1,
+}
+# A number may directly follow a control word such as \approx; blank the word so the number is seen with its sign.
+CONTROL_WORD_BEFORE_NUMBER_PATTERN = re.compile(
+    r"\\(?!(?:pm|mp|times|cdot)(?![A-Za-z]))[A-Za-z]+(?=[-+\u2212]?(?:\d|\.\d))"
+)
 QUANTITY_PATTERN = re.compile(
     r"(?<![A-Za-z0-9_.:/\\@])(?:[-+\u2212]\s*)?(?:\d+\.\d+|\.\d+|\d+)(?!\d|\.\d)"
     r"(?P<uncertainty>\(\d+(?:\.\d+)?\))?"
@@ -272,7 +288,8 @@ def _command_argument_spans(text: str) -> Iterator[tuple[int, int]]:
         end = match.end()
         start = end
         braces = NON_QUANTITY_GROUP_LIMITS.get(match.group(1))
-        while (braces is None or braces > 0) and (group := re.match(r"[ \t]*([\[{])", text[end:])):
+        # Optional bracket arguments after the last setting group, as in \scalebox{x}[y], are settings too.
+        while (group := re.match(r"[ \t]*([\[{])", text[end:])) and (braces is None or braces > 0 or group[1] == "["):
             opening = end + group.end()
             if group.group(1) == "{":
                 closing = _balanced_group_end(text, opening)
@@ -421,16 +438,20 @@ class ManuscriptManager:
 
     def create_navigation(self, snapshot: Path, sources: tuple[SourceFile, ...]) -> str:
         entries = []
-        for source in sorted(sources, key=lambda item: item.path):
-            if Path(source.path).suffix.lower() not in {".tex", ".ltx"}:
-                continue
-            text = (snapshot / source.path).read_text(encoding="utf-8")
-            masked = self._dependency_text(text, preserve_positions=True)
-            for command, start, end, value_start, value_end in self._navigation_spans(text, masked):
+        texts = {
+            source.path: (snapshot / source.path).read_text(encoding="utf-8")
+            for source in sorted(sources, key=lambda item: item.path)
+            if Path(source.path).suffix.lower() in {".tex", ".ltx"}
+        }
+        masks = {path: self._dependency_text(text, preserve_positions=True) for path, text in texts.items()}
+        preamble = self._preamble_sources(snapshot, masks)
+        for path, text in texts.items():
+            spans = self._navigation_spans(text, masks[path], preamble=path in preamble)
+            for command, start, end, value_start, value_end in spans:
                 value = text[value_start:value_end]
                 entry = {
                     "command": command,
-                    "source_path": source.path,
+                    "source_path": path,
                     "start_line": text.count("\n", 0, start) + 1,
                     "end_line": text.count("\n", 0, end - 1) + 1,
                     "value": value.strip(),
@@ -454,8 +475,35 @@ class ManuscriptManager:
             + "\n"
         )
 
+    def _preamble_sources(self, snapshot: Path, masks: dict[str, str]) -> set[str]:
+        """Return sources reached only through inputs placed before a \\begin{document} or inside such sources."""
+        root = snapshot.resolve()
+        edges: dict[str, list[tuple[str, bool]]] = {}
+        for path, masked in masks.items():
+            document = re.search(r"\\begin\s*\{document\}", masked)
+            for match in INPUT_PATTERN.finditer(masked):
+                dependency = Path(next(group for group in match.groups() if group is not None).strip())
+                try:
+                    child = self._resolve_dependency(
+                        root, Path(path).parent, dependency.with_suffix(dependency.suffix or ".tex")
+                    ).as_posix()
+                except InfrastructureError:
+                    continue
+                edges.setdefault(path, []).append((child, bool(document) and match.start() < document.start()))
+        included = {child for children in edges.values() for child, _ in children}
+        body = [path for path in masks if path not in included]
+        reached = set(body)
+        while body:
+            for child, in_preamble in edges.get(body.pop(), []):
+                if not in_preamble and child not in reached:
+                    reached.add(child)
+                    body.append(child)
+        return set(masks) - reached
+
     @classmethod
-    def _navigation_spans(cls, text: str, masked: str) -> list[tuple[str, int, int, int, int]]:
+    def _navigation_spans(
+        cls, text: str, masked: str, *, preamble: bool = False
+    ) -> list[tuple[str, int, int, int, int]]:
         """Return (command, start, end, value_start, value_end) in source order for one file."""
         spans = [
             (command, start, end, end - 1 - len(value), end - 1)
@@ -465,7 +513,8 @@ class ManuscriptManager:
         quantity_commands = list(cls._quantity_commands(masked))
         spans.extend(quantity_commands)
         covered = [(start, end) for _, start, end, _, _ in quantity_commands]
-        spans.extend(cls._navigation_quantities(text, masked, covered))
+        if not preamble:
+            spans.extend(cls._navigation_quantities(text, masked, covered))
         return sorted(spans, key=lambda span: span[1])
 
     @staticmethod
@@ -508,7 +557,8 @@ class ManuscriptManager:
         excluded = _merged_spans([*skipped, *_command_argument_spans(masked)])
         lefts = [left for left, _ in excluded]
         floor = document.end() if document else 0
-        for match in QUANTITY_PATTERN.finditer(text, floor):
+        scanned = CONTROL_WORD_BEFORE_NUMBER_PATTERN.sub(lambda word: " " * len(word[0]), text)
+        for match in QUANTITY_PATTERN.finditer(scanned, floor):
             start, end = match.span()
             nearest = bisect_right(lefts, start) - 1
             if masked[start] != text[start] or (nearest >= 0 and start < excluded[nearest][1]):
@@ -521,10 +571,12 @@ class ManuscriptManager:
             ):
                 continue
             unit = QUANTITY_UNIT_PATTERN.match(text, end)
+            word = unit.group(0).strip("$~\\,;: \t\r\n") if unit else ""
+            # One-letter symbols are case-sensitive: "1.5 A" reports amperes, while "1.5 a" continues the prose.
             if (
                 not match.group("percent")
                 and unit
-                and unit.group(0).strip("$~ \t\\,;:").casefold() not in (QUANTITY_UNIT_STOPWORDS)
+                and (word if len(word) == 1 else word.casefold()) not in (QUANTITY_UNIT_STOPWORDS)
             ):
                 end = unit.end()
             yield "quantity", start, end, start, end
