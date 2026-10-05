@@ -1497,11 +1497,12 @@ class Armarius:
 
     def _stage_validator(self, task: Task, run: Run, bundle, contract: EvidenceAnchorContract):
         if task.stage == "review":
+            accepted = self.completed_review_output(task)
 
             def validator(output):
                 return self._validate_review_output(
                     output, bundle.anchor_map, self._run_dir(run.id) / "snapshot", contract
-                )
+                ) + self._continued_inventory_issues(output, accepted[1] if accepted else None)
 
         elif task.stage == "revision":
 
@@ -1533,6 +1534,26 @@ class Armarius:
         else:
             raise InfrastructureError(f"unsupported external task stage: {task.stage}")
         return validator
+
+    def _continued_inventory_issues(self, output: ReviewOutput, prior: ReviewOutput | None) -> list[ValidationIssue]:
+        """A continuation keeps listing every claim the accepted inventory left unchecked, at its prominence."""
+        if not isinstance(output, InventoriedScientificReviewOutput) or not isinstance(
+            prior, InventoriedScientificReviewOutput
+        ):
+            return []
+        listed = [(entry.claim_anchor, entry.prominence) for entry in output.claim_inventory]
+        return [
+            self._issue(
+                "claim_inventory.unchecked_claim_dropped",
+                "/claim_inventory",
+                "A continuation must list every claim the accepted inventory left unchecked, with the same "
+                "claim_anchor and prominence, until a claim check assesses it.",
+                expected=entry.model_dump(mode="json", exclude_none=True),
+                actual=None,
+            )
+            for entry in prior.claim_inventory
+            if not entry.check_indices and (entry.claim_anchor, entry.prominence) not in listed
+        ]
 
     def _validate_review_output(
         self,
