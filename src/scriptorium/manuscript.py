@@ -781,14 +781,20 @@ class ManuscriptManager:
                 lines = contract.split_lines(text, keepends=True)
             target_path.write_text(text, encoding="utf-8")
             changed_paths.append(relative)
-        return self.diff(snapshot, patched, changed_paths), tuple(changed_paths)
+        return self.diff(snapshot, patched, changed_paths, contract), tuple(changed_paths)
 
-    def diff(self, before: Path, after: Path, paths: Iterable[str]) -> str:
+    def diff(
+        self,
+        before: Path,
+        after: Path,
+        paths: Iterable[str],
+        contract: EvidenceAnchorContract = DEFAULT_EVIDENCE_ANCHOR_CONTRACT,
+    ) -> str:
         chunks: list[str] = []
         for relative in sorted(paths):
-            # Display hunks only; resume compares these bytes with each immutable diff artifact, so keep splitlines.
-            old = (before / relative).read_text(encoding="utf-8").splitlines(keepends=True)
-            new = (after / relative).read_text(encoding="utf-8").splitlines(keepends=True)
+            # Resume recomputes this diff against the immutable artifact, so it follows the run's frozen line rule.
+            old = contract.split_lines((before / relative).read_text(encoding="utf-8"), keepends=True)
+            new = contract.split_lines((after / relative).read_text(encoding="utf-8"), keepends=True)
             chunks.extend(
                 difflib.unified_diff(old, new, fromfile=f"a/{relative}", tofile=f"b/{relative}", lineterm="\n")
             )
