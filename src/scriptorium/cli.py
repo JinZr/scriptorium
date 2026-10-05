@@ -193,6 +193,9 @@ def build_parser() -> argparse.ArgumentParser:
         "--text", action="store_true", help="return the page's PDF text layer as a reading aid, not evidence"
     )
     page_parser.add_argument("--offset", type=int, default=0, help="character offset in the text layer with --text")
+    page_parser.add_argument(
+        "--text-digest", help="text_digest from the previous --text fragment; required with --offset"
+    )
 
     finding_parser = commands.add_parser("finding", help="inspect and decide findings")
     finding_commands = finding_parser.add_subparsers(dest="finding_command", required=True)
@@ -429,6 +432,7 @@ def _dispatch_task(service: Any, arguments: argparse.Namespace) -> tuple[Any, in
                 arguments.crop,
                 arguments.text,
                 arguments.offset,
+                arguments.text_digest,
             ),
             0,
             None,

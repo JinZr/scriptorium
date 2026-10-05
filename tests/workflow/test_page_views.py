@@ -8,7 +8,7 @@ import pytest
 
 from scriptorium import cli, manuscript
 from scriptorium.artifacts import ArtifactStore
-from scriptorium.errors import ConfigurationError
+from scriptorium.errors import ConfigurationError, StateError
 from scriptorium.manuscript import BuildResult
 from scriptorium.service import ScriptoriumService
 
@@ -103,8 +103,9 @@ def test_text_layer_is_bounded_and_not_counted_as_a_page_view(pages):
     first = command(["--json", "task", "page", attempt_id, "--number", "1", "--text"])
     assert "The result is clear." in first["text"]
     assert first["evidence"] is False and first["text_layer"] == "pdf" and first["next_command"] is None
-    middle = command(["--json", "task", "page", attempt_id, "--number", "1", "--text", "--offset", "4"])
-    assert middle["text"] == first["text"][4:]
+    continuation = ["--offset", "4", "--text-digest", first["text_digest"]]
+    middle = command(["--json", "task", "page", attempt_id, "--number", "1", "--text", *continuation])
+    assert middle["text"] == first["text"][4:] and middle["text_digest"] == first["text_digest"]
     receipt = submit(
         service,
         context,
@@ -139,13 +140,54 @@ def test_long_text_layer_continues_with_offsets(pages, monkeypatch):
     assert collected == text
 
 
+def test_text_continuations_are_bound_to_one_extraction(pages, monkeypatch):
+    service, run, context, _ = pages
+    attempt_id = context["attempt"].id
+    monkeypatch.setattr("scriptorium.service.page_text", lambda pdf, page: "first extraction " * 1000)
+    first = service.page_task(attempt_id, 1, text=True)
+    assert f"--text-digest {first['text_digest']}" in first["next_command"]
+    with pytest.raises(ConfigurationError, match="requires --text-digest"):
+        service.page_task(attempt_id, 1, text=True, offset=first["next_offset"])
+    # A different extractor result must not be stitched onto fragments of the first one.
+    monkeypatch.setattr("scriptorium.service.page_text", lambda pdf, page: "second extraction " * 1000)
+    before = service.database.list_events(run.id)
+    with pytest.raises(ConfigurationError, match="page text layer changed"):
+        service.page_task(attempt_id, 1, text=True, offset=first["next_offset"], text_digest=first["text_digest"])
+    assert service.database.list_events(run.id) == before
+
+
+def test_views_keep_their_bytes_and_a_run_keeps_a_bounded_amount(pages, monkeypatch):
+    service, run, context, _ = pages
+    attempt_id = context["attempt"].id
+    first = service.page_task(attempt_id, 1, scale=2.0)
+    assert first["path"].endswith(f"/{first['view']['digest']}.png")
+    # A renderer that now draws different bytes for the same request gets a new path; the old one is untouched.
+    real_render = manuscript.render_page_view
+
+    def changed_render(pdf, page, scale, crop, destination):
+        real_render(pdf, page, scale + 0.25, crop, destination)
+
+    monkeypatch.setattr("scriptorium.service.render_page_view", changed_render)
+    second = service.page_task(attempt_id, 1, scale=2.0)
+    assert second["path"] != first["path"]
+    assert ArtifactStore.digest_file(first["path"]) == first["view"]["digest"]
+    views = service.repo / ".scriptorium/runs" / run.id / "page-views"
+    kept = sum(path.stat().st_size for path in views.glob("*.png"))
+    monkeypatch.setattr("scriptorium.service.MAX_RUN_PAGE_VIEW_BYTES", kept)
+    with pytest.raises(StateError, match="reached the 0 MiB limit"):
+        service.page_task(attempt_id, 1, scale=3.0)
+    assert sum(path.stat().st_size for path in views.glob("*.png")) == kept
+    assert service.page_task(attempt_id, 1, scale=2.0)["path"] == second["path"]
+
+
 @pytest.mark.parametrize(
     ("options", "message"),
     [
         ({"scale": 5.0}, "scale"),
         ({"crop": (0.5, 0.0, 0.5, 1.0)}, "crop"),
         ({"text": True, "scale": 2.0}, "cannot be combined"),
-        ({"offset": 3}, "requires --text"),
+        ({"offset": 3}, "require --text"),
+        ({"text_digest": "a" * 64}, "require --text"),
     ],
 )
 def test_invalid_page_options_are_rejected_before_access(pages, options, message):
