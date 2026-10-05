@@ -249,3 +249,35 @@ def test_path_filters_too_long_to_continue_are_rejected_with_guidance(tmp_path):
         assert [entry["value"] for entry in service.nav_task(attempt_id, path=chapter)["entries"]] == ["One", "Two"]
         unfiltered = service.nav_task(attempt_id, ["heading"], limit=1)
         assert unfiltered["entries"][0]["source_path"] == chapter and unfiltered["next_cursor"] == 1
+
+
+def test_a_final_entry_sheds_fields_under_a_filter_too_long_to_continue(tmp_path):
+    chapter = "/".join(["'" * 250] * 4) + "/chapter.tex"
+    figure = "/".join(f"f{index:02d}-" + "d" * 240 for index in range(14)) + "/plot.png"
+    files = {chapter: f"\\includegraphics{{{figure}}}\n", figure: "png"}
+    service, attempt_id = _nav_run(tmp_path, files, f"\\input{{{chapter[:-4]}}}\n")
+    with service:
+        # The only entry needs no continuation, so trimming its own candidates is enough.
+        response = service.nav_task(attempt_id, ["graphics"], path=chapter)
+        (entry,) = response["entries"]
+        assert response["next_cursor"] is None and entry["source_path"] == chapter
+        assert entry["target_path"] == figure and entry["candidate_paths"] == [] and entry["candidate_count"] == 1
+
+
+def test_unfiltered_entries_name_unrepresentable_sources_by_index(tmp_path, monkeypatch, capsys):
+    # Each double quote takes two bytes once JSON-escaped, so this path alone overflows an entry.
+    chapter = "/".join(['"' * 240] * 15) + "/chapter.tex"
+    files = {chapter: "\\section{One}\n\\section{Two}\n"}
+    service, attempt_id = _nav_run(tmp_path, files, f"\\input{{{chapter[:-4]}}}\n")
+    with service:
+        arguments = ["--json", "task", "show", attempt_id, "--part", "source-map"]
+        source_map = "".join(page["text"] for page in _pages(service, monkeypatch, capsys, arguments))
+        index = [source["source_path"] for source in json.loads(source_map)["sources"]].index(chapter)
+        arguments = ["--json", "task", "nav", attempt_id, "--command=heading"]
+        entries = [entry for page in _pages(service, monkeypatch, capsys, arguments) for entry in page["entries"]]
+        assert [entry["value"] for entry in entries] == ["One", "Two"]
+        assert all(entry["source_index"] == index and entry["source_path_omitted"] for entry in entries)
+        assert all("source_path" not in entry and "value_truncated" not in entry for entry in entries)
+        run_id = service.database.get_task(service.database.get_attempt(attempt_id).task_id).run_id
+        events = [e.payload for e in service.database.list_events(run_id) if e.event_type == "tool.nav"]
+        assert {entry["source_path"] for event in events for entry in event["entries"]} == {chapter}
