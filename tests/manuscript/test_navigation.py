@@ -29,6 +29,7 @@ def test_navigation_is_deterministic_and_locations_match_literal_sources(tmp_pat
     assert manager.create_navigation(tmp_path, tuple(reversed(sources))) == content
     navigation = json.loads(content)
     assert "ignored" not in content
+    assert "quantity" not in {entry["command"] for entry in navigation["entries"]}
     for entry in navigation["entries"]:
         lines = (tmp_path / entry["source_path"]).read_text().splitlines()
         excerpt = "\n".join(lines[entry["start_line"] - 1 : entry["end_line"]])
@@ -71,10 +72,57 @@ def test_navigation_preserves_escaped_argument_text_and_line_positions(tmp_path)
     assert len(masked) == len(text)
     assert [i for i, char in enumerate(masked) if char == "\n"] == [i for i, char in enumerate(text) if char == "\n"]
     navigation = json.loads(manager.create_navigation(tmp_path, manager.scan_sources(tmp_path, "main.tex")))
-    assert navigation["entries"][0]["value"] == r"A \{group\} at 50\%"
-    assert navigation["entries"][1]["value"] == "one% ignored\ntwo"
-    assert navigation["entries"][1]["start_line"] == 3
-    assert navigation["entries"][1]["end_line"] == 4
+    section, percentage, caption = navigation["entries"]
+    assert section["value"] == r"A \{group\} at 50\%"
+    assert (percentage["command"], percentage["value"]) == ("quantity", r"50\%")
+    assert caption["value"] == "one% ignored\ntwo"
+    assert caption["start_line"] == 3
+    assert caption["end_line"] == 4
+
+
+def test_navigation_indexes_tables_equations_and_reported_quantities(tmp_path):
+    preamble = "\\documentclass{article}\n\\usepackage[margin=1.5in]{geometry}\n\\setlength{\\parskip}{0.5em}\n"
+    body = (
+        "\\section{Results 2}\\label{sec:3.2}\n"
+        "The energy is $-7.49$~eV/atom, within 0.1 eV/atom (code version 3.10.2, year 2017, Fig.~2a).\n"
+        "Errors stay below 1\\% and $E = -0.572922(1)$ with $\\alpha = 1.2 \\pm 0.3$ and\n"
+        "$\\tau = 2.5\\times 10^{-3}$.\n"
+        "Use \\SI{300}{\\kelvin}, \\num{1.5e-3}, and \\numrange{3}{4}{5.5} widths.\n"
+        "\\includegraphics[width=0.48\\linewidth]{plot}\\vspace{0.3cm} see \\cite{a1.2}\n"
+        "% a commented 0.75 eV\n"
+        "\\begin{table}[h]\n\\begin{tabular}{p{0.3\\linewidth}c}\nH10 & \\multicolumn{2}{c}{0.57}\\\\\n"
+        "\\end{tabular}\n\\end{table}\n"
+        "\\begin{equation}\nE_c = 0.113 \\label{eq:1}\n\\end{equation}\n"
+    )
+    text = preamble + "\\begin{document}\n" + body + "\\end{document}\n"
+    (tmp_path / "main.tex").write_text(text)
+    (tmp_path / "plot.png").write_bytes(b"image")
+    manager = ManuscriptManager(tmp_path)
+    navigation = json.loads(manager.create_navigation(tmp_path, manager.scan_sources(tmp_path, "main.tex")))
+    assert {"table", "equation", "quantity", "SI", "numrange"} <= set(navigation["commands"])
+    entries = [(entry["command"], entry["start_line"], entry["end_line"]) for entry in navigation["entries"]]
+    assert ("table", 12, 16) in entries and ("tabular", 13, 15) in entries and ("equation", 17, 19) in entries
+    lines = text.splitlines()
+    quantities = []
+    for entry in navigation["entries"]:
+        excerpt = "\n".join(lines[entry["start_line"] - 1 : entry["end_line"]])
+        assert entry["value"] in excerpt
+        if entry["command"] in {"quantity", "SI", "num", "numrange"}:
+            quantities.append((entry["command"], entry["value"]))
+    assert quantities == [
+        ("quantity", "-7.49$~eV/atom"),
+        ("quantity", "0.1 eV/atom"),
+        ("quantity", r"1\%"),
+        ("quantity", "-0.572922(1)"),
+        ("quantity", r"1.2 \pm 0.3"),
+        ("quantity", r"2.5\times 10^{-3}"),
+        ("SI", r"{300}{\kelvin}"),
+        ("num", "{1.5e-3}"),
+        ("numrange", "{3}{4}"),
+        ("quantity", "5.5"),
+        ("quantity", "0.57"),
+        ("quantity", "0.113"),
+    ]
 
 
 @pytest.mark.parametrize(
@@ -97,7 +145,7 @@ def test_navigation_lines_follow_the_frozen_line_rule(tmp_path, body):
     assert [entry["command"] for entry in entries][:3] == ["section", "section", "caption"]
     for entry in entries:
         span = "\n".join(lines[entry["start_line"] - 1 : entry["end_line"]])
-        assert "\\" + entry["command"] in span
+        assert entry["command"] == "quantity" or "\\" + entry["command"] in span
         assert all(piece in span for piece in entry["value"].split("\n"))
 
 
