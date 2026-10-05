@@ -209,7 +209,7 @@ def read_anchor(response, pieces, next_line):
     }
 
 
-def bound_read(response, attempt_id, max_lines, max_chars, end_line=None, anchor=False):
+def bound_read(response, attempt_id, max_lines, max_chars, end_line=None, anchor=False, anchor_lines_match=True):
     def build(pieces, line, offset):
         arguments = [
             "read",
@@ -236,7 +236,7 @@ def bound_read(response, attempt_id, max_lines, max_chars, end_line=None, anchor
             "next_command": tool_command(*arguments) if line is not None else None,
         }
         if anchor:
-            result["anchor"] = read_anchor(response, pieces, line)
+            result["anchor"] = read_anchor(response, pieces, line) if anchor_lines_match else None
         return result
 
     pieces = response["lines"]
