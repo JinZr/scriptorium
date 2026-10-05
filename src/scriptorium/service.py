@@ -593,6 +593,7 @@ class ScriptoriumService:
             max_chars,
             end_line,
             anchor,
+            not anchor or source is None or self._retrieval_numbers_like_contract(task.run_id, source, read_path),
         )
         self._record_access(
             task.run_id,
@@ -615,6 +616,15 @@ class ScriptoriumService:
             },
         )
         return response
+
+    def _retrieval_numbers_like_contract(self, run_id: str, source, read_path: Path) -> bool:
+        contract = self.armarius.require_evidence_anchor_contract(run_id)
+        if contract.line_terminators is not None:
+            return True
+        # Retrieval splits only at newlines; an earlier contract also split at form feeds and Unicode separators.
+        # Those break points are a superset, so the numberings agree exactly when the line counts do.
+        with read_path.open(encoding="utf-8") as stream:
+            return sum(1 for _ in stream) == source.line_count
 
     def search_task(self, attempt_id: str, query: str, path: str | None, cursor: int, limit: int):
         with self._retrieval_operation(attempt_id, "task search"):
