@@ -146,7 +146,13 @@ def review_summary(report):
     }
 
 
-def collect(project, run_id, output, case, trial, baseline=None, host_records=()):
+HOST_COMPUTATION = ("allowed", "denied", "unknown")
+
+
+def collect(project, run_id, output, case, trial, baseline=None, host_records=(), host_computation="unknown"):
+    if host_computation not in HOST_COMPUTATION:
+        raise ValueError(f"Host computation must be one of {', '.join(HOST_COMPUTATION)}")
+    host_conditions = {"computation": host_computation}
     project = project.resolve()
     if not (project / ".scriptorium/state.sqlite3").is_file():
         raise ValueError("Project must have an existing Scriptorium run")
@@ -178,6 +184,8 @@ def collect(project, run_id, output, case, trial, baseline=None, host_records=()
                 inputs,
             ):
                 raise ValueError("Prepared trial inputs or identity changed")
+            if previous.get("host_conditions") != host_conditions:
+                raise ValueError("Baseline did not record the same planned host conditions")
             if any(item["attempts"] for item in read_json(baseline / "report.json")["tasks"]):
                 raise ValueError("Baseline must be collected before the first attempt")
             if verify_seal(baseline) != baseline_digest:
@@ -218,6 +226,7 @@ def collect(project, run_id, output, case, trial, baseline=None, host_records=()
                 "inputs": inputs,
                 "collected_at": datetime.now(timezone.utc).isoformat(),
                 "baseline_digest": baseline_digest,
+                "host_conditions": host_conditions,
                 "prepared_before_review": baseline_digest is not None,
                 "collector_environment": {
                     "python": sys.version,
@@ -259,9 +268,26 @@ def main():
     parser.add_argument("--trial", required=True)
     parser.add_argument("--baseline", type=Path)
     parser.add_argument("--host-record", type=Path, action="append", default=[])
+    parser.add_argument(
+        "--host-computation",
+        choices=HOST_COMPUTATION,
+        required=True,
+        help="Whether the host let the reviewer run its own calculations, as planned for this trial",
+    )
     args = parser.parse_args()
     try:
-        print(collect(args.project, args.run, args.output, args.case, args.trial, args.baseline, args.host_record))
+        print(
+            collect(
+                args.project,
+                args.run,
+                args.output,
+                args.case,
+                args.trial,
+                args.baseline,
+                args.host_record,
+                args.host_computation,
+            )
+        )
     except (ValueError, OSError, KeyError) as exc:
         parser.exit(1, f"Collection failed: {exc}\n")
 

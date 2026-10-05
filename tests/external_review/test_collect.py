@@ -15,7 +15,7 @@ from ._support import project, start, submit
 def test_collect_preserves_prepared_inputs_failures_continuations_and_unknowns(tmp_path):
     root = project(tmp_path)
     run_id, task_id = start(root)
-    baseline = collect(root, run_id, tmp_path / "before", "paper-a", "trial-a")
+    baseline = collect(root, run_id, tmp_path / "before", "paper-a", "trial-a", host_computation="denied")
     with ScriptoriumService(root) as service:
         context = service.claim_task(task_id, "codex", "model-a", "low", "review-a", "host")
         rejected = asyncio.run(service.submit_task(context["attempt"].id, context["input_digest"], "{broken"))
@@ -28,7 +28,7 @@ def test_collect_preserves_prepared_inputs_failures_continuations_and_unknowns(t
     artifacts = file_records(root / ".scriptorium/artifacts")
     host = tmp_path / "host.json"
     host.write_text('{"native_tool_event": "independent record"}')
-    output = collect(root, run_id, tmp_path / "after", "paper-a", "trial-a", baseline, [host])
+    output = collect(root, run_id, tmp_path / "after", "paper-a", "trial-a", baseline, [host], "denied")
     verify_seal(output)
     summary = read_json(output / "summary.json")
     assert summary["attempt_status_counts"] == {"failed": 1, "completed": 2}
@@ -42,6 +42,7 @@ def test_collect_preserves_prepared_inputs_failures_continuations_and_unknowns(t
     metadata = read_json(output / "collection.json")
     assert metadata["baseline_digest"] == verify_seal(baseline)
     assert metadata["prepared_before_review"]
+    assert metadata["host_conditions"] == {"computation": "denied"}
     assert (output / "host-records/001.bin").read_bytes() == host.read_bytes()
     assert (output / "artifacts" / rejected["attempt"].output_artifact_digest).read_text() == "{broken"
     for call in read_json(output / "inspection-calls.json"):
@@ -95,6 +96,10 @@ def test_collector_rejects_changed_baseline_and_existing_output(tmp_path):
     verify_seal(baseline)
     with pytest.raises(ValueError, match="identity changed"):
         collect(root, run_id, tmp_path / "different", "case", "other", baseline)
+    with pytest.raises(ValueError, match="same planned host conditions"):
+        collect(root, run_id, tmp_path / "computed", "case", "trial", baseline, host_computation="allowed")
+    with pytest.raises(ValueError, match="Host computation must be one of"):
+        collect(root, run_id, tmp_path / "invalid", "case", "trial", host_computation="sometimes")
     (baseline / "report.json").write_text("{}")
     with pytest.raises(ValueError, match="Collection has changed"):
         collect(root, run_id, tmp_path / "damaged", "case", "trial", baseline)

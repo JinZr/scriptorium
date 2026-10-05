@@ -53,6 +53,7 @@ def comparison_fields(collection):
         "evidence_contract": frozen["evidence_anchor_contract"]["digest"],
         "pdf": bundle["manuscript.pdf"],
         "pages": {name: digest for name, digest in bundle.items() if name.startswith("pages/")},
+        "host_computation": collection.get("host_conditions", {}).get("computation", "unknown"),
     }
 
 
