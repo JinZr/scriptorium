@@ -169,7 +169,7 @@ NON_QUANTITY_GROUP_LIMITS = {
 TRAILING_OPTION_COMMANDS = frozenset({"scalebox", "begin"})
 DEFINITION_COMMANDS = frozenset({"newcommand", "renewcommand", "providecommand", "def", "gdef", "edef", "xdef"})
 # An unbraced defined name, as in \def\arraystretch{1.5}, with any parameter text before the body.
-DEFINITION_NAME_PATTERN = re.compile(r"[ \t]*(?:\n[ \t]*)?\\(?:[A-Za-z@]+|.)(?:[^{}\n]*?(?=\{))?")
+DEFINITION_NAME_PATTERN = re.compile(r"[ \t]*(?:\r?\n[ \t]*)?\\(?:[A-Za-z@]+|.)(?:[^{}\n]*?(?=\{))?")
 # Primitive skips and kerns take an unbraced dimension, as in \hskip 1.5cm plus 1fil.
 SKIP_COMMANDS = frozenset({"hskip", "vskip", "kern", "mskip", "mkern"})
 TEX_UNIT = r"(?:true\s*)?(?:pt|pc|in|bp|cm|mm|dd|cc|sp|em|ex|mu|px)"
@@ -197,7 +197,7 @@ ENVIRONMENT_ARGUMENT_GROUPS = {
     "wraptable": 2,
 }
 # TeX skips spaces and one line break before an argument; a blank line ends the search.
-ARGUMENT_SPACE = r"[ \t]*(?:\n[ \t]*)?"
+ARGUMENT_SPACE = r"[ \t]*(?:\r?\n[ \t]*)?"
 ENVIRONMENT_NAME_PATTERN = re.compile(ARGUMENT_SPACE + r"\{([^{}]*)\}")
 # A number may directly follow a control word such as \approx; blank the word so the number is seen with its sign.
 CONTROL_WORD_BEFORE_NUMBER_PATTERN = re.compile(
@@ -216,9 +216,15 @@ QUANTITY_PATTERN = re.compile(
 UNIT_POWER = r"(?:\^\s*(?:\{\s*[-+\u2212]?\s*\d+\s*\}|[-+\u2212]?\d))?"
 UNIT_SPACE = r"(?:~|\\[,;: ]|[ \t])?[ \t]?"
 UNIT_ARGUMENT = r"\s*\{(?:[^{}\n]|\{[^{}\n]{1,8}\}){1,24}\}" + UNIT_POWER
+# A plain-text unit is a recognized symbol with an optional SI prefix; other words after a number are prose.
+UNIT_SYMBOL = (
+    r"(?:da|[yzafpnuµμmcdhkMGTPEZY])?"
+    r"(?:mol|cd|Hz|Pa|Wb|lm|lx|Bq|Gy|Sv|eV|Da|bar|atm|Torr|rad|sr|dB|bits?|bytes?|FLOPS|FLOPs?|ppm|ppb|min|yr|"
+    r"[mgshAKNJWCVFSTHLlBbÅΩ])" + UNIT_POWER
+)
 UNIT_WORD = r"[A-Za-zÅµμ]{1,10}" + UNIT_POWER
 UNIT_SYNTAX = (
-    r"(?:\\(?:mathrm|text|textrm|rm|mbox|unit|si)" + UNIT_ARGUMENT + "|" + UNIT_WORD + "(?:/" + UNIT_WORD + ")?)"
+    r"(?:\\(?:mathrm|text|textrm|rm|mbox|unit|si)" + UNIT_ARGUMENT + "|" + UNIT_SYMBOL + "(?:/" + UNIT_WORD + ")?)"
 )
 # Past closing math ($, $$, \) or \]), only a tie or thin space, or a math-mode or siunitx unit command, continues
 # the value; a word after a plain space is prose, as in "$p=0.05$ threshold". A unit never starts on the next line.

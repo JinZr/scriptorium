@@ -437,3 +437,22 @@ def test_fixed_arity_settings_definition_displays_and_bracketed_table_bodies(tmp
         ("table", "[3.5]"),
         ("quantity", "3.5"),
     ]
+
+
+def test_prose_words_are_not_units_and_crlf_separates_arguments(tmp_path):
+    body = (
+        "The score was 0.5 higher, 2.5 ms, 3.5 GB, and 1.5 as before.\r\n"
+        "\\setcounter{score}\r\n{2.5}\r\n"
+        "\\begin{tabular}\r\n{c}\r\n0.75\r\n\\end{tabular}\r\n"
+    )
+    (tmp_path / "main.tex").write_bytes(("\\begin{document}\r\n" + body + "\\end{document}\r\n").encode())
+    manager = ManuscriptManager(tmp_path)
+    navigation = json.loads(manager.create_navigation(tmp_path, manager.scan_sources(tmp_path, "main.tex")))
+    assert [(entry["command"], entry["value"]) for entry in navigation["entries"]] == [
+        ("quantity", "0.5"),
+        ("quantity", "2.5 ms"),
+        ("quantity", "3.5 GB"),
+        ("quantity", "1.5"),
+        ("tabular", "0.75"),
+        ("quantity", "0.75"),
+    ]
