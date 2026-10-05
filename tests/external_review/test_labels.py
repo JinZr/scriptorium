@@ -1,4 +1,5 @@
 import json
+import subprocess
 
 import pytest
 
@@ -13,6 +14,7 @@ from ._support import project, start, submit
 LABELS = {
     "label_set": "held-out",
     "annotators": ["annotator-a"],
+    "trials": ["with-tools", "without-tools"],
     "cases": [
         {
             "case": "paper",
@@ -32,6 +34,17 @@ def save(path, value):
     return path
 
 
+def planned(root, value=LABELS):
+    """Label every case with the project's committed tree, as an operator does before any trial."""
+    tree = subprocess.run(
+        ["git", "-C", str(root), "rev-parse", "HEAD^{tree}"], check=True, capture_output=True, text=True
+    ).stdout.strip()
+    value = json.loads(json.dumps(value))
+    for item in value["cases"]:
+        item["tree_sha"] = tree
+    return value
+
+
 def bound(packet, value=LABELS):
     """Bind each labeled case to the tree its trials were collected from."""
     trees = {trial["case"]: trial["comparison"]["tree"] for trial in read_json(packet / "mapping.json")["trials"]}
@@ -45,6 +58,7 @@ def bound(packet, value=LABELS):
 def packet(tmp_path_factory):
     directory = tmp_path_factory.mktemp("held-out")
     root = project(directory)
+    labels = seal_labels(save(directory / "labels.json", planned(root)), directory / "labels")
     collections = []
     for case, trial, computation, findings in (
         ("paper", "with-tools", "allowed", True),
@@ -53,7 +67,8 @@ def packet(tmp_path_factory):
         ("paper-fixed", "without-tools", "denied", False),
     ):
         run_id, task_id = start(root)
-        before = collect(root, run_id, directory / f"{case}-{trial}-before", case, trial, host_computation=computation)
+        before = directory / f"{case}-{trial}-before"
+        collect(root, run_id, before, case, trial, host_computation=computation, labels=labels)
         with ScriptoriumService(root) as service:
             submit(service, task_id, session=f"{case}-{trial}", findings=findings)
         output = directory / f"{case}-{trial}"
@@ -116,6 +131,8 @@ def test_score_reports_labeled_recall_control_false_alarms_and_host_computation(
         (lambda value: value["cases"].append(value["cases"][0]), "labeled once"),
         (lambda value: value.update(annotators=[]), "annotators"),
         (lambda value: value["cases"][0].update(tree_sha="HEAD"), "tree_sha"),
+        (lambda value: value.update(trials=[]), "trials"),
+        (lambda value: value.update(trials=["with-tools", "with-tools"]), "planned trial is named once"),
     ],
 )
 def test_invalid_labels_are_not_sealed(tmp_path, change, message):
@@ -165,6 +182,11 @@ def test_planned_host_computation_is_a_compared_input(packet, tmp_path):
             lambda value: value["cases"].append({**value["cases"][0], "case": "paper-2"}),
             "Trial with-tools is missing labeled cases: paper-2",
         ),
+        # A packet that drops a whole planned arm cannot report only the arms that remain.
+        (lambda value: value["trials"].append("with-host-search"), "Planned trials are missing: with-host-search"),
+        (lambda value: value.update(trials=["with-tools"]), "Trial without-tools is not planned"),
+        # Labels written after the reviews are seen were never bound to the trial baselines.
+        (lambda value: value.update(annotators=["annotator-b"]), "not bound to these labels before review"),
     ],
 )
 def test_score_rejects_labels_for_other_trees_or_uncollected_cases(packet, tmp_path, change, message):
@@ -174,3 +196,24 @@ def test_score_rejects_labels_for_other_trees_or_uncollected_cases(packet, tmp_p
     with pytest.raises(ValueError, match=message):
         score(packet, labels, save(tmp_path / "matches.json", matches(packet, labels, ())), tmp_path / "score")
     assert not (tmp_path / "score").exists()
+
+
+def test_labels_bind_to_a_planned_baseline_before_the_first_attempt(tmp_path):
+    root = project(tmp_path)
+    run_id, task_id = start(root)
+    labels = seal_labels(save(tmp_path / "labels.json", planned(root)), tmp_path / "labels")
+    with pytest.raises(ValueError, match="Trial other is not planned"):
+        collect(root, run_id, tmp_path / "unplanned", "paper", "other", labels=labels)
+    before = collect(root, run_id, tmp_path / "before", "paper", "with-tools", labels=labels)
+    assert read_json(before / "collection.json")["labels_digest"] == verify_seal(labels)
+    with ScriptoriumService(root) as service:
+        submit(service, task_id)
+    with pytest.raises(ValueError, match="only before the first attempt"):
+        collect(root, run_id, tmp_path / "late", "paper", "with-tools", labels=labels)
+    other = save(tmp_path / "other.json", planned(root, {**LABELS, "annotators": ["annotator-b"]}))
+    with pytest.raises(ValueError, match="Baseline was not bound to these labels"):
+        collect(
+            root, run_id, tmp_path / "after", "paper", "with-tools", before, labels=seal_labels(other, tmp_path / "o")
+        )
+    after = collect(root, run_id, tmp_path / "after", "paper", "with-tools", before, labels=labels)
+    assert read_json(after / "collection.json")["labels_digest"] == verify_seal(labels)

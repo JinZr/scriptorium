@@ -44,10 +44,13 @@ class LabelSet(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
     label_set: Text
     annotators: Annotated[list[Text], Field(min_length=1)]
+    trials: Annotated[list[Text], Field(min_length=1)]
     cases: Annotated[list[LabeledCase], Field(min_length=1)]
 
     @model_validator(mode="after")
     def validate_cases(self):
+        if len(set(self.trials)) != len(self.trials):
+            raise ValueError("Each planned trial is named once")
         cases = {item.case: item for item in self.cases}
         if len(cases) != len(self.cases):
             raise ValueError("Each case is labeled once")
@@ -71,19 +74,29 @@ class LabelSet(BaseModel):
         item = self.labeled(case)
         return set(item.corrected) if item.control_of else {problem.id for problem in item.problems}
 
-    def check_trials(self, trials):
-        """Each trial covers every labeled case, collected from the manuscript tree its labels describe."""
+    def check_planned(self, case, trial, tree):
+        """A trial is planned by the labels and collected from the manuscript tree they describe."""
+        if trial not in self.trials:
+            raise ValueError(f"Trial {trial} is not planned by label set {self.label_set}")
+        if tree != (labeled := self.labeled(case).tree_sha):
+            raise ValueError(f"Trial {trial} of {case} was not collected from labeled tree {labeled}")
+
+    def check_trials(self, trials, labels_digest):
+        """Every planned trial covers every labeled case from baselines bound to these labels before review."""
         by_name = defaultdict(set)
         for trial in trials:
-            tree = self.labeled(trial["case"]).tree_sha
-            if trial["comparison"]["tree"] != tree:
-                raise ValueError(
-                    f"Trial {trial['trial']} of {trial['case']} was not collected from labeled tree {tree}"
-                )
+            self.check_planned(trial["case"], trial["trial"], trial["comparison"]["tree"])
             by_name[trial["trial"]].add(trial["case"])
+        if missing := sorted(set(self.trials) - set(by_name)):
+            raise ValueError(f"Planned trials are missing: {', '.join(missing)}")
         for name, cases in sorted(by_name.items()):
             if missing := sorted({item.case for item in self.cases} - cases):
                 raise ValueError(f"Trial {name} is missing labeled cases: {', '.join(missing)}")
+        for trial in trials:
+            if trial["comparison"].get("labels_digest") != labels_digest:
+                raise ValueError(
+                    f"Trial {trial['trial']} of {trial['case']} was not bound to these labels before review"
+                )
 
 
 class Match(BaseModel):
@@ -189,7 +202,7 @@ def score(packet, labels_dir, matches_path, output):
     origins = mapping["candidates"]
     raw = matches_path.read_bytes()
     matched = validate_matches(raw, packet_digest, labels_digest, labels, origins)
-    labels.check_trials(mapping["trials"])
+    labels.check_trials(mapping["trials"], labels_digest)
     trials = [score_trial(trial, labels, matched, origins) for trial in mapping["trials"]]
     result = {
         "packet_digest": packet_digest,
@@ -205,6 +218,8 @@ def score(packet, labels_dir, matches_path, output):
             "Recall covers only the labeled problems. Unmatched candidates are not scored as false positives.",
             "Control false alarms count candidates matched to corrected problems on the corrected manuscript.",
             "Trials without an accepted review keep their labeled problems in the denominator.",
+            "Labels were bound to every trial's baseline before its first attempt; the seals show binding order,"
+            " not who saw the labels.",
             "Host computation is the operator's planned condition, not an observation of tool use;"
             " collections without a baseline sealed before review report it as unknown.",
         ],

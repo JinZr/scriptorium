@@ -27,8 +27,14 @@ python -m egs.external_review.collect \
   --project /absolute/manuscript-project --run RUN_ID \
   --case paper-01 --trial configuration-a \
   --host-computation denied \
+  --labels /absolute/evaluation/labels \
   --output /absolute/evaluation/a-before
 ```
+
+`--labels` binds the sealed held-out labels of section 5 to this baseline. It is accepted only before the first
+attempt, for a trial the labels plan and the manuscript tree they describe. The after-review collection inherits
+the binding, and scoring requires it, so labels written after reviews are seen cannot be scored as held out.
+Omit it when no human-label score is planned.
 
 `--host-computation` records whether the operator plans to let the reviewer run its own calculations on the
 host (`allowed`, `denied` or `unknown`). Scriptorium has no calculation tool and does not enforce or observe
@@ -169,13 +175,15 @@ Write a label file per held-out manuscript set. A labeled case lists its known p
 inserted on purpose and `documented` ones come from errata, retractions or published replies. A control case is
 a corrected copy of a labeled case and names the problems its correction removed. `tree_sha` is the Git tree of
 the committed manuscript the labels describe (`git rev-parse COMMIT^{tree}`); scoring rejects a trial collected
-from another tree, and every trial name must cover every labeled case, so an omitted manuscript or control
-cannot shrink the denominators:
+from another tree. `trials` names every planned trial arm: scoring rejects a packet that omits or adds an arm, and
+each arm must cover every labeled case, so an omitted manuscript, control or configuration cannot shrink the
+results:
 
 ```json
 {
   "label_set": "held-out-2026",
   "annotators": ["annotator-a", "annotator-b"],
+  "trials": ["configuration-a", "configuration-b"],
   "cases": [
     {
       "case": "paper-01",
@@ -189,7 +197,8 @@ cannot shrink the denominators:
 }
 ```
 
-Seal the labels before any trial, then keep them away from reviewers and judges:
+Seal the labels before any trial and bind them to each baseline with `--labels` (section 1), then keep them away
+from reviewers and judges:
 
 ```bash
 python -m egs.external_review.labels seal \

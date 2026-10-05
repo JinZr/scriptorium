@@ -60,6 +60,8 @@ def comparison_fields(collection):
             if collection.get("prepared_before_review")
             else "unknown"
         ),
+        # Labels count as held out only when a baseline sealed before review was bound to them.
+        "labels_digest": collection.get("labels_digest") if collection.get("prepared_before_review") else None,
     }
 
 
