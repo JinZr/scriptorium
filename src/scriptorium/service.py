@@ -3,6 +3,7 @@ from __future__ import annotations
 from contextlib import contextmanager
 from dataclasses import asdict, is_dataclass
 from datetime import datetime, timezone
+import difflib
 from enum import Enum
 import fcntl
 from hashlib import sha256
@@ -529,18 +530,40 @@ class ScriptoriumService:
         bundle, files = self.armarius._retrieval_bundle(run, metadata)
         return attempt, task, bundle, files
 
-    def read_task(self, attempt_id: str, path: str, start_line: int, max_lines: int, offset: int, max_chars: int):
+    def read_task(
+        self,
+        attempt_id: str,
+        path: str,
+        start_line: int,
+        max_lines: int,
+        offset: int,
+        max_chars: int,
+        end_line: int | None = None,
+        anchor: bool = False,
+    ):
         with self._retrieval_operation(attempt_id, "task read"):
-            return self._read_task(attempt_id, path, start_line, max_lines, offset, max_chars)
+            return self._read_task(attempt_id, path, start_line, max_lines, offset, max_chars, end_line, anchor)
 
-    def _read_task(self, attempt_id: str, path: str, start_line: int, max_lines: int, offset: int, max_chars: int):
+    def _read_task(
+        self,
+        attempt_id: str,
+        path: str,
+        start_line: int,
+        max_lines: int,
+        offset: int,
+        max_chars: int,
+        end_line: int | None,
+        anchor: bool,
+    ):
         attempt, task, bundle, files = self._readable_task(attempt_id)
         if start_line < 1 or not 1 <= max_lines <= 100 or offset < 0 or not 1 <= max_chars <= 8000:
             raise ConfigurationError("invalid read range or size")
+        if end_line is not None and end_line < start_line:
+            raise ConfigurationError("end line cannot precede start line")
         source = next((item for item in bundle.anchor_map.sources if item.read_path == path), None)
         if source is None:
             source = next((item for item in bundle.anchor_map.sources if item.source_path == path), None)
-        if path in {"manifest.json", "navigation.json", "source-map.json"}:
+        if path in _BUNDLE_METADATA:
             source = None
             read_path = bundle.workspace / path
             source_digest = files[path]["digest"]
@@ -548,11 +571,14 @@ class ScriptoriumService:
             read_path = bundle.workspace / source.read_path
             source_digest = source.source_digest
         else:
-            raise ConfigurationError("path is not a text source in the frozen bundle")
+            raise _unknown_text_path(path, bundle.anchor_map)
         self.armarius._verify_retrieval_file(
             bundle.workspace, files, read_path.relative_to(bundle.workspace).as_posix()
         )
-        pieces, next_line, next_offset = _read_text_window(read_path, start_line, max_lines, offset, max_chars)
+        window = max_lines if end_line is None else min(max_lines, end_line - start_line + 1)
+        pieces, next_line, next_offset = _read_text_window(read_path, start_line, window, offset, max_chars)
+        if end_line is not None and next_line is not None and next_line > end_line:
+            next_line = next_offset = None
         response = bound_read(
             {
                 "path": path,
@@ -565,6 +591,8 @@ class ScriptoriumService:
             attempt_id,
             max_lines,
             max_chars,
+            end_line,
+            anchor,
         )
         self._record_access(
             task.run_id,
@@ -600,8 +628,7 @@ class ScriptoriumService:
         search_items = [(item.source_path, bundle.workspace / item.read_path, item.source_digest) for item in sources]
         path_items = {item[0]: item for item in search_items}
         path_items.update((source.read_path, item) for source, item in zip(sources, search_items))
-        metadata_names = ("manifest.json", "navigation.json", "source-map.json")
-        for name in metadata_names:
+        for name in _BUNDLE_METADATA:
             read_path = bundle.workspace / name
             item = (name, read_path, files[name]["digest"])
             search_items.append(item)
@@ -609,7 +636,7 @@ class ScriptoriumService:
         if path is not None:
             item = path_items.get(path)
             if item is None:
-                raise ConfigurationError("path is not a text source in the frozen bundle")
+                raise _unknown_text_path(path, bundle.anchor_map)
             search_items = [item]
             if path_items[item[0]] == item:
                 path = item[0]
@@ -1428,6 +1455,21 @@ class ScriptoriumService:
             lines.extend(["", "## Gate conditions still open", ""])
             lines.extend(f"- `{reason}`" for reason in plain["gate"]["reasons"])
         return "\n".join(lines) + "\n"
+
+
+_BUNDLE_METADATA = ("manifest.json", "navigation.json", "source-map.json")
+
+
+def _unknown_text_path(path: str, anchor_map) -> ConfigurationError:
+    text_paths = [item.read_path for item in anchor_map.sources if item.text_anchorable]
+    candidates = sorted(
+        [*text_paths, *_BUNDLE_METADATA],
+        key=lambda candidate: (-difflib.SequenceMatcher(None, path, candidate).ratio(), candidate),
+    )[:3]
+    message = f"path is not a text source in the frozen bundle: {path[:200]}"
+    if any(item.source_path == path or item.read_path == path for item in anchor_map.sources):
+        message += "; it is a frozen non-text source, so inspect the rendered pages with task page"
+    return ConfigurationError(f"{message}; closest text read paths: {', '.join(candidates)}")
 
 
 def _read_text_window(path: Path, start_line: int, max_lines: int, offset: int, max_chars: int):

@@ -110,6 +110,14 @@ def build_parser() -> argparse.ArgumentParser:
     read_parser.add_argument("--max-lines", type=int, default=40)
     read_parser.add_argument("--offset", type=int, default=0)
     read_parser.add_argument("--max-chars", type=int, default=6000)
+    read_parser.add_argument(
+        "--end-line", type=int, help="last inclusive line; continuations stop after it instead of at end of file"
+    )
+    read_parser.add_argument(
+        "--anchor",
+        action="store_true",
+        help="also return an evidence anchor covering the completely returned lines of a text source",
+    )
     search_parser = task_commands.add_parser("search")
     search_parser.add_argument("attempt_id")
     search_parser.add_argument("--query", required=True)
@@ -303,6 +311,8 @@ def _dispatch_task(service: Any, arguments: argparse.Namespace) -> tuple[Any, in
                 arguments.max_lines,
                 arguments.offset,
                 arguments.max_chars,
+                arguments.end_line,
+                arguments.anchor,
             ),
             0,
             None,
