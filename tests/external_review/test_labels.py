@@ -6,7 +6,7 @@ import pytest
 from egs.external_review.collect import collect
 from egs.external_review.files import read_json, verify_seal
 from egs.external_review.judge import blind, summarize
-from egs.external_review.labels import score, seal_labels
+from egs.external_review.labels import LabelSet, score, seal_labels, validate_matches
 from scriptorium.service import ScriptoriumService
 
 from ._support import project, start, submit
@@ -24,7 +24,7 @@ LABELS = {
                 {"id": "P2", "kind": "documented", "summary": "Unsupported scope.", "locations": ["main.tex:4"]},
             ],
         },
-        {"case": "paper-fixed", "tree_sha": "0" * 40, "control_of": "paper", "corrected": ["P1"]},
+        {"case": "paper-fixed", "tree_sha": "1" * 40, "control_of": "paper", "corrected": ["P1"]},
     ],
 }
 
@@ -34,31 +34,41 @@ def save(path, value):
     return path
 
 
-def planned(root, value=LABELS):
-    """Label every case with the project's committed tree, as an operator does before any trial."""
-    tree = subprocess.run(
-        ["git", "-C", str(root), "rev-parse", "HEAD^{tree}"], check=True, capture_output=True, text=True
-    ).stdout.strip()
-    value = json.loads(json.dumps(value))
-    for item in value["cases"]:
-        item["tree_sha"] = tree
-    return value
+def git(root, *command):
+    return subprocess.run(["git", "-C", str(root), *command], check=True, capture_output=True, text=True).stdout.strip()
 
 
-def bound(packet, value=LABELS):
-    """Bind each labeled case to the tree its trials were collected from."""
-    trees = {trial["case"]: trial["comparison"]["tree"] for trial in read_json(packet / "mapping.json")["trials"]}
+def correct(root):
+    """Commit a corrected copy of the manuscript and return the original and corrected commits."""
+    original = git(root, "rev-parse", "HEAD")
+    with (root / "main.tex").open("a") as handle:
+        handle.write("% Corrected copy.\n")
+    git(root, "-c", "user.name=Test", "-c", "user.email=test@example.test", "commit", "-qam", "Correct")
+    return original, git(root, "rev-parse", "HEAD")
+
+
+def planned(trees, value=LABELS):
+    """Label each case with its committed tree, as an operator does before any trial."""
     value = json.loads(json.dumps(value))
     for item in value["cases"]:
         item["tree_sha"] = trees.get(item["case"], item["tree_sha"])
     return value
 
 
+def bound(packet, value=LABELS):
+    """Bind each labeled case to the tree its trials were collected from."""
+    return planned(
+        {trial["case"]: trial["comparison"]["tree"] for trial in read_json(packet / "mapping.json")["trials"]}, value
+    )
+
+
 @pytest.fixture(scope="module")
 def packet(tmp_path_factory):
     directory = tmp_path_factory.mktemp("held-out")
     root = project(directory)
-    labels = seal_labels(save(directory / "labels.json", planned(root)), directory / "labels")
+    commits = dict(zip(("paper", "paper-fixed"), correct(root)))
+    trees = {case: git(root, "rev-parse", f"{commit}^{{tree}}") for case, commit in commits.items()}
+    labels = seal_labels(save(directory / "labels.json", planned(trees)), directory / "labels")
     collections = []
     for case, trial, computation, findings in (
         ("paper", "with-tools", "allowed", True),
@@ -66,7 +76,7 @@ def packet(tmp_path_factory):
         ("paper-fixed", "with-tools", "allowed", True),
         ("paper-fixed", "without-tools", "denied", False),
     ):
-        run_id, task_id = start(root)
+        run_id, task_id = start(root, commits[case])
         before = directory / f"{case}-{trial}-before"
         collect(root, run_id, before, case, trial, host_computation=computation, labels=labels)
         with ScriptoriumService(root) as service:
@@ -129,6 +139,7 @@ def test_score_reports_labeled_recall_control_false_alarms_and_host_computation(
         (lambda value: value["cases"][1].update(corrected=["P9"]), "unknown problem"),
         (lambda value: value["cases"][1].update(control_of="paper-fixed"), "must correct a labeled case"),
         (lambda value: value["cases"].append(value["cases"][0]), "labeled once"),
+        (lambda value: value["cases"][1].update(tree_sha="0" * 40), "its own manuscript tree"),
         (lambda value: value.update(annotators=[]), "annotators"),
         (lambda value: value["cases"][0].update(tree_sha="HEAD"), "tree_sha"),
         (lambda value: value.update(trials=[]), "trials"),
@@ -179,7 +190,7 @@ def test_planned_host_computation_is_a_compared_input(packet, tmp_path):
     [
         (lambda value: value["cases"][0].update(tree_sha="1" * 40), "not collected from labeled tree"),
         (
-            lambda value: value["cases"].append({**value["cases"][0], "case": "paper-2"}),
+            lambda value: value["cases"].append({**value["cases"][0], "case": "paper-2", "tree_sha": "2" * 40}),
             "Trial with-tools is missing labeled cases: paper-2",
         ),
         # A packet that drops a whole planned arm cannot report only the arms that remain.
@@ -201,7 +212,8 @@ def test_score_rejects_labels_for_other_trees_or_uncollected_cases(packet, tmp_p
 def test_labels_bind_to_a_planned_baseline_before_the_first_attempt(tmp_path):
     root = project(tmp_path)
     run_id, task_id = start(root)
-    labels = seal_labels(save(tmp_path / "labels.json", planned(root)), tmp_path / "labels")
+    trees = {"paper": git(root, "rev-parse", "HEAD^{tree}")}
+    labels = seal_labels(save(tmp_path / "labels.json", planned(trees)), tmp_path / "labels")
     with pytest.raises(ValueError, match="Trial other is not planned"):
         collect(root, run_id, tmp_path / "unplanned", "paper", "other", labels=labels)
     before = collect(root, run_id, tmp_path / "before", "paper", "with-tools", labels=labels)
@@ -210,10 +222,25 @@ def test_labels_bind_to_a_planned_baseline_before_the_first_attempt(tmp_path):
         submit(service, task_id)
     with pytest.raises(ValueError, match="only before the first attempt"):
         collect(root, run_id, tmp_path / "late", "paper", "with-tools", labels=labels)
-    other = save(tmp_path / "other.json", planned(root, {**LABELS, "annotators": ["annotator-b"]}))
+    other = save(tmp_path / "other.json", planned(trees, {**LABELS, "annotators": ["annotator-b"]}))
     with pytest.raises(ValueError, match="Baseline was not bound to these labels"):
         collect(
             root, run_id, tmp_path / "after", "paper", "with-tools", before, labels=seal_labels(other, tmp_path / "o")
         )
     after = collect(root, run_id, tmp_path / "after", "paper", "with-tools", before, labels=labels)
     assert read_json(after / "collection.json")["labels_digest"] == verify_seal(labels)
+
+
+def test_candidates_merged_across_cases_cannot_share_one_match_list():
+    labels = LabelSet.model_validate(LABELS)
+    origins = {"C0001": [{"case": "paper"}, {"case": "paper-fixed"}]}
+    raw = json.dumps(
+        {
+            "packet_digest": "a" * 64,
+            "labels_digest": "b" * 64,
+            "matchers": ["annotator-a"],
+            "matches": [{"candidate_id": "C0001", "problems": ["P1"]}],
+        }
+    )
+    with pytest.raises(ValueError, match="merges cases with identical material: paper, paper-fixed"):
+        validate_matches(raw, "a" * 64, "b" * 64, labels, origins)

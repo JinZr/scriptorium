@@ -174,8 +174,8 @@ example validates and binds them, and never writes, suggests or infers either.
 Write a label file per held-out manuscript set. A labeled case lists its known problems; `planted` problems were
 inserted on purpose and `documented` ones come from errata, retractions or published replies. A control case is
 a corrected copy of a labeled case and names the problems its correction removed. `tree_sha` is the Git tree of
-the committed manuscript the labels describe (`git rev-parse COMMIT^{tree}`); scoring rejects a trial collected
-from another tree. `trials` names every planned trial arm: scoring rejects a packet that omits or adds an arm, and
+the committed manuscript the labels describe (`git rev-parse COMMIT^{tree}`); each case has its own tree, and
+scoring rejects a trial collected from another tree. `trials` names every planned trial arm: scoring rejects a packet that omits or adds an arm, and
 each arm must cover every labeled case, so an omitted manuscript, control or configuration cannot shrink the
 results:
 
@@ -207,8 +207,9 @@ python -m egs.external_review.labels seal \
 
 After preparing the judging packet, a person who has the labels reads each candidate in `judging/public/input.json`
 and records which labeled problems it identifies. Every candidate is annotated exactly once; an empty list means
-it matches none. Problem IDs must belong to each case the candidate came from, and on a control case only to its
-corrected problems. Copy `packet_digest` from the public seal and `labels_digest` from the label seal:
+it matches none. Problem IDs must belong to the case the candidate came from, and on a control case only to its
+corrected problems; scoring rejects a candidate merged from cases whose bundled material is identical, since one
+match list cannot use two cases' problem IDs. Copy `packet_digest` from the public seal and `labels_digest` from the label seal:
 
 ```json
 {
@@ -226,7 +227,8 @@ python -m egs.external_review.labels score \
 ```
 
 `scores/score.json` reports, per case and trial, the labeled problems found and missed (also by kind), on
-controls the corrected problems still reported as false alarms, the number of candidates matching no label,
+controls the distinct corrected problems still reported as false alarms (several candidates matching one
+corrected problem count once), the number of candidates matching no label,
 whether the trial had an accepted review, and its planned host computation. `by_trial` sums these across cases
 for each trial name. Trials without an accepted review keep their problems in the denominator. Recall covers only
 the labeled problems: an unmatched candidate may be a real, unlabeled concern, so it is not counted as a false

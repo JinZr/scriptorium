@@ -54,6 +54,9 @@ class LabelSet(BaseModel):
         cases = {item.case: item for item in self.cases}
         if len(cases) != len(self.cases):
             raise ValueError("Each case is labeled once")
+        # Matchers recognize a case by its manuscript, so two cases cannot share one tree.
+        if len({item.tree_sha for item in self.cases}) != len(self.cases):
+            raise ValueError("Each case labels its own manuscript tree")
         for item in self.cases:
             if item.control_of is None:
                 continue
@@ -131,9 +134,12 @@ def validate_matches(raw, packet_digest, labels_digest, labels, origins):
     for item in matches.matches:
         if len(item.problems) != len(set(item.problems)):
             raise ValueError(f"Candidate {item.candidate_id} repeats a problem")
-        for case in {origin["case"] for origin in origins[item.candidate_id]}:
-            if not set(item.problems) <= labels.allowed(case):
-                raise ValueError(f"Candidate {item.candidate_id} matches a problem not labeled for {case}")
+        cases = sorted({origin["case"] for origin in origins[item.candidate_id]})
+        # Problem IDs are local to a case, so one match list cannot serve candidates merged across cases.
+        if len(cases) > 1:
+            raise ValueError(f"Candidate {item.candidate_id} merges cases with identical material: {', '.join(cases)}")
+        if not set(item.problems) <= labels.allowed(cases[0]):
+            raise ValueError(f"Candidate {item.candidate_id} matches a problem not labeled for {cases[0]}")
     return {item.candidate_id: set(item.problems) for item in matches.matches}
 
 
@@ -216,7 +222,8 @@ def score(packet, labels_dir, matches_path, output):
         "limits": [
             "Labels and candidate matches are human judgments supplied by the operator; this tool generates neither.",
             "Recall covers only the labeled problems. Unmatched candidates are not scored as false positives.",
-            "Control false alarms count candidates matched to corrected problems on the corrected manuscript.",
+            "Control false alarms count distinct corrected problems that candidates on the corrected manuscript"
+            " still match, not the candidates themselves.",
             "Trials without an accepted review keep their labeled problems in the denominator.",
             "Labels were bound to every trial's baseline before its first attempt; the seals show binding order,"
             " not who saw the labels.",
