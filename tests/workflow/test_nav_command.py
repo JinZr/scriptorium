@@ -235,3 +235,17 @@ def test_values_are_cut_by_encoded_size_beside_a_long_path(tmp_path, monkeypatch
         assert first["source_path"] == chapter and first["value_truncated"] is True
         assert 0 < len(first["value"]) < 500 and set(first["value"]) == {"\x01"}
         assert second["value"] == "Next" and "value_truncated" not in second
+
+
+def test_path_filters_too_long_to_continue_are_rejected_with_guidance(tmp_path):
+    # Shell quoting turns each apostrophe into five characters, and JSON escaping makes that seven bytes.
+    chapter = "/".join(["'" * 250] * 4) + "/chapter.tex"
+    files = {chapter: "\\section{One}\n\\section{Two}\n"}
+    service, attempt_id = _nav_run(tmp_path, files, f"\\input{{{chapter[:-4]}}}\n")
+    with service:
+        with pytest.raises(ConfigurationError, match="retry without --path and match entries by source_path"):
+            service.nav_task(attempt_id, path=chapter, limit=1)
+        # Without a continuation the filter fits, and without the filter entries name the path once.
+        assert [entry["value"] for entry in service.nav_task(attempt_id, path=chapter)["entries"]] == ["One", "Two"]
+        unfiltered = service.nav_task(attempt_id, ["heading"], limit=1)
+        assert unfiltered["entries"][0]["source_path"] == chapter and unfiltered["next_cursor"] == 1
