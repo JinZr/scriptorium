@@ -411,3 +411,29 @@ def test_display_brackets_powers_of_ten_and_post_document_environments(tmp_path)
         ("displaymath", "E = 0.5", 3, 5),
         ("quantity", "0.5", 4, 4),
     ]
+
+
+def test_fixed_arity_settings_definition_displays_and_bracketed_table_bodies(tmp_path):
+    body = (
+        "\\label{result} {0.5 eV} and \\citep[p.~2]{key} {1.5 K}\n"
+        "\\newcommand{\\foo}{\\begin{equation}x=2.5\\end{equation}\\[y\\]}\n"
+        "\\begin{tabular}{c}[0.25, 0.75] \\\\\n\\end{tabular}\n"
+        "\\begin{table}[h][3.5]\n\\end{table}\n"
+    )
+    (tmp_path / "main.tex").write_text("\\begin{document}\n" + body + "\\end{document}\n")
+    manager = ManuscriptManager(tmp_path)
+    navigation = json.loads(manager.create_navigation(tmp_path, manager.scan_sources(tmp_path, "main.tex")))
+    entries = [
+        (entry["command"], entry["value"])
+        for entry in navigation["entries"]
+        if entry["command"] not in {"label", "citep"}
+    ]
+    assert entries == [
+        ("quantity", "0.5 eV"),
+        ("quantity", "1.5 K"),
+        ("tabular", "[0.25, 0.75] \\\\"),
+        ("quantity", "0.25"),
+        ("quantity", "0.75"),
+        ("table", "[3.5]"),
+        ("quantity", "3.5"),
+    ]

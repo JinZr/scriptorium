@@ -105,6 +105,36 @@ NON_QUANTITY_ARGUMENT_PATTERN = re.compile(
 )
 # Only the leading brace groups of these commands are settings; later groups hold typeset content.
 NON_QUANTITY_GROUP_LIMITS = {
+    **dict.fromkeys(
+        (
+            "label",
+            "ref",
+            "eqref",
+            "pageref",
+            "autoref",
+            "cref",
+            "Cref",
+            "includegraphics",
+            "input",
+            "include",
+            "url",
+            "vspace",
+            "hspace",
+            "linespread",
+            "usepackage",
+            "documentclass",
+            "bibliographystyle",
+            "bibliography",
+            "addbibresource",
+            "graphicspath",
+            "cline",
+            "cmidrule",
+            "hypersetup",
+            "geometry",
+        ),
+        1,
+    ),
+    "specialrule": 3,
     "multicolumn": 2,
     "multirow": 2,
     "color": 1,
@@ -400,16 +430,18 @@ def _command_argument_spans(text: str) -> Iterator[tuple[int, int]]:
     for match in NON_QUANTITY_ARGUMENT_PATTERN.finditer(text):
         start = match.end()
         end = _unbraced_argument_end(text, match.group(1), start)
-        braces = NON_QUANTITY_GROUP_LIMITS.get(match.group(1))
+        # Citation commands take one key group after their optional notes; other unlisted commands take any groups.
+        braces = NON_QUANTITY_GROUP_LIMITS.get(match.group(1), 1 if "cite" in match.group(1) else None)
         if end > start and match.group(1) in DEFINITION_COMMANDS:
             braces -= 1
         name = ENVIRONMENT_NAME_PATTERN.match(text, end) if match.group(1) == "begin" else None
+        groups = ENVIRONMENT_ARGUMENT_GROUPS.get(name.group(1).strip(), 0) if name else 0
         if name:
-            braces = 1 + ENVIRONMENT_ARGUMENT_GROUPS.get(name.group(1).strip(), 0)
-        # Optional bracket arguments after the last setting group, as in \scalebox{x}[y] or \begin{table}[h], are
-        # settings too, but a display-math body may open with a bracket, as in \begin{equation}[0.5, 1.0].
+            braces = 1 + groups
+        # One bracket option may follow the last setting group, as in \scalebox{x}[y] or \begin{table}[h]; a body may
+        # open with a bracket after display math or a column specification, as in \begin{equation}[0.5, 1.0].
         options = match.group(1) in TRAILING_OPTION_COMMANDS and not (
-            name and name.group(1).strip() in EQUATION_ENVIRONMENTS
+            name and (groups or name.group(1).strip() in EQUATION_ENVIRONMENTS)
         )
         # A required group may start on the next line; trailing groups and brackets stay on the line.
         while (
@@ -422,6 +454,7 @@ def _command_argument_spans(text: str) -> Iterator[tuple[int, int]]:
             else:
                 bracket = text.find("]", opening)
                 closing = None if bracket == -1 else bracket + 1
+                options = options and braces != 0
             if closing is None:
                 break
             end = closing
@@ -444,8 +477,10 @@ def _environment_body_start(text: str, name: str, position: int) -> int:
     """Return where an environment's body starts, past the placement options and mandatory arguments it takes."""
     groups = ENVIRONMENT_ARGUMENT_GROUPS.get(name, 0)
     options = name in TABLE_ENVIRONMENTS
+    start = position
+    # Options precede the last mandatory argument, or follow the name of a table without one, as in \begin{table}[h].
     while (group := re.match(ARGUMENT_SPACE + r"([\[{])", text[position:])) and (
-        groups if group[1] == "{" else options
+        groups if group[1] == "{" else options and (groups or position == start)
     ):
         opening = position + group.end()
         if group[1] == "{":
@@ -737,12 +772,14 @@ class ManuscriptManager:
         ]
         if body is not None:
             floor, ceiling = body
-            # Tables and equations after \end{document}, or in a file input only outside the body, are never typeset.
-            displays = [*cls._navigation_environments(masked), *cls._navigation_displays(text)]
-            spans.extend(span for span in displays if floor <= span[1] < ceiling)
             # Settings and definitions, such as \newcommand{\temp}{\SI{300}{K}}, typeset no reported value.
             arguments = _merged_spans(list(_command_argument_spans(masked)))
             lefts = [left for left, _ in arguments]
+            # Tables and equations after \end{document}, or in a file input only outside the body, are never typeset.
+            displays = [*cls._navigation_environments(masked), *cls._navigation_displays(text)]
+            spans.extend(
+                span for span in displays if floor <= span[1] < ceiling and not _within(arguments, lefts, span[1])
+            )
             quantity_commands = [
                 span
                 for span in cls._quantity_commands(masked)
