@@ -1541,14 +1541,15 @@ class Armarius:
             prior, InventoriedScientificReviewOutput
         ):
             return []
-        # Each listed claim carries forward at most one prior claim, so two open claims on one page need two entries.
-        listed = [(entry.claim_anchor, entry.prominence) for entry in output.claim_inventory]
+        # A claim is identified by its statement, anchor, and prominence; each listed claim carries forward at most
+        # one prior claim, so a repeated open claim needs as many entries.
+        listed = [(entry.claim, entry.claim_anchor, entry.prominence) for entry in output.claim_inventory]
         dropped = []
         for entry in prior.claim_inventory:
             if entry.check_indices:
                 continue
-            if (entry.claim_anchor, entry.prominence) in listed:
-                listed.remove((entry.claim_anchor, entry.prominence))
+            if (identity := (entry.claim, entry.claim_anchor, entry.prominence)) in listed:
+                listed.remove(identity)
             else:
                 dropped.append(entry)
         return [
@@ -1556,7 +1557,7 @@ class Armarius:
                 "claim_inventory.unchecked_claim_dropped",
                 "/claim_inventory",
                 "A continuation must list every claim the accepted inventory left unchecked, with the same "
-                "claim_anchor and prominence, until a claim check assesses it.",
+                "claim, claim_anchor, and prominence, until a claim check assesses it.",
                 expected=entry.model_dump(mode="json", exclude_none=True),
                 actual=None,
             )

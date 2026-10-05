@@ -350,6 +350,12 @@ def _inventory_entry(**changes):
     return {**entry, **changes}
 
 
+def _checked_entry(**changes):
+    check = _judged_check()
+    entry = {"claim": check["claim"], "claim_anchor": check["claim_anchor"], "prominence": "headline"}
+    return {**entry, "check_indices": [0], **changes}
+
+
 def test_claim_inventory_accepts_checked_and_explained_unchecked_claims() -> None:
     output = _inventoried_output()
     output["claim_inventory"].append(_inventory_entry())
@@ -364,23 +370,20 @@ def test_claim_inventory_accepts_checked_and_explained_unchecked_claims() -> Non
     ("inventory", "message"),
     [
         ([], "each claim check must assess exactly one inventoried claim"),
+        ([_checked_entry(), _checked_entry()], "each claim check must assess exactly one inventoried claim"),
+        ([_checked_entry(check_indices=[1])], "unknown claim check index"),
+        # A check linked from another claim's entry leaves both claims misreported, even on the same page.
         (
-            [
-                _inventory_entry(check_indices=[0], not_checked_reason=None, prominence="headline"),
-                _inventory_entry(check_indices=[0], not_checked_reason=None, prominence="headline"),
-            ],
-            "each claim check must assess exactly one inventoried claim",
-        ),
-        ([_inventory_entry(check_indices=[1], not_checked_reason=None)], "unknown claim check index"),
-        ([_inventory_entry(check_indices=[0])], "not both or neither"),
-        (
-            [_inventory_entry(check_indices=[0], not_checked_reason=None), _inventory_entry(not_checked_reason=None)],
-            "not both or neither",
+            [_inventory_entry(check_indices=[0], not_checked_reason=None, prominence="headline")],
+            "restate its inventoried claim and claim_anchor exactly",
         ),
         (
-            [_inventory_entry(check_indices=[0], not_checked_reason=None), _inventory_entry(prominence="headline")],
-            "must check every inventoried headline claim",
+            [_checked_entry(claim_anchor={"source_path": "manuscript.pdf", "page": 2})],
+            "restate its inventoried claim and claim_anchor exactly",
         ),
+        ([_checked_entry(not_checked_reason="Also unchecked.")], "not both or neither"),
+        ([_checked_entry(), _inventory_entry(not_checked_reason=None)], "not both or neither"),
+        ([_checked_entry(), _inventory_entry(prominence="headline")], "must check every inventoried headline claim"),
     ],
 )
 def test_claim_inventory_rejects_untraced_or_unexplained_claims(inventory, message) -> None:

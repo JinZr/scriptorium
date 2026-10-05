@@ -490,6 +490,12 @@ class InventoriedScientificReviewOutput(JudgedScientificReviewOutput):
         for entry in self.claim_inventory:
             if any(index >= len(self.claim_checks) for index in entry.check_indices):
                 raise ValueError("an inventoried claim refers to an unknown claim check index")
+            if any(
+                (self.claim_checks[index].claim, self.claim_checks[index].claim_anchor)
+                != (entry.claim, entry.claim_anchor)
+                for index in entry.check_indices
+            ):
+                raise ValueError("a linked claim check must restate its inventoried claim and claim_anchor exactly")
             listed.extend(entry.check_indices)
         if sorted(listed) != list(range(len(self.claim_checks))):
             raise ValueError("each claim check must assess exactly one inventoried claim")

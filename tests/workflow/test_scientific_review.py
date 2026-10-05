@@ -10,8 +10,8 @@ from scriptorium.service import ScriptoriumService
 from ._support import PdfBuildingManuscriptManager, claim, make_repository, review_finding, submit
 
 
-def _claim_check(*, assessment="supported", finding_indices=None, evidence=None):
-    return {
+def _claim_check(*, assessment="supported", finding_indices=None, evidence=None, **changes):
+    check = {
         "claim": "The manuscript reports a clear result.",
         "evidence": evidence or [{"source_path": "manuscript.pdf", "page": 1}],
         "critical_question": "Does the reported result support the conclusion?",
@@ -24,6 +24,7 @@ def _claim_check(*, assessment="supported", finding_indices=None, evidence=None)
         "assessment": assessment,
         "finding_indices": finding_indices or [],
     }
+    return {**check, **changes}
 
 
 def test_substantive_review_records_anchored_claim_checks_and_links_findings(tmp_path):
@@ -267,9 +268,13 @@ def test_claim_inventory_anchor_is_validated_and_rendered(tmp_path):
             "check_indices": [],
             "not_checked_reason": "The general case is outside the frozen bundle.",
         }
-        output = {"summary": "Checked the result.", "findings": [], "claim_checks": [_claim_check()]}
-        bad = {**headline, "claim_anchor": {**anchor, "quoted_text": "This text is not in the manuscript."}}
-        rejected = submit(service, review, {**output, "claim_inventory": [bad, unchecked]})
+        check = _claim_check(claim=headline["claim"], claim_anchor=anchor)
+        output = {"summary": "Checked the result.", "findings": [], "claim_checks": [check]}
+        bad_anchor = {**anchor, "quoted_text": "This text is not in the manuscript."}
+        bad = {**output, "claim_checks": [{**check, "claim_anchor": bad_anchor}]}
+        rejected = submit(
+            service, review, {**bad, "claim_inventory": [{**headline, "claim_anchor": bad_anchor}, unchecked]}
+        )
         assert rejected["attempt"].status == AttemptStatus.FAILED
         assert any("/claim_inventory/0/claim_anchor" in str(issue) for issue in rejected["validation_report"]["issues"])
         asyncio.run(service.retry_task(run.id, review["task"].id))
@@ -287,7 +292,7 @@ def test_claim_inventory_anchor_is_validated_and_rendered(tmp_path):
             "inventoried supporting claim at `manuscript.pdf:page 1`: The result generalizes. — not checked: "
             "The general case is outside the frozen bundle." in markdown
         )
-        assert "  - [0] The manuscript reports a clear result. — supported" in markdown
+        assert "  - [0] The result is clear. — supported" in markdown
 
 
 def test_complete_review_must_check_every_inventoried_headline_claim(tmp_path):
@@ -297,7 +302,7 @@ def test_complete_review_must_check_every_inventoried_headline_claim(tmp_path):
         review = claim(service, run.id, AgentRole.SUBSTANTIVE_REVIEW)
         page = {"source_path": "manuscript.pdf", "page": 1}
         inventory = [
-            {"claim": "The result is clear.", "claim_anchor": page, "prominence": "headline", "check_indices": [0]},
+            {"claim": _claim_check()["claim"], "claim_anchor": page, "prominence": "headline", "check_indices": [0]},
             {
                 "claim": "The result generalizes.",
                 "claim_anchor": page,
@@ -385,7 +390,7 @@ def test_continuation_must_keep_listing_claims_the_accepted_inventory_left_unche
         assert "empty check_indices list with a not_checked_reason" in first["prompt"]
         assert "prior inventory left unchecked, one entry per claim" in first["prompt"]
         checked = {
-            "claim": "The result is clear.",
+            "claim": _claim_check()["claim"],
             "claim_anchor": page,
             "prominence": "headline",
             "check_indices": [0],
@@ -413,7 +418,8 @@ def test_continuation_must_keep_listing_claims_the_accepted_inventory_left_unche
         assert submit(service, first, partial)["attempt"].status == AttemptStatus.COMPLETED
         asyncio.run(service.continue_review(run.id, first["task"].id))
         second = claim(service, run.id, AgentRole.SUBSTANTIVE_REVIEW)
-        complete = {"summary": "Checked the page.", "findings": [], "claim_checks": [_claim_check()]}
+        generalizes = _claim_check(claim=open_headline["claim"], claim_anchor=open_headline["claim_anchor"])
+        complete = {"summary": "Checked the page.", "findings": [], "claim_checks": [generalizes]}
         resumed = {**open_headline, "check_indices": [0]}
         del resumed["not_checked_reason"]
         # One entry on the shared anchor carries forward only one of the two open claims.
@@ -429,10 +435,19 @@ def test_continuation_must_keep_listing_claims_the_accepted_inventory_left_unche
         assert receipt["attempt"].status == AttemptStatus.FAILED
         asyncio.run(service.retry_task(run.id, second["task"].id))
         fourth = claim(service, run.id, AgentRole.SUBSTANTIVE_REVIEW, session="fourth")
-        both = [resumed, {**resumed, "claim": "The result scales.", "check_indices": [1]}]
+        # A different claim on the same anchor and prominence does not carry the open claim forward.
+        robust = {**generalizes, "claim": "The result is robust."}
+        replaced = {**resumed, "claim": robust["claim"], "check_indices": [1]}
         receipt = submit(
-            service, fourth, {**complete, "claim_checks": [_claim_check(), _claim_check()], "claim_inventory": both}
+            service, fourth, {**complete, "claim_checks": [generalizes, robust], "claim_inventory": [resumed, replaced]}
         )
+        assert receipt["attempt"].status == AttemptStatus.FAILED
+        assert receipt["validation_report"]["issues"][0]["expected"]["claim"] == "The result scales."
+        asyncio.run(service.retry_task(run.id, second["task"].id))
+        fifth = claim(service, run.id, AgentRole.SUBSTANTIVE_REVIEW, session="fifth")
+        scales = {**generalizes, "claim": second_open["claim"]}
+        both = [resumed, {**resumed, "claim": scales["claim"], "check_indices": [1]}]
+        receipt = submit(service, fifth, {**complete, "claim_checks": [generalizes, scales], "claim_inventory": both})
         assert receipt["attempt"].status == AttemptStatus.COMPLETED
 
 
