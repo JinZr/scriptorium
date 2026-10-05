@@ -166,6 +166,9 @@ def test_invalid_labels_are_not_sealed(tmp_path, change, message):
 def test_score_rejects_unbound_or_invalid_matches(packet, tmp_path, change, message):
     labels = seal_labels(save(tmp_path / "labels.json", bound(packet)), tmp_path / "labels")
     value = matches(packet, labels)
+    # Candidate order differs between packets, so the changes target a paper-fixed candidate placed first.
+    origins = read_json(packet / "mapping.json")["candidates"]
+    value["matches"].sort(key=lambda item: origins[item["candidate_id"]][0]["case"] != "paper-fixed")
     change(value)
     with pytest.raises(ValueError, match=message):
         score(packet, labels, save(tmp_path / "matches.json", value), tmp_path / "score")
