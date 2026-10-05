@@ -214,3 +214,20 @@ def test_sources_input_before_the_document_report_no_quantities(tmp_path):
         ("body.tex", "quantity", "1.25 eV"),
         ("shared.tex", "quantity", r"0.5\%"),
     ]
+
+
+def test_environment_bodies_grouped_digits_and_the_document_end_bound_quantities(tmp_path):
+    body = (
+        "\\begin{equation}{E=0.5}\\end{equation}\n"
+        "\\begin{table}[h]{\\small Loss 0.25}\\end{table}\n"
+        "\\begin{tabular*}{0.9\\linewidth}{@{}cc@{}}\n1,234.5 & 2{,}000.25\\\\\n\\end{tabular*}\n"
+        "\\begin{minipage}[t]{0.45\\linewidth}Gap 1.5 eV\\end{minipage}\n"
+    )
+    text = "\\begin{document}\n" + body + "\\end{document}\nExpected 2.5 after the end.\n"
+    assert [value for _, command, value in _quantities(tmp_path, {"main.tex": text}) if command == "quantity"] == [
+        "0.5",
+        "0.25",
+        "1,234.5",
+        "2{,}000.25",
+        "1.5 eV",
+    ]

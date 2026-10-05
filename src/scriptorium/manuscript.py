@@ -82,18 +82,37 @@ NON_QUANTITY_GROUP_LIMITS = {
     "multirow": 2,
     "color": 1,
     "colorbox": 1,
-    "begin": 2,
+    "begin": 1,
     "end": 1,
     "resizebox": 2,
     "scalebox": 1,
     "href": 1,
 }
+# Mandatory groups an environment takes after its name; other environments may open their body with a group.
+ENVIRONMENT_ARGUMENT_GROUPS = {
+    "tabular": 1,
+    "tabular*": 2,
+    "tabularx": 2,
+    "tabulary": 2,
+    "longtable": 1,
+    "array": 1,
+    "alignat": 1,
+    "alignat*": 1,
+    "minipage": 1,
+    "multicols": 1,
+    "subfigure": 1,
+    "subtable": 1,
+    "wrapfigure": 2,
+    "wraptable": 2,
+}
+ENVIRONMENT_NAME_PATTERN = re.compile(r"[ \t]*\{([^{}]*)\}")
 # A number may directly follow a control word such as \approx; blank the word so the number is seen with its sign.
 CONTROL_WORD_BEFORE_NUMBER_PATTERN = re.compile(
     r"\\(?!(?:pm|mp|times|cdot)(?![A-Za-z]))[A-Za-z]+(?=[-+\u2212]?(?:\d|\.\d))"
 )
 QUANTITY_PATTERN = re.compile(
-    r"(?<![A-Za-z0-9_.:/\\@])(?:[-+\u2212]\s*)?(?:\d+\.\d+|\.\d+|\d+)(?!\d|\.\d)"
+    r"(?<![A-Za-z0-9_.:/\\@])(?:[-+\u2212]\s*)?"
+    r"(?:\d{1,3}(?:(?:,|\{,\})\d{3})+(?:\.\d+)?|\d+\.\d+|\.\d+|\d+)(?!\d|\.\d)"
     r"(?P<uncertainty>\(\d+(?:\.\d+)?\))?"
     r"(?P<exponent>[eE][-+\u2212]?\d+(?![A-Za-z]))?"
     r"(?P<pm>\s*(?:\\pm|\u00b1|\+/-)\s*(?:\d+\.\d+|\.\d+|\d+))?"
@@ -288,6 +307,8 @@ def _command_argument_spans(text: str) -> Iterator[tuple[int, int]]:
         end = match.end()
         start = end
         braces = NON_QUANTITY_GROUP_LIMITS.get(match.group(1))
+        if match.group(1) == "begin" and (name := ENVIRONMENT_NAME_PATTERN.match(text, end)):
+            braces = 1 + ENVIRONMENT_ARGUMENT_GROUPS.get(name.group(1).strip(), 0)
         # Optional bracket arguments after the last setting group, as in \scalebox{x}[y], are settings too.
         while (group := re.match(r"[ \t]*([\[{])", text[end:])) and (braces is None or braces > 0 or group[1] == "["):
             opening = end + group.end()
@@ -557,8 +578,11 @@ class ManuscriptManager:
         excluded = _merged_spans([*skipped, *_command_argument_spans(masked)])
         lefts = [left for left, _ in excluded]
         floor = document.end() if document else 0
+        # TeX stops reading at \end{document}; text after it is never typeset.
+        closing = re.compile(r"\\end\s*\{document\}").search(masked, floor)
+        ceiling = closing.start() if closing else len(text)
         scanned = CONTROL_WORD_BEFORE_NUMBER_PATTERN.sub(lambda word: " " * len(word[0]), text)
-        for match in QUANTITY_PATTERN.finditer(scanned, floor):
+        for match in QUANTITY_PATTERN.finditer(scanned, floor, ceiling):
             start, end = match.span()
             nearest = bisect_right(lefts, start) - 1
             if masked[start] != text[start] or (nearest >= 0 and start < excluded[nearest][1]):
