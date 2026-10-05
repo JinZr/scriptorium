@@ -9,13 +9,18 @@ from scriptorium.schemas import ReviewOutput, RevisionOutput, output_schema
 from scriptorium.service import ScriptoriumService
 from scriptorium.workflow import Armarius
 
-from ._support import PdfBuildingManuscriptManager, claim, make_repository, submit
+from ._support import PdfBuildingManuscriptManager, claim, claim_inventory, make_repository, submit
 
 CLAIM_CHECK = {
     "claim": "The paper reports a result.",
     "evidence": [{"source_path": "manuscript.pdf", "page": 1}],
     "critical_question": "Does the evidence support the result?",
     "countercheck": "Checked the rendered manuscript.",
+    "claim_anchor": {"source_path": "manuscript.pdf", "page": 1},
+    "stated_scope": "As stated in the manuscript.",
+    "check_type": "design_and_analysis",
+    "question_answer": "yes",
+    "exceptions": [],
     "assessment": "supported",
     "finding_indices": [],
 }
@@ -122,7 +127,12 @@ def test_invalid_review_scope_rejects_whole_result(tmp_path, scope, code, path):
     with ScriptoriumService(repo, manuscript_manager=PdfBuildingManuscriptManager(repo)) as service:
         run = asyncio.run(service.start_run("HEAD", "quick"))["run"]
         review = claim(service, run.id, AgentRole.SUBSTANTIVE_REVIEW)
-        output = {"summary": "Reviewed the manuscript.", "findings": [], "claim_checks": [CLAIM_CHECK]}
+        output = {
+            "summary": "Reviewed the manuscript.",
+            "findings": [],
+            "claim_checks": [CLAIM_CHECK],
+            "claim_inventory": claim_inventory([CLAIM_CHECK]),
+        }
         if scope is not None:
             output["scope"] = scope
         receipt = asyncio.run(service.submit_task(review["attempt"].id, review["input_digest"], json.dumps(output)))
@@ -167,7 +177,8 @@ def test_invalid_coordinate_keeps_raw_json_precision(tmp_path, number, actual):
         run = asyncio.run(service.start_run("HEAD", "quick"))["run"]
         review = claim(service, run.id, AgentRole.SUBSTANTIVE_REVIEW)
         output = (
-            '{"summary":"Reviewed.","findings":[],"claim_checks":[],"scope":{"completion":"unknown",'
+            '{"summary":"Reviewed.","findings":[],"claim_checks":[],"claim_inventory":[],'
+            '"scope":{"completion":"unknown",'
             f'"checked":[{{"source_path":"manuscript.pdf","page":{number}}}],'
             '"outstanding":[],"limitations":[]}}'
         )

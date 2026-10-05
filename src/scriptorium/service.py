@@ -47,7 +47,12 @@ from .manuscript import (
     page_text,
     render_page_view,
 )
-from .schemas import EvidenceAnchorContract, ScientificReviewOutput, ScopedReviewOutput
+from .schemas import (
+    EvidenceAnchorContract,
+    InventoriedScientificReviewOutput,
+    ScientificReviewOutput,
+    ScopedReviewOutput,
+)
 from .storage import ConflictError, Database, NotFoundError as StorageNotFoundError, StorageError
 from .tool_output import (
     REPORT_PARTS,
@@ -520,6 +525,36 @@ class ScriptoriumService:
                 "validation_report": report,
                 "run_status": self._storage(self.database.get_run, task.run_id).status,
                 "next_actions": self.list_tasks(task.run_id)["next_actions"],
+            }
+
+    def check_submission(self, attempt_id: str, input_digest: str, output_text: str) -> dict[str, Any]:
+        if len(output_text.encode("utf-8")) > 2_000_000:
+            raise ConfigurationError("submission exceeds the 2 MB limit")
+        with self._retrieval_operation(attempt_id, "task submit --check"):
+            attempt = self._storage(self.database.get_attempt, attempt_id)
+            task = self._storage(self.database.get_task, attempt.task_id)
+            report = self._storage(self.armarius.check_submission, attempt_id, input_digest, output_text)
+            output_digest = ArtifactStore.digest_bytes(output_text.encode("utf-8"))
+            valid = report is None
+            codes = [] if valid else sorted({issue.code for issue in report.issues})
+            self._record_access(
+                task.run_id,
+                attempt_id,
+                "submit_check",
+                {"input_digest": input_digest, "output_digest": output_digest, "valid": valid, "codes": codes},
+            )
+            return {
+                "attempt_id": attempt_id,
+                "input_digest": input_digest,
+                "output_digest": output_digest,
+                "valid": valid,
+                "recorded": False,
+                "validation_report": None if valid else report.model_dump(mode="json"),
+                "next_action": (
+                    "submit this exact file without --check"
+                    if valid
+                    else "fix the reported issues and check again; the attempt remains active"
+                ),
             }
 
     @contextmanager
@@ -1182,6 +1217,16 @@ class ScriptoriumService:
                                             check.model_dump(mode="json", exclude_none=True)
                                             for check in output.claim_checks
                                         ],
+                                        **(
+                                            {
+                                                "claim_inventory": [
+                                                    entry.model_dump(mode="json", exclude_none=True)
+                                                    for entry in output.claim_inventory
+                                                ]
+                                            }
+                                            if isinstance(output, InventoriedScientificReviewOutput)
+                                            else {}
+                                        ),
                                     }
                                 )
                     review_scopes.append(
@@ -1466,19 +1511,49 @@ class ScriptoriumService:
             lines.append(f"- `{item['attempt_id']}`: {len(item['claim_checks'])} checks")
             for index, finding in enumerate(item["submitted_findings"]):
                 lines.append(f"  - submitted finding [{index}]: {finding['severity']} — {finding['title']}")
-            for check in item["claim_checks"]:
+            for entry in item.get("claim_inventory", []):
+                location = ScriptoriumService._markdown_location(entry["claim_anchor"])
+                status = (
+                    f"claim checks {entry['check_indices']}"
+                    if entry["check_indices"]
+                    else f"not checked: {entry['not_checked_reason']}"
+                )
                 lines.append(
-                    f"  - {check['claim']} — {check['assessment']}; question: {check['critical_question']}; "
+                    f"  - inventoried {entry['prominence']} claim at `{location}`: {entry['claim']} — {status}"
+                )
+            for index, check in enumerate(item["claim_checks"]):
+                lines.append(
+                    f"  - [{index}] {check['claim']} — {check['assessment']}; question: {check['critical_question']}; "
                     f"countercheck: {check['countercheck']}; submitted finding indices: {check['finding_indices']}"
                 )
+                lines.extend(ScriptoriumService._markdown_claim_judgment(check))
                 for evidence in check["evidence"]:
-                    location = evidence["source_path"]
-                    if "page" in evidence:
-                        location += f":page {evidence['page']}"
-                    else:
-                        location += f":{evidence['start_line']}-{evidence['end_line']}"
-                    lines.append(f"    - evidence: `{location}`")
+                    lines.append(f"    - evidence: `{ScriptoriumService._markdown_location(evidence)}`")
         lines.append("Claim checks are reviewer declarations; valid anchors do not establish scientific correctness.")
+        return lines
+
+    @staticmethod
+    def _markdown_location(anchor: dict[str, Any]) -> str:
+        if "page" in anchor:
+            return f"{anchor['source_path']}:page {anchor['page']}"
+        return f"{anchor['source_path']}:{anchor['start_line']}-{anchor['end_line']}"
+
+    @staticmethod
+    def _markdown_claim_judgment(check: dict[str, Any]) -> list[str]:
+        if "question_answer" not in check:
+            return []
+        location = ScriptoriumService._markdown_location(check["claim_anchor"])
+        lines = [
+            f"    - claim at `{location}`; stated scope: {check['stated_scope']}",
+            f"    - {check['check_type']}; answer: {check['question_answer']}",
+        ]
+        lines.extend(f"    - exception: {exception}" for exception in check["exceptions"])
+        if recomputation := check.get("recomputation"):
+            lines.append(
+                f"    - recomputation {recomputation['outcome']}: {recomputation['calculation']} = "
+                f"{recomputation['result']}; reported {recomputation['reported']}; "
+                f"inputs: {'; '.join(recomputation['inputs'])}"
+            )
         return lines
 
     @staticmethod

@@ -338,6 +338,22 @@ class ScopedReviewOutput(ReviewOutput):
     scope: ReviewScope
 
 
+def _integral_indices(value: Any) -> Any:
+    if not isinstance(value, list):
+        return value
+    return [
+        (
+            int(index)
+            if isinstance(index, Decimal)
+            and index.is_finite()
+            and 0 <= index <= sys.maxsize
+            and index == index.to_integral_value()
+            else index
+        )
+        for index in value
+    ]
+
+
 class ClaimCheck(StrictModel):
     claim: str = Field(min_length=1)
     evidence: list[Evidence] = Field(min_length=1)
@@ -349,19 +365,7 @@ class ClaimCheck(StrictModel):
     @field_validator("finding_indices", mode="before")
     @classmethod
     def accept_integral_indices(cls, value: Any) -> Any:
-        if not isinstance(value, list):
-            return value
-        return [
-            (
-                int(index)
-                if isinstance(index, Decimal)
-                and index.is_finite()
-                and 0 <= index <= sys.maxsize
-                and index == index.to_integral_value()
-                else index
-            )
-            for index in value
-        ]
+        return _integral_indices(value)
 
 
 class ScientificReviewOutput(ScopedReviewOutput):
@@ -380,6 +384,125 @@ class ScientificReviewOutput(ScopedReviewOutput):
             linked.update(check.finding_indices)
         if linked != set(range(len(self.findings))):
             raise ValueError("every substantive finding must be linked to a claim check")
+        return self
+
+
+class Recomputation(StrictModel):
+    inputs: list[Annotated[str, Field(min_length=1)]] = Field(
+        min_length=1, description="Each reported value used, with where the manuscript states it."
+    )
+    calculation: str = Field(min_length=1, description="The arithmetic or derivation performed on those inputs.")
+    result: str = Field(min_length=1, description="The value obtained, with its unit.")
+    reported: str = Field(min_length=1, description="The manuscript value it is compared with, with its unit.")
+    outcome: Literal["matches", "differs"] = Field(
+        description='"matches" only when the result agrees with the reported value within the stated rounding.'
+    )
+
+
+class JudgedClaimCheck(ClaimCheck):
+    claim_anchor: Evidence = Field(description="Where the authors state the claim, as an exact frozen anchor.")
+    stated_scope: str = Field(
+        min_length=1,
+        description="The population, conditions, range, threshold, and qualifications under which the authors "
+        "state the claim.",
+    )
+    check_type: Literal[
+        "reporting_consistency",
+        "recomputation",
+        "design_and_analysis",
+        "alternative_explanation",
+        "scope_and_generality",
+    ] = Field(description="What the countercheck examined.")
+    question_answer: Literal["yes", "partly", "no", "not_checkable"] = Field(
+        description="Whether the countercheck shows the claim holds at its stated scope: yes, partly, no, or "
+        "not_checkable when the frozen bundle cannot decide it."
+    )
+    exceptions: list[Annotated[str, Field(min_length=1)]] = Field(
+        description="Cases, conditions, or values within the stated scope where the claim fails or is not shown."
+    )
+    recomputation: Recomputation | None = Field(
+        default=None, description='Required when check_type is "recomputation"; omit it otherwise.'
+    )
+
+    @model_validator(mode="after")
+    def validate_judgment(self) -> "JudgedClaimCheck":
+        if (self.check_type == "recomputation") != (self.recomputation is not None):
+            raise ValueError('a recomputation is recorded exactly when check_type is "recomputation"')
+        if (self.assessment == "supported") != (self.question_answer == "yes"):
+            raise ValueError('assessment "supported" goes with question_answer "yes", and only with it')
+        if self.question_answer == "yes" and self.exceptions:
+            raise ValueError('question_answer "yes" lists no exceptions; use "partly"')
+        if self.question_answer == "partly" and not self.exceptions:
+            raise ValueError('question_answer "partly" lists at least one exception')
+        if self.recomputation is not None and (self.recomputation.outcome, self.question_answer) in {
+            ("matches", "no"),
+            ("differs", "yes"),
+        }:
+            raise ValueError(
+                'a recomputation that differs cannot answer "yes", and one that matches cannot answer "no"'
+            )
+        if self.question_answer == "not_checkable" and self.assessment != "unresolved":
+            raise ValueError('question_answer "not_checkable" requires assessment "unresolved"')
+        return self
+
+
+class JudgedScientificReviewOutput(ScientificReviewOutput):
+    claim_checks: list[JudgedClaimCheck]
+
+
+class InventoriedClaim(StrictModel):
+    claim: str = Field(min_length=1, description="The central claim as the authors state it.")
+    claim_anchor: Evidence = Field(description="Where the authors state the claim, as an exact frozen anchor.")
+    prominence: Literal["headline", "supporting"] = Field(
+        description='"headline" for a claim in the abstract, stated contributions, or conclusions; "supporting" '
+        "for a claim the headline claims depend on."
+    )
+    check_indices: list[Annotated[int, Field(ge=0, strict=True)]] = Field(
+        description="Zero-based positions in this output's claim_checks that assess this claim."
+    )
+    not_checked_reason: str | None = Field(
+        default=None,
+        min_length=1,
+        description="Why this submission has no claim check for the claim; omit it when check_indices is not empty.",
+    )
+
+    @field_validator("check_indices", mode="before")
+    @classmethod
+    def accept_integral_indices(cls, value: Any) -> Any:
+        return _integral_indices(value)
+
+    @model_validator(mode="after")
+    def validate_status(self) -> "InventoriedClaim":
+        if bool(self.check_indices) == (self.not_checked_reason is not None):
+            raise ValueError("an inventoried claim lists check_indices or a not_checked_reason, not both or neither")
+        return self
+
+
+class InventoriedScientificReviewOutput(JudgedScientificReviewOutput):
+    claim_inventory: list[InventoriedClaim] = Field(
+        description="The central claims identified in the manuscript, each linked to its claim checks or left "
+        "unchecked with a reason."
+    )
+
+    @model_validator(mode="after")
+    def validate_claim_inventory(self) -> "InventoriedScientificReviewOutput":
+        listed: list[int] = []
+        for entry in self.claim_inventory:
+            if any(index >= len(self.claim_checks) for index in entry.check_indices):
+                raise ValueError("an inventoried claim refers to an unknown claim check index")
+            if any(
+                (self.claim_checks[index].claim, self.claim_checks[index].claim_anchor)
+                != (entry.claim, entry.claim_anchor)
+                for index in entry.check_indices
+            ):
+                raise ValueError("a linked claim check must restate its inventoried claim and claim_anchor exactly")
+            listed.extend(entry.check_indices)
+        if sorted(listed) != list(range(len(self.claim_checks))):
+            raise ValueError("each claim check must assess exactly one inventoried claim")
+        if self.scope.completion == "complete" and any(
+            entry.prominence == "headline" and not entry.check_indices for entry in self.claim_inventory
+        ):
+            raise ValueError("a complete substantive review must check every inventoried headline claim")
         return self
 
 
@@ -466,7 +589,7 @@ class ValidationReport(StrictModel):
 
 SCHEMA_MODELS: dict[str, type[StrictModel]] = {
     "review": ScopedReviewOutput,
-    "scientific_review": ScientificReviewOutput,
+    "scientific_review": InventoriedScientificReviewOutput,
     "visual_transcription": VisualTranscriptionOutput,
     "revision": RevisionOutput,
     "verification": VerificationOutput,

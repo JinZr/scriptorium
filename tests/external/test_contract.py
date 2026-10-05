@@ -64,8 +64,21 @@ def _review_json(summary: str, findings: list | None = None) -> str:
                     "evidence": [{"source_path": "manuscript.pdf", "page": 1}],
                     "critical_question": "Does the evidence support the result?",
                     "countercheck": "Checked the manuscript and supplement.",
+                    "claim_anchor": {"source_path": "manuscript.pdf", "page": 1},
+                    "stated_scope": "As stated in the manuscript.",
+                    "check_type": "design_and_analysis",
+                    "question_answer": "no" if findings else "yes",
+                    "exceptions": [],
                     "assessment": "finding" if findings else "supported",
                     "finding_indices": list(range(len(findings))),
+                }
+            ],
+            "claim_inventory": [
+                {
+                    "claim": "The manuscript reports a result.",
+                    "claim_anchor": {"source_path": "manuscript.pdf", "page": 1},
+                    "prominence": "headline",
+                    "check_indices": [0],
                 }
             ],
         }
@@ -130,7 +143,12 @@ def test_shared_skill_example_passes_frozen_review_validation(tmp_path: Path) ->
         claim = service.claim_task(task_id, "codex", "model", "high", "session", "host")
         attempt_id = claim["attempt"].id
         main = next(source for source in claim["source_map"]["sources"] if source["source_path"] == "main.tex")
-        output = example.replace("<MAIN_SOURCE_DIGEST>", main["source_digest"])
+        supplement = next(
+            source for source in claim["source_map"]["sources"] if source["source_path"] == "supplement.tex"
+        )
+        output = example.replace("<MAIN_SOURCE_DIGEST>", main["source_digest"]).replace(
+            "<SUPPLEMENT_SOURCE_DIGEST>", supplement["source_digest"]
+        )
         service.read_task(attempt_id, "main.tex", 3, 3, 0, 8000)
         service.read_task(attempt_id, "supplement.tex", 1, 1, 0, 8000)
         result = asyncio.run(service.submit_task(attempt_id, claim["input_digest"], output))
@@ -297,6 +315,32 @@ def test_json_cli_reads_and_submits_from_stdin_across_processes(tmp_path: Path) 
     searched = command("task", "search", attempt_id, "--query", "explains")
     assert searched["ok"] and searched["data"]["matches"][0]["path"] == "supplement.tex"
     output = _review_json("Read the supplement.")
+    unescaped = output.replace("Read the supplement.", "Read the \\AA supplement.")
+    checked = command(
+        "task",
+        "submit",
+        attempt_id,
+        "--input-digest",
+        claim["input_digest"],
+        "--file",
+        "-",
+        "--check",
+        input_text=unescaped,
+    )["data"]
+    assert checked["valid"] is False and checked["recorded"] is False
+    assert checked["validation_report"]["issues"][0]["code"] == "json.invalid"
+    checked = command(
+        "task",
+        "submit",
+        attempt_id,
+        "--input-digest",
+        claim["input_digest"],
+        "--file",
+        "-",
+        "--check",
+        input_text=output,
+    )["data"]
+    assert checked["valid"] is True and checked["validation_report"] is None
     submitted = command(
         "task",
         "submit",

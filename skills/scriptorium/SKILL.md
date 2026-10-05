@@ -17,7 +17,7 @@ task nav ATTEMPT_ID --command heading|reference|citation|label|caption|graphics|
 task search ATTEMPT_ID --query Q [--path P] [--context 2] [--include-metadata]
 task read ATTEMPT_ID --path P --start-line A [--end-line B] [--anchor]
 task page ATTEMPT_ID --number N [--document ENTRYPOINT] [--scale 3 --crop x0,y0,x1,y1 | --text]
-task submit ATTEMPT_ID --input-digest D --file answer.json
+task submit ATTEMPT_ID --input-digest D --file answer.json [--check]
 run continue|retry RUN_ID --task TASK_ID  -> then claim again
 ```
 
@@ -66,7 +66,7 @@ Prefer the exact `read_path` from the source map with `task read` or `task searc
 
 A search without `--path` covers manuscript sources only; pass `--path navigation.json` or `--include-metadata` to search generated metadata. Add `--context 2` to see neighbouring lines, then read the range before relying on it. Raw source searches may also find comments or inactive alternatives. Check whether a passage belongs to the compiled manuscript before treating it as a claim. If a separate supplement is mentioned but absent from the frozen manifest, describe its role in `scope.limitations` for a review output or in `summary` for a revision or verification output; an unknown path cannot be placed in review `scope.outstanding`.
 
-For `substantive_review`, follow the frozen task prompt's claim tracing, candidate countercheck, and final conclusion-consistency review. Map each central claim to its result, method, assumptions, and a plausible alternative; retrieve the evidence that can distinguish them. Then revisit each candidate criticism and search the whole frozen bundle for an author answer or counterevidence before deciding whether it remains a finding. Recalculate a numerical concern when the reported inputs permit it. Record each assessed claim in `claim_checks` with source evidence, the critical question, the countercheck performed, and its assessment; link retained concerns to their zero-based finding indices. If a material source or page remains unexamined, list it in the outstanding scope and describe the unresolved link in limitations instead of declaring the role complete. A checklist or count of tool calls is not evidence that the review is thorough.
+For `substantive_review`, follow the frozen task prompt's claim tracing, candidate countercheck, and final conclusion-consistency review. Map each central claim to its result, method, assumptions, and a plausible alternative; retrieve the evidence that can distinguish them. Then revisit each candidate criticism and search the whole frozen bundle for an author answer or counterevidence before deciding whether it remains a finding. Recalculate a numerical concern when the reported inputs permit it. Record each assessed claim in `claim_checks` with the claim's own anchor and stated scope, the evidence that decides it, the critical question, the countercheck performed, the check type, the answer, any exceptions, and its assessment; link retained concerns to their zero-based finding indices. List the headline and supporting claims in `claim_inventory` first, link each to the claim checks that assess it, and give a reason for any claim left unchecked. When you recompute a reported value, record the inputs, calculation, result, and reported value under `recomputation`. If a material source or page remains unexamined, list it in the outstanding scope and describe the unresolved link in limitations instead of declaring the role complete. A checklist or count of tool calls is not evidence that the review is thorough.
 
 Align the population, analysis unit, denominator, outcome, time point, data or model version, and processing stage when comparing results, as relevant to that claim. If the only countercheck is that a number repeats in the abstract and table, assess that reporting-consistency question alone. Follow the result back to its design and analysis before treating the scientific interpretation as supported; keep unchecked links in the outstanding scope.
 
@@ -74,7 +74,7 @@ Text citations must use the bare source path, digest, inclusive line range, and 
 
 ### Example substantive-review output
 
-For a `substantive_review` using the current `scientific_review` schema, the following is a complete JSON example for a **partial review** with one finding. Replace every example claim, path, line, quote, digest, and scope area with what you actually checked in the frozen bundle. A text evidence anchor needs all five fields shown; a PDF-page anchor instead needs only `source_path: "manuscript.pdf"` and `page`. `finding_indices` are zero-based positions in this same output's `findings` list. A `finding` assessment needs at least one index, every finding needs a claim-check link, and `supported` or `unresolved` assessments use `[]`. Do not mark the scope `complete` while anything remains outstanding.
+For a `substantive_review` using the current `scientific_review` schema, the following is a complete JSON example for a **partial review** with one finding. Replace every example claim, path, line, quote, digest, and scope area with what you actually checked in the frozen bundle. A text evidence anchor needs all five fields shown; a PDF-page anchor instead needs only `source_path: "manuscript.pdf"` and `page`. `finding_indices` are zero-based positions in this same output's `findings` list. A `finding` assessment needs at least one index, every finding needs a claim-check link, and `supported` or `unresolved` assessments use `[]`. `supported` goes with `question_answer` `"yes"` and only with it, `"yes"` lists no `exceptions`, and `"partly"` lists at least one; `"partly"` or `"no"` leads to `finding` or `unresolved`, and `"not_checkable"` to `unresolved`. A `check_type` of `"recomputation"` requires a `recomputation` object, which other check types omit; a recomputation that `differs` cannot answer `"yes"`, and one that `matches` cannot answer `"no"`. `claim_inventory` lists the manuscript's headline and supporting claims; `check_indices` are zero-based positions in `claim_checks`, every claim check must appear in an entry, and an entry with empty `check_indices` gives `not_checked_reason`. A complete review must check every headline claim, and a continuation must list every claim the accepted inventory left unchecked, with the same `claim_anchor` and `prominence`. Do not mark the scope `complete` while anything remains outstanding.
 
 ```json
 {
@@ -116,10 +116,48 @@ For a `substantive_review` using the current `scientific_review` schema, the fol
         "source_digest": "<MAIN_SOURCE_DIGEST>",
         "quoted_text": "A result is described here."
       }],
-      "critical_question": "Is the measured outcome defined?",
-      "countercheck": "Read supplement.tex; it gives no measured outcome.",
+      "claim_anchor": {
+        "source_path": "main.tex",
+        "start_line": 3,
+        "end_line": 3,
+        "source_digest": "<MAIN_SOURCE_DIGEST>",
+        "quoted_text": "A result is described here."
+      },
+      "stated_scope": "The manuscript states the result without a population, condition, or measure.",
+      "check_type": "design_and_analysis",
+      "critical_question": "Does the manuscript define what the result measures, so the claim can be checked?",
+      "countercheck": "Read main.tex and supplement.tex; neither defines the measured outcome.",
+      "question_answer": "no",
+      "exceptions": ["The checked main text and supplement name no measured outcome for the result."],
       "assessment": "finding",
       "finding_indices": [0]
+    }
+  ],
+  "claim_inventory": [
+    {
+      "claim": "The manuscript presents a result.",
+      "claim_anchor": {
+        "source_path": "main.tex",
+        "start_line": 3,
+        "end_line": 3,
+        "source_digest": "<MAIN_SOURCE_DIGEST>",
+        "quoted_text": "A result is described here."
+      },
+      "prominence": "headline",
+      "check_indices": [0]
+    },
+    {
+      "claim": "The supplement explains the result.",
+      "claim_anchor": {
+        "source_path": "supplement.tex",
+        "start_line": 1,
+        "end_line": 1,
+        "source_digest": "<SUPPLEMENT_SOURCE_DIGEST>",
+        "quoted_text": "The supplement explains that result."
+      },
+      "prominence": "supporting",
+      "check_indices": [],
+      "not_checked_reason": "The explanation's figure is on the rendered page, which remains outstanding."
     }
   ]
 }
@@ -133,11 +171,18 @@ scope declaration establishes scientific correctness. Use the existing schema fi
 self-review object. This is a review step performed by the current model, not a second model call or an automatic
 scientific-validity check by the CLI.
 
-Submit the completed answer with the exact digest from this attempt:
+Check the completed answer first, then submit the same file with the exact digest from this attempt:
 
 ```bash
+scriptorium --json task submit ATTEMPT_ID --input-digest DIGEST --file answer.json --check
 scriptorium --json task submit ATTEMPT_ID --input-digest DIGEST --file answer.json
 ```
+
+`--check` runs the same JSON, schema, evidence and session validation as a submission but records no output,
+findings or validation report and leaves the attempt active. When `data.valid` is false, fix the file against
+`data.validation_report.issues` and check again; this is the place to catch JSON escaping mistakes such as an
+unescaped LaTeX backslash. No separate JSON tool is needed. A passing check is not a receipt:
+submit the same file without `--check`, because only that records the output.
 
 `--file -` reads JSON from stdin. An invalid submission returns `data.validation_report.issues` and produces no partial findings. Read each issue and correct the answer against the same frozen schema and source map. Then explicitly run `scriptorium --json run retry RUN_ID --task TASK_ID`, claim the task again, inspect the new `task show`, and submit the corrected answer with its **new** attempt ID and input digest. Do not submit again to the failed attempt. A claim survives CLI exit; do not retry merely because a command finished.
 

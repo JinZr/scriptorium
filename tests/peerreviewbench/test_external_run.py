@@ -92,10 +92,23 @@ def test_benchmark_prepares_external_tasks_and_collects_validated_reviews(tmp_pa
                                             "evidence": [{"source_path": "manuscript.pdf", "page": 1}],
                                             "critical_question": "Does the paper support the result?",
                                             "countercheck": "Checked the rendered paper.",
+                                            "claim_anchor": {"source_path": "manuscript.pdf", "page": 1},
+                                            "stated_scope": "As stated in the manuscript.",
+                                            "check_type": "design_and_analysis",
+                                            "question_answer": "yes",
+                                            "exceptions": [],
                                             "assessment": "supported",
                                             "finding_indices": [],
                                         }
-                                    ]
+                                    ],
+                                    "claim_inventory": [
+                                        {
+                                            "claim": "The paper reports a result.",
+                                            "claim_anchor": {"source_path": "manuscript.pdf", "page": 1},
+                                            "prominence": "headline",
+                                            "check_indices": [0],
+                                        }
+                                    ],
                                 }
                                 if item["task"].role.value == "substantive_review"
                                 else {}

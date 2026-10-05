@@ -49,6 +49,18 @@ def claim(service, run_id, role, *, session=None, source="host"):
     return service.claim_task(task.id, "codex", "test-model", "max", session or f"session-{role.value}", source)
 
 
+def claim_inventory(claim_checks):
+    return [
+        {
+            "claim": check["claim"],
+            "claim_anchor": check.get("claim_anchor", check["evidence"][0]),
+            "prominence": "headline",
+            "check_indices": [index],
+        }
+        for index, check in enumerate(claim_checks)
+    ]
+
+
 def submit(service, claim_data, output):
     if claim_data["task"].stage == "review" and "scope" not in output:
         output = {
@@ -65,11 +77,18 @@ def submit(service, claim_data, output):
                     "evidence": [{"source_path": "manuscript.pdf", "page": 1}],
                     "critical_question": "Does the reported result support the conclusion?",
                     "countercheck": "Checked the frozen manuscript page.",
+                    "claim_anchor": {"source_path": "manuscript.pdf", "page": 1},
+                    "stated_scope": "As stated in the manuscript.",
+                    "check_type": "design_and_analysis",
+                    "question_answer": "no" if findings else "yes",
+                    "exceptions": [],
                     "assessment": "finding" if findings else "supported",
                     "finding_indices": list(range(len(findings))),
                 }
             ],
         }
+    if "claim_inventory" in claim_data["schema"]["required"] and "claim_inventory" not in output:
+        output = {**output, "claim_inventory": claim_inventory(output["claim_checks"])}
     return asyncio.run(
         service.submit_task(
             claim_data["attempt"].id,
