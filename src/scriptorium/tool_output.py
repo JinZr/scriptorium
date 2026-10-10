@@ -14,6 +14,7 @@ REPORT_PARTS = (
     "finding_ids",
     "patch_ids",
     "findings",
+    "decision_stats",
     "patches",
     "events",
     "validation_reports",
