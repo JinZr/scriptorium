@@ -13,6 +13,10 @@ class StateError(ScriptoriumError):
     exit_code = 1
 
 
+class DuplicateRunError(StateError):
+    code = "duplicate_run"
+
+
 class InfrastructureError(ScriptoriumError):
     code = "infrastructure_error"
     exit_code = 3

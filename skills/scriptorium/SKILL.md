@@ -29,7 +29,7 @@ Before a new `run start`, agree a short review brief with the author. Read `dete
 
 ## Start or resume
 
-Run every command from the manuscript project that owns the run. Inspect `scriptorium --json doctor --revision REVISION --profile PROFILE` before a new run. `scriptorium --json run start --revision REVISION --profile PROFILE` freezes and compiles that commit, prepares pending review tasks, and returns a run overview. It does not spend model tokens by itself. For an existing run, inspect `run status RUN_ID` and follow its `next_actions`. After starting or changing a run, read `run status` for fresh actions; mutation acknowledgements contain only a compact state summary. Use IDs and input digests returned by the CLI, not guessed values. If a run is not found, stop and check the project directory with the caller; do not search other repositories or inspect SQLite directly.
+Run every command from the manuscript project that owns the run. Inspect `scriptorium --json doctor --revision REVISION --profile PROFILE` before a new run. `scriptorium --json run start --revision REVISION --profile PROFILE` freezes and compiles that commit, prepares pending review tasks, and returns a run overview. It does not spend model tokens by itself. It refuses with `duplicate_run` when a non-terminal run already exists on that commit; use that run's `run status` rather than adding `--allow-duplicate` unless the user wants a second run. For an existing run, inspect `run status RUN_ID` and follow its `next_actions`. After starting or changing a run, read `run status` for fresh actions; mutation acknowledgements contain only a compact state summary. Use IDs and input digests returned by the CLI, not guessed values. If a run is not found, stop and check the project directory with the caller; do not search other repositories or inspect SQLite directly.
 
 For each pending task offered by `run status` as a `task claim` action, claim from this current session:
 
@@ -205,6 +205,6 @@ For a report section, follow every `next_command` until null, concatenate `text`
 
 ## Human decisions and reporting
 
-Human finding decisions, patch approval, and patch application require the user's explicit instruction. If the session already contains that authorization, use it; otherwise present the exact finding or patch and proposed decision for review. Never infer approval from severity or from your own review. Do not edit manuscript files to mimic a Scriptorium patch.
+Human finding decisions, patch approval, and patch application require the user's explicit instruction. If the session already contains that authorization, use it; otherwise present the exact finding or patch and proposed decision for review. Never infer approval from severity or from your own review. Do not edit manuscript files to mimic a Scriptorium patch. `finding decide` accepts several finding IDs of one run for a single decision and reason.
 
 After an authorized decision, use `run resume RUN_ID` to prepare the next stage. Report the run, task, attempt, finding, and patch IDs; actual host model and effort; retrieval gaps; validation status; current human gate; and release-gate result. Unknown token usage or cost remains unknown. Scriptorium does not control the host's spending.

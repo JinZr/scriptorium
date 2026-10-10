@@ -3,8 +3,8 @@ import json
 
 import pytest
 
-from scriptorium.domain import canonical_json
-from scriptorium.errors import ConfigurationError
+from scriptorium.domain import canonical_json, digest_json
+from scriptorium.errors import ConfigurationError, StateError
 from scriptorium.schemas import SEVERITY_RUBRIC, ReviewBrief, render_review_brief
 from scriptorium.service import ScriptoriumService
 from scriptorium.tool_output import run_overview
@@ -24,7 +24,7 @@ _BRIEF = {
 
 def _start(service, brief=None):
     text = None if brief is None else json.dumps(brief)
-    return asyncio.run(service.start_run("HEAD", "quick", brief=text))
+    return asyncio.run(service.start_run("HEAD", "quick", allow_duplicate=True, brief=text))
 
 
 def _role_inputs(service, run_id):
@@ -141,3 +141,24 @@ def test_an_invalid_brief_is_rejected_before_any_run_is_created(tmp_path) -> Non
             asyncio.run(service.start_run("HEAD", "quick", brief="not json"))
 
         assert service.database.list_runs() == []
+
+
+def test_briefs_that_render_alike_still_give_distinct_bound_input_digests(tmp_path) -> None:
+    repo = make_repository(tmp_path, roles=("copyedit",))
+    with ScriptoriumService(repo, manuscript_manager=PdfBuildingManuscriptManager(repo)) as service:
+        plain = _start(service)["run"]
+        first = _start(service, _BRIEF)["run"]
+        second = _start(service, {**_BRIEF, "recorded_by": "claude session-2"})["run"]
+        claims = [claim(service, run.id, "copyedit") for run in (plain, first, second)]
+        tasks = [service.database.get_external_task(item["task"].id) for item in claims]
+        with pytest.raises(StateError, match="input digest does not match"):
+            service.check_submission(claims[2]["attempt"].id, claims[1]["input_digest"], "{}")
+
+    assert tasks[1]["prompt_digest"] == tasks[2]["prompt_digest"]
+    assert first.brief_digest != second.brief_digest
+    assert len({item["input_digest"] for item in claims}) == 3
+    assert [item["input_digest"] for item in claims] == [item["task"].input_digest for item in claims]
+    keys = ("prompt_digest", "schema_digest", "bundle_digest")
+    assert claims[0]["input_digest"] == digest_json({key: tasks[0][key] for key in keys})
+    briefed_inputs = {key: tasks[2][key] for key in keys}
+    assert claims[2]["input_digest"] == digest_json({**briefed_inputs, "brief_digest": second.brief_digest})

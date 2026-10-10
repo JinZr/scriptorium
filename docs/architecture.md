@@ -37,8 +37,10 @@ An optional review brief, captured by the host agent in a dialogue with the auth
 validated against a strict model, published as a content-addressed artifact, and recorded by digest in a nullable
 `runs.brief_digest` column added by a numbered migration (legacy read-only databases keep their version until a new
 run upgrades them). The workflow renders it deterministically and places it before the severity rubric in every
-review role's frozen prompt template, so the prompt digest and attempt input digest bind it; a run without a brief
-keeps the earlier template bytes. The brief is immutable for the run. `task show --part brief` returns the frozen
+review role's frozen prompt template, so the prompt digest binds its rendered text. Every task input digest of a
+briefed run, computed at preparation and recomputed at submission, also includes the brief artifact digest, so fields
+that are not rendered are bound too. A run without a brief keeps the earlier template bytes and input digest formula.
+The brief is immutable for the run. `task show --part brief` returns the frozen
 artifact text for any attempt of the run, and `run status` and reports summarize it. `doctor` and the `run start`
 overview report a template detected from the entrypoints' class and package names as an intake default only.
 

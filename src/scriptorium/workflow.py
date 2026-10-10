@@ -91,6 +91,14 @@ class TaskOutcome:
     output: ReviewOutput | VisualTranscriptionOutput | RevisionOutput | VerificationOutput
 
 
+def task_input_digest(run: Run, prompt_digest: str, schema_digest: str, bundle_digest: str) -> str:
+    """Return a task's frozen input identity; a run's review brief joins it only when the run has one."""
+    inputs = {"prompt_digest": prompt_digest, "schema_digest": schema_digest, "bundle_digest": bundle_digest}
+    if run.brief_digest is not None:
+        inputs["brief_digest"] = run.brief_digest
+    return digest_json(inputs)
+
+
 class Armarius:
     def __init__(
         self,
@@ -1139,13 +1147,7 @@ class Armarius:
         files = self._directory_records(base_bundle.workspace)
         bundle_digest = digest_json(files)
         self._record_text(canonical_json(files), "application/vnd.scriptorium.bundle-index+json")
-        input_digest = digest_json(
-            {
-                "prompt_digest": prompt_artifact.digest,
-                "schema_digest": schema_artifact.digest,
-                "bundle_digest": bundle_digest,
-            }
-        )
+        input_digest = task_input_digest(run, prompt_artifact.digest, schema_artifact.digest, bundle_digest)
         task = self.database.find_task(run.id, stage, role, "", input_digest)
         if task is None:
             task = self.database.create_task(Task(run_id=run.id, stage=stage, role=role, input_digest=input_digest))
@@ -1474,13 +1476,7 @@ class Armarius:
         task = self.database.get_task(attempt.task_id)
         run = self.database.get_run(task.run_id)
         self.require_external_run(run)
-        if input_digest != digest_json(
-            {
-                "prompt_digest": attempt.prompt_digest,
-                "schema_digest": attempt.schema_digest,
-                "bundle_digest": attempt.bundle_digest,
-            }
-        ):
+        if input_digest != task_input_digest(run, attempt.prompt_digest, attempt.schema_digest, attempt.bundle_digest):
             raise StateError("submitted input digest does not match frozen attempt")
         self._load_prompt_artifact(attempt.prompt_digest)
         metadata = self.database.get_external_task(task.id)

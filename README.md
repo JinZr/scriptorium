@@ -47,7 +47,7 @@ to check first, earlier reviews, what to ignore) and pass it with `run start --b
 into every review prompt and readable by any reviewer through `task show ATTEMPT_ID --part brief`; see
 [configuration](docs/configuration.md#review-brief). `doctor` reports a `detected_template` to suggest its venue family.
 
-`run start` compiles and freezes the selected commit, then returns a compact acknowledgement. Read `run status RUN_ID` for task counts, current `next_actions`, and commands for report sections. It makes no model call. For each pending task offered by `next_actions`, the current Codex, Claude Code, or Antigravity session uses its selected model:
+`run start` compiles and freezes the selected commit, then returns a compact acknowledgement. It refuses a second non-terminal run on the same commit unless `--allow-duplicate` is passed. Read `run status RUN_ID` for task counts, current `next_actions`, and commands for report sections. It makes no model call. For each pending task offered by `next_actions`, the current Codex, Claude Code, or Antigravity session uses its selected model:
 
 ```bash
 scriptorium --json task claim TASK_ID --client codex --model MODEL --effort EFFORT \

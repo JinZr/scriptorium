@@ -71,5 +71,5 @@ family it suggests, or `unknown`. It is a default for the brief, not a venue pol
 ## Doctor and frozen inputs
 
 `doctor` checks the frozen project configuration, Git revision, dependency closure, local LaTeX tools, and compilation. It does not call a model. New runs freeze the project config, source identities, navigation, prompts, output schemas, and evidence contract. A frozen task's `input_digest` binds its prompt, schema, and bundle. A
-review brief is rendered into every review role's frozen prompt, so it changes that prompt's digest and each review
-task's `input_digest`; a run started without one keeps the same prompts as before briefs existed.
+review brief is rendered into every review role's frozen prompt, and its artifact digest joins every task's
+`input_digest` in that run; a run started without one keeps the same prompts and input digests as before briefs existed.

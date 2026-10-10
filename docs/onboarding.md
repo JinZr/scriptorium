@@ -79,7 +79,7 @@ scriptorium --json run status RUN_ID
 执行 `run status` 给出的 `next_actions`。模型会 claim 任务、读取冻结材料、提交结构化结果。
 你只需要在它停下时回到终端：
 
-- `finding decide` 逐条确认、拒绝或豁免发现；
+- `finding decide` 确认、拒绝或豁免发现（可一次列出同一次运行的多个发现 ID，共用同一决定与理由）；
 - `run resume`：至少有一条确认的发现时进入修订任务，模型产出候选补丁；
   一条都没有确认时运行直接完成，后面的补丁和验证步骤不会出现；
 - `patch decide` 批准或拒绝补丁，然后 `run resume`：批准会生成验证任务，
