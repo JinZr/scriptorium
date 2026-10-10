@@ -31,7 +31,7 @@ from scriptorium.domain import (
     validate_task_transition,
 )
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 
 _MIGRATION_1 = """
@@ -263,6 +263,14 @@ INSERT INTO schema_migrations (version, applied_at) VALUES (5, CURRENT_TIMESTAMP
 COMMIT;
 """
 
+# Runs started without a review brief, including every run recorded before it existed, keep a null digest.
+_MIGRATION_6 = """
+BEGIN IMMEDIATE;
+ALTER TABLE runs ADD COLUMN brief_digest TEXT REFERENCES artifacts(digest) ON DELETE RESTRICT;
+INSERT INTO schema_migrations (version, applied_at) VALUES (6, CURRENT_TIMESTAMP);
+COMMIT;
+"""
+
 
 class StorageError(RuntimeError):
     pass
@@ -316,7 +324,7 @@ class Database:
             if version == 3 and new_database:
                 self.connection.executescript(_MIGRATION_4)
                 version = 4
-            if version == 4:
+            if 4 <= version < SCHEMA_VERSION:
                 with self.transaction() as connection:
                     self._apply_external_migrations(connection)
 
@@ -341,7 +349,7 @@ class Database:
         # executescript commits an open transaction, so run each fixed migration statement inside the caller's
         # write transaction, after rechecking a version that another process may already have advanced.
         version = connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0]
-        for target, migration in ((4, _MIGRATION_4), (5, _MIGRATION_5)):
+        for target, migration in ((4, _MIGRATION_4), (5, _MIGRATION_5), (6, _MIGRATION_6)):
             if version >= target:
                 continue
             for statement in migration.split(";"):
@@ -377,8 +385,8 @@ class Database:
                 """
                 INSERT INTO runs (
                     id, repository, commit_sha, tree_sha, profile, status, config_digest, frozen_config_json,
-                    budget_usd, estimated_cost_usd, created_at, updated_at, error
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    budget_usd, estimated_cost_usd, created_at, updated_at, error, brief_digest
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     run.id,
@@ -394,6 +402,7 @@ class Database:
                     run.created_at,
                     run.updated_at,
                     run.error,
+                    run.brief_digest,
                 ),
             )
             self._append_event_row(
@@ -1565,6 +1574,7 @@ class Database:
             created_at=row["created_at"],
             updated_at=row["updated_at"],
             error=row["error"],
+            brief_digest=row["brief_digest"] if "brief_digest" in row.keys() else None,
         )
 
     @staticmethod

@@ -691,6 +691,68 @@ def test_historical_sdk_run_stays_readable_but_cannot_resume(tmp_path: Path) -> 
             asyncio.run(service.resume_run(run_id))
 
 
+def test_json_cli_freezes_a_review_brief_and_detects_a_committed_template(tmp_path: Path) -> None:
+    repo = _repo(tmp_path / "paper")
+    main = (repo / "main.tex").read_text(encoding="utf-8")
+    (repo / "main.tex").write_text(main.replace("\\begin{document}", "\\usepackage{neurips_2026}\n\\begin{document}"))
+    (repo / "neurips_2026.sty").write_text("\\ProvidesPackage{neurips_2026}\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(repo), "add", "."], check=True, capture_output=True)
+    subprocess.run(
+        ["git", "-C", str(repo), "-c", "user.name=Test", "-c", "user.email=test@example.org", "commit", "-m", "tpl"],
+        check=True,
+        capture_output=True,
+    )
+    brief = {"venue_family": "ml_conference", "stage": "presubmission", "priority_claims": ["A result."]}
+    brief_path = tmp_path / "brief.json"
+    brief_path.write_text(json.dumps(brief), encoding="utf-8")
+
+    def command(*args: str):
+        result = subprocess.run(
+            [sys.executable, "-m", "scriptorium", "--json", *args], cwd=repo, capture_output=True, text=True
+        )
+        assert result.returncode == 0, result.stdout + result.stderr
+        return json.loads(result.stdout)["data"]
+
+    template = {"template": "neurips_2026", "venue_family": "ml_conference"}
+    assert command("doctor", "--profile", "full")["detected_template"] == template
+    started = command("run", "start", "--profile", "full", "--brief", str(brief_path))
+    assert started["detected_template"] == template
+    assert started["review_brief"]["venue_family"] == "ml_conference"
+    assert started["review_brief"]["priority_claims"] == 1
+    run_id = started["run"]["id"]
+    status = command("run", "status", run_id)
+    assert status["review_brief"] == started["review_brief"]
+    claim = command(
+        "task",
+        "claim",
+        status["next_actions"][0]["task_id"],
+        "--client",
+        "claude_code",
+        "--model",
+        "selected-model",
+        "--effort",
+        "high",
+        "--session-id",
+        "host-session",
+        "--session-source",
+        "host",
+    )
+    shown = command("task", "show", claim["attempt"]["id"], "--part", "brief")
+    assert shown["next_command"] is None
+    assert json.loads(shown["text"]) == {
+        **brief,
+        "venue": None,
+        "known_weaknesses": [],
+        "prior_reviews": None,
+        "ignore": [],
+        "severity_notes": None,
+        "recorded_by": None,
+    }
+    with ScriptoriumService(repo) as service:
+        prompt = service.show_task(claim["attempt"]["id"])["prompt"]
+    assert "- Venue family: ml_conference" in prompt and "  - A result." in prompt
+
+
 def test_duplicate_start_on_a_real_project_is_refused_until_the_first_run_ends(tmp_path):
     repo = _repo(tmp_path / "paper")
     run_id, _task_id = _start(repo)

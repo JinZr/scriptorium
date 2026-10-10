@@ -8,9 +8,19 @@ import threading
 
 import pytest
 
+from scriptorium.artifacts import ArtifactStore
+from scriptorium.domain import Run
 from scriptorium.errors import StateError
 from scriptorium.service import ScriptoriumService
-from scriptorium.storage import _MIGRATION_1, _MIGRATION_2, _MIGRATION_3, _MIGRATION_4, ConflictError, Database
+from scriptorium.storage import (
+    _MIGRATION_1,
+    _MIGRATION_2,
+    _MIGRATION_3,
+    _MIGRATION_4,
+    _MIGRATION_5,
+    ConflictError,
+    Database,
+)
 
 
 def test_schema_and_pragmas(tmp_path) -> None:
@@ -40,7 +50,9 @@ def test_schema_and_pragmas(tmp_path) -> None:
         assert {"external_client", "effort", "session_source"}.issubset(attempt_columns)
         finding_columns = {row["name"] for row in database.connection.execute("PRAGMA table_info(findings)").fetchall()}
         assert "consequence" in finding_columns
-        assert database.connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0] == 5
+        run_columns = {row["name"] for row in database.connection.execute("PRAGMA table_info(runs)").fetchall()}
+        assert "brief_digest" in run_columns
+        assert database.connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0] == 6
         assert database.connection.execute("PRAGMA foreign_keys").fetchone()[0] == 1
         assert database.connection.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
         assert database.connection.execute("PRAGMA busy_timeout").fetchone()[0] == 5000
@@ -120,8 +132,9 @@ def test_active_historical_database_remains_compatible_until_explicit_external_s
         assert database.connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0] == 3
         database.connection.execute("UPDATE runs SET status = 'completed' WHERE id = 'run_old'")
         database.ensure_external_schema()
-        assert database.connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0] == 5
+        assert database.connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0] == 6
         assert database.get_patch("patch_old") == patch
+        assert database.get_run("run_old").brief_digest is None
 
 
 def test_concurrent_external_schema_upgrades_share_one_transaction(tmp_path) -> None:
@@ -141,8 +154,8 @@ def test_concurrent_external_schema_upgrades_share_one_transaction(tmp_path) -> 
             return database.connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0]
 
         with ThreadPoolExecutor(max_workers=2) as pool:
-            assert list(pool.map(upgrade, (first, second))) == [5, 5]
-        for version in (4, 5):
+            assert list(pool.map(upgrade, (first, second))) == [6, 6]
+        for version in (4, 5, 6):
             assert (
                 first.connection.execute(
                     "SELECT COUNT(*) FROM schema_migrations WHERE version = ?", (version,)
@@ -204,7 +217,7 @@ def test_external_database_adds_a_nullable_consequence_to_historical_findings(tm
         assert finding.consequence is None
         assert finding.title == "Title"
         assert reopened.get_finding("finding_old") == finding
-        assert database.connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0] == 5
+        assert database.connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0] == 6
         assert (
             database.connection.execute("SELECT COUNT(*) FROM schema_migrations WHERE version = 5").fetchone()[0] == 1
         )
@@ -221,7 +234,45 @@ def test_historical_schema_three_findings_decode_without_a_consequence_column(tm
 
     with Database(path) as database:
         assert database.get_finding("finding_old").consequence is None
+        assert database.get_run("run_old").brief_digest is None
         assert database.connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0] == 3
+
+
+def test_version_five_database_adds_a_nullable_brief_digest_to_historical_runs(tmp_path) -> None:
+    path = tmp_path / "state.sqlite3"
+    connection = sqlite3.connect(path, isolation_level=None)
+    connection.execute("CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)")
+    for migration in (_MIGRATION_1, _MIGRATION_2, _MIGRATION_3, _MIGRATION_4, _MIGRATION_5):
+        connection.executescript(migration)
+    _insert_historical_finding(connection)
+    connection.close()
+
+    with Database(path) as database, Database(path) as reopened:
+        run = database.get_run("run_old")
+
+        assert run.brief_digest is None
+        assert run.status.value == "completed"
+        assert reopened.get_run("run_old") == run
+        assert database.get_finding("finding_old").title == "Title"
+        assert database.connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0] == 6
+        assert (
+            database.connection.execute("SELECT COUNT(*) FROM schema_migrations WHERE version = 6").fetchone()[0] == 1
+        )
+
+
+def test_a_run_records_its_brief_artifact_digest(tmp_path) -> None:
+    with Database(tmp_path / "state.sqlite3") as database:
+        artifact = ArtifactStore(tmp_path / "artifacts").put_text("{}", "application/json")
+        database.record_artifact(artifact)
+        run = Run("/tmp/paper", "a" * 40, "b" * 40, "full", "c" * 64, {}, brief_digest=artifact.digest)
+        database.create_run(run)
+        plain = Run("/tmp/paper", "a" * 40, "b" * 40, "full", "c" * 64, {})
+        database.create_run(plain)
+
+        assert database.get_run(run.id).brief_digest == artifact.digest
+        assert database.get_run(plain.id).brief_digest is None
+        with pytest.raises(sqlite3.IntegrityError):
+            database.create_run(Run("/tmp/paper", "a" * 40, "b" * 40, "full", "c" * 64, {}, brief_digest="e" * 64))
 
 
 def test_version_two_database_adds_nullable_validation_report_pointer(tmp_path) -> None:

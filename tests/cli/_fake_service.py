@@ -32,13 +32,23 @@ class FakeService:
         self.calls.append(("doctor", profile, revision))
         return self.doctor_result
 
-    async def start_run(self, revision: str, profile: str, allow_duplicate: bool = False) -> dict:
-        return self._record_run("start_run", revision, profile, allow_duplicate)
+    async def start_run(
+        self, revision: str, profile: str, allow_duplicate: bool = False, brief: str | None = None
+    ) -> dict:
+        return self._record_run("start_run", revision, profile, allow_duplicate, *(() if brief is None else (brief,)))
 
     def _record_run(self, *call: object) -> dict:
         self._record(*call)
         run = Run("/paper", "abc123", "tree", "quick", "config", {"execution": "external"}, id="run_1")
         return {"run": run, "tasks": [], "finding_ids": [], "patch_ids": []}
+
+    def show_task(self, attempt_id: str) -> dict:
+        self.calls.append(("show_task", attempt_id))
+        return {"attempt_id": attempt_id}
+
+    def task_view(self, context: dict, part: str | None = None, offset: int = 0) -> dict:
+        self.calls.append(("task_view", context["attempt_id"], part, offset))
+        return {"part": part, "offset": offset}
 
     def run_status(self, run_id: str) -> Result:
         return self._record("run_status", run_id)

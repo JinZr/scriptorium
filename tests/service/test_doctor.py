@@ -284,3 +284,18 @@ def test_doctor_reports_compiler_source_omission(tmp_path, monkeypatch):
     check = next(item for item in result["checks"] if item["name"] == "manuscript_compile")
     assert not check["ok"]
     assert "hidden.tex" in check["message"]
+
+
+def test_doctor_reports_the_template_declared_by_the_frozen_revision(tmp_path: Path, monkeypatch) -> None:
+    repo = make_repository(tmp_path)
+    (repo / "main.tex").write_text("\\documentclass[referee]{sn-jnl}\n", encoding="utf-8")
+    git(repo, "add", "main.tex")
+    git(repo, "commit", "--quiet", "-m", "journal template")
+    (repo / "main.tex").write_text("\\documentclass{article}\n\\usepackage{neurips_2026}\n", encoding="utf-8")
+    prepare_doctor(monkeypatch)
+
+    with ScriptoriumService(repo, manuscript_manager=DoctorManuscriptManager(repo)) as service:
+        result = service.doctor(profile="quick")
+
+    assert result["ok"] is True
+    assert result["detected_template"] == {"template": "sn-jnl", "venue_family": "nature_family"}
