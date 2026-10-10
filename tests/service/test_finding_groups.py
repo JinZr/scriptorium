@@ -66,47 +66,77 @@ def _ids(grouped):
     return [group["finding_ids"] for group in grouped["groups"]]
 
 
-def test_overlapping_line_ranges_on_one_path_share_a_group():
+def test_line_ranges_share_a_group_only_when_half_the_shorter_range_overlaps():
     findings = [
-        _finding("a", _lines("main.tex", 3, 5)),
+        _finding("a", _lines("main.tex", 3, 6)),
         _finding("b", _lines("main.tex", 5, 7)),
-        _finding("c", _lines("main.tex", 8, 9)),
-        _finding("d", _lines("other.tex", 3, 5)),
+        _finding("c", _lines("main.tex", 7, 10)),
+        _finding("d", _lines("other.tex", 3, 6)),
+        _finding("e", _lines("main.tex", 20, 60)),
+        _finding("f", _lines("main.tex", 40)),
     ]
     grouped = finding_groups(findings, [])
 
-    assert sorted(_ids(grouped)) == [["finding_a", "finding_b"], ["finding_c"], ["finding_d"]]
-    (shared,) = [group for group in grouped["groups"] if len(group["finding_ids"]) == 2]
+    # b covers two of its three lines with a; c touches b on one line of three; a 41-line table holds f.
+    assert sorted(_ids(grouped)) == [
+        ["finding_a", "finding_b"],
+        ["finding_c"],
+        ["finding_d"],
+        ["finding_e", "finding_f"],
+    ]
+    shared = next(group for group in grouped["groups"] if group["primary_finding_id"] == "finding_a")
     assert shared["evidence"] == [{"source_path": "main.tex", "start_line": 3, "end_line": 7}]
 
 
-def test_a_finding_with_several_anchors_bridges_two_groups():
+def test_findings_share_a_group_only_when_most_anchors_of_one_overlap_the_other():
     findings = [
-        _finding("a", _lines("main.tex", 1, 2)),
-        _finding("b", _lines("intro.tex", 10, 12)),
-        _finding("c", _lines("main.tex", 2), _lines("intro.tex", 11)),
-        _finding("d", _lines("main.tex", 4)),
+        _finding("a", _lines("main.tex", 1), _lines("main.tex", 10), _lines("main.tex", 20)),
+        _finding("b", _lines("main.tex", 1), _lines("main.tex", 10), _lines("main.tex", 30)),
+        _finding("c", _lines("main.tex", 1), _lines("main.tex", 40)),
+        _finding("d", _lines("main.tex", 20), _lines("main.tex", 20)),
     ]
     grouped = finding_groups(findings, [])
 
-    assert sorted(_ids(grouped)) == [["finding_a", "finding_b", "finding_c"], ["finding_d"]]
-    bridged = next(group for group in grouped["groups"] if len(group["finding_ids"]) == 3)
+    # b shares two of three anchors, c only a shared opening line, and d repeats one anchor a cites.
+    assert sorted(_ids(grouped)) == [["finding_a", "finding_b", "finding_d"], ["finding_c"]]
+
+
+def test_a_group_never_chains_through_a_finding_that_bridges_two_others():
+    findings = [
+        _finding("a", _lines("main.tex", 1, 2), severity=FindingSeverity.MAJOR),
+        _finding("b", _lines("intro.tex", 10, 12), severity=FindingSeverity.MODERATE),
+        _finding("c", _lines("main.tex", 2), _lines("intro.tex", 11)),
+    ]
+    grouped = finding_groups(findings, [])
+
+    # c shares evidence with both a and b, but joins only the group whose primary comes first.
+    assert sorted(_ids(grouped)) == [["finding_a", "finding_c"], ["finding_b"]]
+    bridged = next(group for group in grouped["groups"] if group["primary_finding_id"] == "finding_a")
     assert bridged["evidence"] == [
-        {"source_path": "intro.tex", "start_line": 10, "end_line": 12},
+        {"source_path": "intro.tex", "start_line": 11, "end_line": 11},
         {"source_path": "main.tex", "start_line": 1, "end_line": 2},
     ]
 
 
-def test_pdf_anchors_group_by_identical_page_and_never_join_line_anchors():
+def test_a_shared_pdf_page_groups_only_page_only_findings_linked_to_one_claim():
+    figure = "Figure 2 shows the gain."
     findings = [
-        _finding("a", _page(2), role=AgentRole.FIGURE_REVIEW),
-        _finding("b", _page(2), _page(3), role=AgentRole.CONSISTENCY),
-        _finding("c", _page(4)),
-        _finding("d", _lines("manuscript.pdf", 2)),
+        _finding("a", _page(2), role=AgentRole.FIGURE_REVIEW, affected_claim=figure),
+        _finding("b", _page(2), _page(3), role=AgentRole.CONSISTENCY, affected_claim=figure),
+        _finding("c", _page(2), affected_claim="Another claim."),
+        _finding("d", _page(2)),
+        _finding("e", _page(2), _lines("main.tex", 4), affected_claim=figure),
+        _finding("f", _lines("manuscript.pdf", 2), affected_claim=figure),
     ]
     grouped = finding_groups(findings, [])
 
-    assert sorted(_ids(grouped)) == [["finding_a", "finding_b"], ["finding_c"], ["finding_d"]]
+    assert sorted(_ids(grouped)) == [
+        ["finding_a", "finding_b"],
+        ["finding_c"],
+        ["finding_d"],
+        ["finding_e"],
+        ["finding_f"],
+    ]
     paged = next(group for group in grouped["groups"] if len(group["finding_ids"]) == 2)
     assert paged["evidence"] == [_page(2), _page(3)]
     assert paged["roles"] == ["consistency", "figure_review"]
@@ -166,6 +196,20 @@ def _tiered_findings():
     return headline, supporting, affected, other_major, other_minor, compliance
 
 
+def test_page_only_findings_group_on_any_shared_claim_link_not_only_the_most_prominent():
+    linked = _finding("a", _page(2), role=AgentRole.SUBSTANTIVE_REVIEW)
+    detail = _finding("b", _page(2), role=AgentRole.FIGURE_REVIEW, affected_claim="Claim number 1.")
+    claim_report = {
+        **_linked_claim_report(linked.task_id, [_submitted(linked)], ["headline", "supporting"]),
+        "claim_checks": [{"claim_index": index, "assessment": "finding", "finding_indices": [0]} for index in range(2)],
+    }
+    (group,) = finding_groups([linked, detail], [claim_report])["groups"]
+
+    # a's displayed link is its headline claim, but it shares the supporting claim with b.
+    assert group["finding_ids"] == ["finding_a", "finding_b"]
+    assert group["claim"] == {"text": "Claim number 0.", "prominence": "headline", "finding_id": "finding_a"}
+
+
 def test_tiers_follow_claim_links_and_order_groups_for_triage():
     headline, supporting, affected, other_major, other_minor, compliance = _tiered_findings()
     findings = [compliance, other_minor, other_major, affected, supporting, headline]
@@ -204,8 +248,8 @@ def test_a_headline_link_lifts_the_whole_group_and_mixed_compliance_is_not_compl
     headline = _finding("h", _lines("main.tex", 3), role=AgentRole.SUBSTANTIVE_REVIEW)
     detail = _finding("d", _lines("main.tex", 3), severity=FindingSeverity.MAJOR, category="submission_compliance")
     mixed = [
-        _finding("p", _page(1), category="submission_compliance"),
-        _finding("q", _page(1), category="style"),
+        _finding("p", _lines("main.tex", 9), category="submission_compliance"),
+        _finding("q", _lines("main.tex", 9), category="style"),
     ]
     claim_report = _linked_claim_report(headline.task_id, [_submitted(headline)], ["headline"])
     grouped = finding_groups([detail, headline, *mixed], [claim_report])
