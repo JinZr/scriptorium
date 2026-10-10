@@ -29,8 +29,10 @@ _RETIRED = argparse.SUPPRESS
 _TASK_DESCRIPTION = """Use a frozen task from the current host model session.
 
 Typical order: claim, show (overview), show --part prompt|schema|source-map, nav, search, read, page,
-then submit. Successful JSON responses for claim, show, read, search, nav, and page stay within 7,000
-UTF-8 bytes. Follow each next_command unchanged until it is null to finish a traversal."""
+then submit. Successful JSON responses for claim, show, read, search, nav, page, and export stay within
+7,000 UTF-8 bytes. Follow each next_command unchanged until it is null to finish a traversal. For long
+sources, export writes the frozen bundle files to a directory (a recorded side effect on disk) for reading
+convenience; evidence anchors still come from frozen paths, digests, and lines."""
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -54,6 +56,11 @@ def build_parser() -> argparse.ArgumentParser:
     start_parser = run_commands.add_parser("start", help="freeze a committed revision and prepare review tasks")
     start_parser.add_argument("--revision", default="HEAD", help="committed revision to freeze (default: HEAD)")
     start_parser.add_argument("--profile", default="full", help="review profile from scriptorium.toml (default: full)")
+    start_parser.add_argument(
+        "--allow-duplicate",
+        action="store_true",
+        help="start even if a non-terminal run already exists on the same commit",
+    )
     start_parser.add_argument("--budget-usd", help=_RETIRED)
 
     status_parser = run_commands.add_parser("status", help="show a bounded run overview and next actions")
@@ -202,6 +209,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--text-digest", help="text_digest from the previous --text fragment; required with --offset"
     )
 
+    export_parser = task_commands.add_parser(
+        "export", help="write the frozen bundle files (no page images) to a new or empty directory"
+    )
+    export_parser.add_argument("attempt_id", help="active attempt ID")
+    export_parser.add_argument("--dir", required=True, help="directory that must not exist or must be empty")
+
     finding_parser = commands.add_parser("finding", help="inspect and decide findings")
     finding_commands = finding_parser.add_subparsers(dest="finding_command", required=True)
 
@@ -212,7 +225,9 @@ def build_parser() -> argparse.ArgumentParser:
     finding_show_parser.add_argument("finding_id", help="finding ID")
 
     finding_decide_parser = finding_commands.add_parser("decide", help="record a human finding decision")
-    finding_decide_parser.add_argument("finding_id", help="finding ID")
+    finding_decide_parser.add_argument(
+        "finding_ids", nargs="+", metavar="FINDING_ID", help="finding ID(s) of one run; one decision applies to each"
+    )
     finding_decisions = finding_decide_parser.add_mutually_exclusive_group(required=True)
     finding_decisions.add_argument(
         "--confirm", action="store_const", const="confirm", dest="decision", help="confirm for revision"
@@ -317,6 +332,7 @@ def _dispatch_run(service: Any, arguments: argparse.Namespace) -> tuple[Any, int
             service.start_run(
                 revision=arguments.revision,
                 profile=arguments.profile,
+                allow_duplicate=arguments.allow_duplicate,
             )
         )
         return run_overview(result), 0, None
@@ -431,6 +447,8 @@ def _dispatch_task(service: Any, arguments: argparse.Namespace) -> tuple[Any, in
             0,
             None,
         )
+    if arguments.task_command == "export":
+        return service.export_task(arguments.attempt_id, arguments.dir), 0, None
     if arguments.task_command == "page":
         return (
             service.page_task(
@@ -456,7 +474,7 @@ def _dispatch_finding(service: Any, arguments: argparse.Namespace) -> tuple[Any,
     if arguments.finding_command == "show":
         return service.get_finding(arguments.finding_id), 0, None
     if arguments.finding_command == "decide":
-        result = service.decide_finding(arguments.finding_id, arguments.decision, arguments.reason)
+        result = service.decide_findings(arguments.finding_ids, arguments.decision, arguments.reason)
         return result, 0, None
 
     raise _UsageError("missing finding command")

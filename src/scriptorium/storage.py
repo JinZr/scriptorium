@@ -31,7 +31,7 @@ from scriptorium.domain import (
     validate_task_transition,
 )
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 
 _MIGRATION_1 = """
@@ -255,6 +255,14 @@ INSERT INTO schema_migrations (version, applied_at) VALUES (4, CURRENT_TIMESTAMP
 COMMIT;
 """
 
+# Findings recorded before the severity rubric keep a null consequence.
+_MIGRATION_5 = """
+BEGIN IMMEDIATE;
+ALTER TABLE findings ADD COLUMN consequence TEXT;
+INSERT INTO schema_migrations (version, applied_at) VALUES (5, CURRENT_TIMESTAMP);
+COMMIT;
+"""
+
 
 class StorageError(RuntimeError):
     pass
@@ -307,6 +315,10 @@ class Database:
                 version = 3
             if version == 3 and new_database:
                 self.connection.executescript(_MIGRATION_4)
+                version = 4
+            if version == 4:
+                with self.transaction() as connection:
+                    self._apply_external_migrations(connection)
 
     def ensure_external_schema(self) -> None:
         with self.transaction() as connection:
@@ -322,8 +334,17 @@ class Database:
                     f"historical SDK run {active['id']} must finish in its original version "
                     "before starting an external run"
                 )
-            # executescript commits an open transaction, so run each fixed migration statement under this lock.
-            for statement in _MIGRATION_4.split(";"):
+            self._apply_external_migrations(connection)
+
+    @staticmethod
+    def _apply_external_migrations(connection: sqlite3.Connection) -> None:
+        # executescript commits an open transaction, so run each fixed migration statement inside the caller's
+        # write transaction, after rechecking a version that another process may already have advanced.
+        version = connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0]
+        for target, migration in ((4, _MIGRATION_4), (5, _MIGRATION_5)):
+            if version >= target:
+                continue
+            for statement in migration.split(";"):
                 statement = statement.strip()
                 if statement and statement not in {"BEGIN IMMEDIATE", "COMMIT"}:
                     connection.execute(statement)
@@ -395,6 +416,15 @@ class Database:
 
     def list_runs(self) -> list[Run]:
         rows = self.connection.execute("SELECT * FROM runs ORDER BY created_at, id").fetchall()
+        return [self._run_from_row(row) for row in rows]
+
+    def list_active_runs(self, commit_sha: str) -> list[Run]:
+        # A failed run can still be resumed, so only completed and cancelled runs are inactive.
+        inactive = (RunStatus.COMPLETED.value, RunStatus.CANCELLED.value)
+        rows = self.connection.execute(
+            "SELECT * FROM runs WHERE commit_sha = ? AND status NOT IN (?, ?) ORDER BY created_at, id",
+            (commit_sha, *inactive),
+        ).fetchall()
         return [self._run_from_row(row) for row in rows]
 
     def update_run_status(self, run_id: str, status: RunStatus, error: str | None = None) -> Run:
@@ -985,9 +1015,9 @@ class Database:
                     """
                     INSERT INTO findings (
                         id, run_id, task_id, attempt_id, fingerprint, role, category, severity, title,
-                        claim, evidence_json, explanation, suggested_action, confidence, status,
+                        claim, evidence_json, explanation, suggested_action, confidence, consequence, status,
                         created_at, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         finding.id,
@@ -1004,6 +1034,7 @@ class Database:
                         finding.explanation,
                         finding.suggested_action,
                         finding.confidence,
+                        finding.consequence,
                         finding.status.value,
                         finding.created_at,
                         finding.updated_at,
@@ -1075,6 +1106,15 @@ class Database:
         reason: str,
         actor: str = "user",
     ) -> Decision:
+        return self.decide_findings([finding_id], decision, reason, actor)[0]
+
+    def decide_findings(
+        self,
+        finding_ids: list[str],
+        decision: str,
+        reason: str,
+        actor: str = "user",
+    ) -> list[Decision]:
         status_by_decision = {
             "confirm": FindingStatus.CONFIRMED,
             "reject": FindingStatus.REJECTED,
@@ -1084,33 +1124,36 @@ class Database:
             raise ValueError(f"invalid finding decision: {decision}")
         if not reason.strip():
             raise ValueError("decision reason is required")
-        record = Decision(
-            target_type="finding",
-            target_id=finding_id,
-            decision=decision,
-            reason=reason,
-            actor=actor,
-        )
+        records = []
         with self.transaction() as connection:
-            row = connection.execute("SELECT * FROM findings WHERE id = ?", (finding_id,)).fetchone()
-            if row is None:
-                raise NotFoundError(f"finding not found: {finding_id}")
-            connection.execute(
-                "UPDATE findings SET status = ?, updated_at = ? WHERE id = ?",
-                (status_by_decision[decision].value, record.created_at, finding_id),
-            )
-            self._append_decision_row(connection, record)
-            self._append_event_row(
-                connection,
-                Event(
-                    run_id=row["run_id"],
-                    event_type="finding.decided",
-                    entity_type="finding",
-                    entity_id=finding_id,
-                    payload={"decision": decision, "reason": reason, "actor": actor},
-                ),
-            )
-        return record
+            for finding_id in finding_ids:
+                record = Decision(
+                    target_type="finding",
+                    target_id=finding_id,
+                    decision=decision,
+                    reason=reason,
+                    actor=actor,
+                )
+                row = connection.execute("SELECT * FROM findings WHERE id = ?", (finding_id,)).fetchone()
+                if row is None:
+                    raise NotFoundError(f"finding not found: {finding_id}")
+                connection.execute(
+                    "UPDATE findings SET status = ?, updated_at = ? WHERE id = ?",
+                    (status_by_decision[decision].value, record.created_at, finding_id),
+                )
+                self._append_decision_row(connection, record)
+                self._append_event_row(
+                    connection,
+                    Event(
+                        run_id=row["run_id"],
+                        event_type="finding.decided",
+                        entity_type="finding",
+                        entity_id=finding_id,
+                        payload={"decision": decision, "reason": reason, "actor": actor},
+                    ),
+                )
+                records.append(record)
+        return records
 
     def list_decisions(self, target_type: str, target_id: str) -> list[Decision]:
         rows = self.connection.execute(
@@ -1629,6 +1672,8 @@ class Database:
             explanation=row["explanation"],
             suggested_action=row["suggested_action"],
             confidence=row["confidence"],
+            # Historical SDK databases stay at their original schema without this column.
+            consequence=row["consequence"] if "consequence" in row.keys() else None,
             status=FindingStatus(row["status"]),
             created_at=row["created_at"],
             updated_at=row["updated_at"],

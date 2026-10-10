@@ -295,6 +295,8 @@ class Finding:
     explanation: str
     suggested_action: str
     confidence: float
+    # Findings recorded before the severity rubric have no consequence.
+    consequence: str | None = None
     id: str = field(default_factory=lambda: new_id("finding"))
     status: FindingStatus = FindingStatus.PENDING
     created_at: str = field(default_factory=utc_now)

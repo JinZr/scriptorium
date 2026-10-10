@@ -40,7 +40,7 @@ def project(tmp_path):
 
 def start(root, revision="HEAD"):
     with ScriptoriumService(root, manuscript_manager=ManuscriptBuilder(root)) as service:
-        run_id = asyncio.run(service.start_run(revision, "trial"))["run"].id
+        run_id = asyncio.run(service.start_run(revision, "trial", allow_duplicate=True))["run"].id
         task = service.list_tasks(run_id)["tasks"][0]["task"]
     return run_id, task.id
 
@@ -67,6 +67,7 @@ def answer(context, *, completion="complete", findings=True):
                     ],
                     "explanation": "The word obscures the sentence.",
                     "suggested_action": "Correct teh to the.",
+                    "consequence": "A reader would misread the reported result.",
                     "confidence": 0.9,
                 }
             ]

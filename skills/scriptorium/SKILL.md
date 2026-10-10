@@ -17,6 +17,7 @@ task nav ATTEMPT_ID --command heading|reference|citation|label|caption|graphics|
 task search ATTEMPT_ID --query Q [--path P] [--context 2] [--include-metadata]
 task read ATTEMPT_ID --path P --start-line A [--end-line B] [--anchor]
 task page ATTEMPT_ID --number N [--document ENTRYPOINT] [--scale 3 --crop x0,y0,x1,y1 | --text]
+task export ATTEMPT_ID --dir DIR          -> frozen sources and metadata as read-only files (new or empty DIR)
 task submit ATTEMPT_ID --input-digest D --file answer.json [--check]
 run continue|retry RUN_ID --task TASK_ID  -> then claim again
 ```
@@ -25,7 +26,7 @@ Prefix each with `scriptorium --json`. Run every `next_command` unchanged until 
 
 ## Start or resume
 
-Run every command from the manuscript project that owns the run. Inspect `scriptorium --json doctor --revision REVISION --profile PROFILE` before a new run. `scriptorium --json run start --revision REVISION --profile PROFILE` freezes and compiles that commit, prepares pending review tasks, and returns a run overview. It does not spend model tokens by itself. For an existing run, inspect `run status RUN_ID` and follow its `next_actions`. After starting or changing a run, read `run status` for fresh actions; mutation acknowledgements contain only a compact state summary. Use IDs and input digests returned by the CLI, not guessed values. If a run is not found, stop and check the project directory with the caller; do not search other repositories or inspect SQLite directly.
+Run every command from the manuscript project that owns the run. Inspect `scriptorium --json doctor --revision REVISION --profile PROFILE` before a new run. `scriptorium --json run start --revision REVISION --profile PROFILE` freezes and compiles that commit, prepares pending review tasks, and returns a run overview. It does not spend model tokens by itself. It refuses with `duplicate_run` when a non-terminal run already exists on that commit; use that run's `run status` rather than adding `--allow-duplicate` unless the user wants a second run. For an existing run, inspect `run status RUN_ID` and follow its `next_actions`. After starting or changing a run, read `run status` for fresh actions; mutation acknowledgements contain only a compact state summary. Use IDs and input digests returned by the CLI, not guessed values. If a run is not found, stop and check the project directory with the caller; do not search other repositories or inspect SQLite directly.
 
 For each pending task offered by `run status` as a `task claim` action, claim from this current session:
 
@@ -51,7 +52,10 @@ scriptorium --json task search ATTEMPT_ID --query TERM
 scriptorium --json task read ATTEMPT_ID --path manifest.json --start-line 1
 scriptorium --json task read ATTEMPT_ID --path SOURCE_PATH --start-line LINE
 scriptorium --json task page ATTEMPT_ID --number PAGE
+scriptorium --json task export ATTEMPT_ID --dir DIR
 ```
+
+For long sources that would take many bounded reads, `task export` writes the frozen sources (at their `read_path`), `manifest.json`, `navigation.json`, `source-map.json` and `manuscript.pdf` into an empty directory you choose, so you can read them with ordinary file tools. The export is recorded and audited separately from reads, and it does not replace `task read --anchor`, which gives the verified anchor each finding still needs, or `task page`, which is how rendered pages are inspected.
 
 If `source-map.json` has `compiled_pdf.documents`, inventory each entrypoint, `start_page` and `page_count`.
 This includes explicitly configured independent supplements, compiled separately and assembled after the main
@@ -94,7 +98,8 @@ For a `substantive_review` using the current `scientific_review` schema, the fol
       }],
       "explanation": "The checked main text and supplement do not define the measured outcome.",
       "suggested_action": "Define the outcome and report the supporting measurement.",
-      "confidence": 0.7
+      "confidence": 0.7,
+      "consequence": "A reader cannot tell what the headline result measures, so cannot judge whether it supports the claim."
     }
   ],
   "scope": {
@@ -200,6 +205,6 @@ For a report section, follow every `next_command` until null, concatenate `text`
 
 ## Human decisions and reporting
 
-Human finding decisions, patch approval, and patch application require the user's explicit instruction. If the session already contains that authorization, use it; otherwise present the exact finding or patch and proposed decision for review. Never infer approval from severity or from your own review. Do not edit manuscript files to mimic a Scriptorium patch.
+Human finding decisions, patch approval, and patch application require the user's explicit instruction. If the session already contains that authorization, use it; otherwise present the exact finding or patch and proposed decision for review. Never infer approval from severity or from your own review. Do not edit manuscript files to mimic a Scriptorium patch. `finding decide` accepts several finding IDs of one run for a single decision and reason.
 
 After an authorized decision, use `run resume RUN_ID` to prepare the next stage. Report the run, task, attempt, finding, and patch IDs; actual host model and effort; retrieval gaps; validation status; current human gate; and release-gate result. Unknown token usage or cost remains unknown. Scriptorium does not control the host's spending.

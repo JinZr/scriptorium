@@ -7,14 +7,15 @@ import errno
 from hashlib import sha256
 import json
 import os
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import re
 import shlex
 import shutil
 import subprocess
 import sys
 import tarfile
-from typing import Iterable, Iterator
+import tempfile
+from typing import Callable, Iterable, Iterator, Sequence
 
 from .config import ManuscriptConfig
 from .errors import ConfigurationError, InfrastructureError, StateError
@@ -334,6 +335,85 @@ def page_text(pdf_path: Path, page: int) -> str:
         return document[page - 1].get_text("text")
     finally:
         document.close()
+
+
+def export_root(directory: str | Path) -> Path:
+    """Validate and resolve a destination that must not exist or must be an empty directory."""
+    root = Path(directory)
+    if root.is_symlink():
+        raise ConfigurationError("export directory must not be a symbolic link")
+    if root.exists() and (not root.is_dir() or any(root.iterdir())):
+        raise ConfigurationError("export directory must not exist or must be an empty directory")
+    return root.resolve()
+
+
+def _export_relative(name: str) -> PurePosixPath:
+    relative = PurePosixPath(name)
+    if not name or relative.is_absolute() or "\\" in name or any(part in {"", ".", ".."} for part in name.split("/")):
+        raise StateError(f"export path is not a safe relative path: {name!r}")
+    return relative
+
+
+def _export_target(root: Path, relative: PurePosixPath) -> Path:
+    target = root.joinpath(*relative.parts)
+    if not (target.parent.resolve() / target.name).is_relative_to(root) or os.path.lexists(target):
+        raise StateError(f"export path escapes the export directory or collides with another file: {relative}")
+    return target
+
+
+def _write_read_only(target: Path, data: bytes) -> None:
+    target.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temporary = tempfile.mkstemp(dir=target.parent, prefix=".export-")
+    try:
+        with os.fdopen(descriptor, "wb") as stream:
+            stream.write(data)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.chmod(temporary, 0o444)
+        os.replace(temporary, target)
+    finally:
+        Path(temporary).unlink(missing_ok=True)
+
+
+def _discard_export(root: Path, written: list[Path], created_root: bool) -> None:
+    for target in written:
+        target.unlink(missing_ok=True)
+    for current, directories, _ in os.walk(root, topdown=False):
+        for name in directories:
+            try:
+                (Path(current) / name).rmdir()
+            except OSError:
+                pass
+    if created_root:
+        try:
+            root.rmdir()
+        except OSError:
+            pass
+
+
+def export_files(
+    directory: str | Path, names: Sequence[str], read: Callable[[str], bytes], record: Callable[[], None]
+) -> Path:
+    """Write read(name) for each relative name into a new or empty directory, read-only, one atomic file at a time.
+
+    record runs after every file is in place; if any step fails, everything written here is removed again.
+    """
+    root = export_root(directory)
+    relatives = [_export_relative(name) for name in names]
+    created_root = not root.exists()
+    root.mkdir(parents=True, exist_ok=True)
+    written: list[Path] = []
+    try:
+        for name, relative in zip(names, relatives):
+            data = read(name)
+            target = _export_target(root, relative)
+            _write_read_only(target, data)
+            written.append(target)
+        record()
+    except BaseException:
+        _discard_export(root, written, created_root)
+        raise
+    return root
 
 
 @dataclass(frozen=True)

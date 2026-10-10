@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections import Counter, deque
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from dataclasses import asdict, is_dataclass
 from datetime import datetime, timezone
 import difflib
@@ -38,12 +38,14 @@ from .domain import (
     new_id,
     utc_now,
 )
-from .errors import ConfigurationError, InfrastructureError, NotFoundError, StateError
+from .errors import ConfigurationError, DuplicateRunError, InfrastructureError, NotFoundError, StateError
 from .manuscript import (
     EQUATION_ENVIRONMENTS,
     QUANTITY_COMMANDS,
     TABLE_ENVIRONMENTS,
     ManuscriptManager,
+    export_files,
+    export_root,
     page_text,
     render_page_view,
 )
@@ -56,6 +58,7 @@ from .schemas import (
 from .storage import ConflictError, Database, NotFoundError as StorageNotFoundError, StorageError
 from .tool_output import (
     REPORT_PARTS,
+    bound_export,
     bound_nav,
     bound_read,
     bound_search,
@@ -319,11 +322,28 @@ class ScriptoriumService:
             "checks": checks,
         }
 
-    async def start_run(self, revision: str, profile: str) -> dict[str, Any]:
+    def _refuse_duplicate_run(self, commit_sha: str) -> None:
+        active = self._storage(self.database.list_active_runs, commit_sha)
+        if active:
+            existing = active[0]
+            remedy = "resume" if existing.status == RunStatus.FAILED else "cancel"
+            raise DuplicateRunError(
+                f"run {existing.id} is already {existing.status.value} on commit {commit_sha[:12]}; "
+                f"inspect it with `run status {existing.id}`, {remedy} it, or pass --allow-duplicate to start another"
+            )
+
+    async def start_run(self, revision: str, profile: str, allow_duplicate: bool = False) -> dict[str, Any]:
         reject_legacy_local_config(self.repo)
         run_id = new_id("run")
-        with self._run_operation(run_id, "run start"):
-            self._storage(self.database.ensure_external_schema)
+        self._storage(self.database.ensure_external_schema)
+        with ExitStack() as locks:
+            if not allow_duplicate:
+                # Serialize check-and-create across processes: a concurrent starter waits here, then sees this run.
+                revision = self.manuscript.resolve_revision(revision).commit_sha
+                locks.enter_context(self._run_operation(f"start-{revision}", "run start", wait=True))
+            locks.enter_context(self._run_operation(run_id, "run start"))
+            if not allow_duplicate:
+                self._refuse_duplicate_run(revision)
             await self.armarius.start_run(revision, profile, run_id=run_id)
             return self.get_run(run_id)
 
@@ -909,6 +929,39 @@ class ScriptoriumService:
         )
         return response
 
+    def export_task(self, attempt_id: str, directory: str | Path):
+        with self._retrieval_operation(attempt_id, "task export"):
+            return self._export_task(attempt_id, directory)
+
+    def _export_task(self, attempt_id: str, directory: str | Path):
+        attempt, task, bundle, files = self._readable_task(attempt_id)
+        root = export_root(directory)
+        names = self._export_names(bundle, files)
+        listing = [{"path": name, "digest": files[name]["digest"]} for name in names]
+        response = bound_export(attempt.id, str(root), listing, sum(files[name]["size"] for name in names))
+
+        def record() -> None:
+            payload = {"directory": str(root), "bundle_digest": attempt.bundle_digest, "files": listing}
+            self._record_access(task.run_id, attempt.id, "export", payload)
+
+        export_files(root, names, lambda name: self._frozen_bytes(bundle, files, name), record)
+        return response
+
+    @staticmethod
+    def _export_names(bundle, files) -> list[str]:
+        names = {source.read_path for source in bundle.anchor_map.sources}
+        names.update(name for name in (*_BUNDLE_METADATA, "manuscript.pdf") if name in files)
+        if not names <= files.keys():
+            raise InfrastructureError("a source is missing from the frozen bundle index")
+        return sorted(names)
+
+    def _frozen_bytes(self, bundle, files, name: str) -> bytes:
+        path = self.armarius._verify_retrieval_file(bundle.workspace, files, name)
+        data = path.read_bytes()
+        if len(data) != files[name]["size"] or ArtifactStore.digest_bytes(data) != files[name]["digest"]:
+            raise InfrastructureError(f"frozen bundle file changed during export: {name}")
+        return data
+
     def _record_access(self, run_id: str, attempt_id: str, operation: str, payload: dict[str, Any]) -> None:
         self._storage(
             self.database.append_event,
@@ -936,20 +989,43 @@ class ScriptoriumService:
         decision: str,
         reason: str,
     ) -> dict[str, Any]:
-        initial = self._storage(self.database.get_finding, finding_id)
-        with self._run_operation(initial.run_id, "finding decide"):
-            finding = self._storage(self.database.get_finding, finding_id)
-            run = self._storage(self.database.get_run, finding.run_id)
+        return self.decide_findings([finding_id], decision, reason)
+
+    def decide_findings(
+        self,
+        finding_ids: list[str],
+        decision: str,
+        reason: str,
+    ) -> dict[str, Any]:
+        if not finding_ids:
+            raise StateError("at least one finding ID is required")
+        if len(set(finding_ids)) != len(finding_ids):
+            raise StateError("finding IDs must not repeat")
+        initial = [self._storage(self.database.get_finding, finding_id) for finding_id in finding_ids]
+        run_ids = {finding.run_id for finding in initial}
+        if len(run_ids) != 1:
+            raise StateError("findings must all belong to the same run")
+        with self._run_operation(initial[0].run_id, "finding decide"):
+            before = [self._storage(self.database.get_finding, finding_id) for finding_id in finding_ids]
+            run = self._storage(self.database.get_run, initial[0].run_id)
             self.armarius.require_external_run(run)
             if run.status in {RunStatus.COMPLETED, RunStatus.FAILED, RunStatus.CANCELLED}:
                 raise StateError(f"findings cannot be decided while run is {run.status.value}")
             if run.status != RunStatus.AWAITING_DECISION and decision != "waive":
                 raise StateError("only a later explicit waiver is allowed after the decision stage")
-            record = self._storage(self.database.decide_finding, finding_id, decision, reason)
-            updated = self._storage(self.database.get_finding, finding_id)
-            if finding.status == FindingStatus.CONFIRMED and updated.status == FindingStatus.WAIVED:
+            records = self._storage(self.database.decide_findings, finding_ids, decision, reason)
+            updated = [self._storage(self.database.get_finding, finding_id) for finding_id in finding_ids]
+            if any(
+                old.status == FindingStatus.CONFIRMED and new.status == FindingStatus.WAIVED
+                for old, new in zip(before, updated)
+            ):
                 self._storage(self.armarius.invalidate_stale_tasks, run.id)
-        return {"decision": record, "finding": updated}
+        result: dict[str, Any] = {"finding_ids": list(finding_ids)}
+        if len(finding_ids) == 1:
+            result.update({"decision": records[0], "finding": updated[0]})
+        else:
+            result.update({"decisions": records, "findings": updated})
+        return result
 
     def get_patch(self, patch_id: str) -> dict[str, Any]:
         patch = self._storage(self.database.get_patch, patch_id)
@@ -1046,6 +1122,20 @@ class ScriptoriumService:
                 missing.append({"start_line": cursor, "end_line": span["end_line"]})
         return missing
 
+    @staticmethod
+    def _exported_sources(events: list[Event], read_paths: dict[str, Any]) -> tuple[int, set[str]]:
+        count = 0
+        exported: set[str] = set()
+        for event in events:
+            if event.event_type != "tool.export":
+                continue
+            count += 1
+            for item in event.payload["files"]:
+                source = read_paths.get(item["path"])
+                if source is not None and item["digest"] == source.source_digest:
+                    exported.add(source.source_path)
+        return count, exported
+
     @classmethod
     def _review_coverage_audit(cls, scope: dict[str, Any], events: list[Event], sources) -> dict[str, Any]:
         source_index = {source.source_path: source for source in sources}
@@ -1090,6 +1180,12 @@ class ScriptoriumService:
                 declared_lines.setdefault(path, []).append((start, end))
             else:
                 not_comparable.append(area)
+        missing = [
+            {"source_path": path, **span}
+            for path, lines in sorted(declared_lines.items())
+            for span in cls._missing_line_spans(lines, read_lines.get(path, set()))
+        ]
+        export_count, exported = cls._exported_sources(events, read_paths)
         return {
             "read_lines": [
                 {"source_path": path, "ranges": cls._line_spans(lines)}
@@ -1100,11 +1196,11 @@ class ScriptoriumService:
                 {"source_path": path, "lines": sorted(lines)} for path, lines in sorted(search_matches.items()) if lines
             ],
             "pages_returned": sorted(pages),
-            "declared_without_task_read": [
-                {"source_path": path, **span}
-                for path, lines in sorted(declared_lines.items())
-                for span in cls._missing_line_spans(lines, read_lines.get(path, set()))
-            ],
+            "declared_without_task_read": missing,
+            "exports": export_count,
+            "exported_sources": sorted(exported),
+            "exported": [span for span in missing if span["source_path"] in exported],
+            "declared_without_access": [span for span in missing if span["source_path"] not in exported],
             "declared_without_task_page": sorted(declared_pages - pages),
             "not_comparable": not_comparable,
         }
@@ -1151,6 +1247,7 @@ class ScriptoriumService:
         events = self._storage(self.database.list_events, run_id)
         external_run = run_view["run"].frozen_config.get("execution") == "external"
         access_counts = {}
+        export_counts = Counter(event.entity_id for event in events if event.event_type == "tool.export")
         for event in events:
             if event.event_type in {"tool.read", "tool.search", "tool.page", "tool.nav", "tool.page_text"}:
                 counts = access_counts.setdefault(event.entity_id, dict.fromkeys(_RETURN_KINDS, 0))
@@ -1182,6 +1279,7 @@ class ScriptoriumService:
                             "returns": (
                                 access_counts.get(attempt.id, dict.fromkeys(_RETURN_KINDS, 0)) if external_run else None
                             ),
+                            "exports": export_counts.get(attempt.id, 0) if external_run else None,
                         }
                     )
                 if task.stage == "review" and attempt.status == AttemptStatus.COMPLETED:
@@ -1572,10 +1670,16 @@ class ScriptoriumService:
             if audit["pages_returned"]:
                 numbers = ", ".join(str(number) for number in audit["pages_returned"])
                 lines.append(f"  - task page returned paths: {numbers}")
+            if audit["exports"]:
+                lines.append(f"  - task export recorded {audit['exports']} time(s); exported files are not reads")
             for area in audit["declared_without_task_read"]:
+                state = (
+                    "exported but not returned by task read"
+                    if area in audit["exported"]
+                    else "without task read return"
+                )
                 lines.append(
-                    f"  - declared checked without task read return: "
-                    f"`{area['source_path']}:{area['start_line']}-{area['end_line']}`"
+                    f"  - declared checked {state}: `{area['source_path']}:{area['start_line']}-{area['end_line']}`"
                 )
             for page in audit["declared_without_task_page"]:
                 lines.append(f"  - declared checked without task page return: `manuscript.pdf:page {page}`")
@@ -1645,7 +1749,8 @@ class ScriptoriumService:
                     lines.append(
                         f"- `{item['attempt_id']}` / {item['status']}: "
                         f"read {counts['read']}, search {counts['search']}, page {counts['page']}, "
-                        f"nav {counts.get('nav', 0)}, page text {counts.get('page_text', 0)}"
+                        f"nav {counts.get('nav', 0)}, page text {counts.get('page_text', 0)}, "
+                        f"export {item.get('exports', 0)}"
                     )
         else:
             lines.append("- None")

@@ -10,7 +10,7 @@ import pytest
 
 from scriptorium.errors import StateError
 from scriptorium.service import ScriptoriumService
-from scriptorium.storage import _MIGRATION_1, _MIGRATION_2, _MIGRATION_3, ConflictError, Database
+from scriptorium.storage import _MIGRATION_1, _MIGRATION_2, _MIGRATION_3, _MIGRATION_4, ConflictError, Database
 
 
 def test_schema_and_pragmas(tmp_path) -> None:
@@ -38,7 +38,9 @@ def test_schema_and_pragmas(tmp_path) -> None:
         attempt_columns = {row["name"] for row in database.connection.execute("PRAGMA table_info(attempts)").fetchall()}
         assert "validation_report_artifact_digest" in attempt_columns
         assert {"external_client", "effort", "session_source"}.issubset(attempt_columns)
-        assert database.connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0] == 4
+        finding_columns = {row["name"] for row in database.connection.execute("PRAGMA table_info(findings)").fetchall()}
+        assert "consequence" in finding_columns
+        assert database.connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0] == 5
         assert database.connection.execute("PRAGMA foreign_keys").fetchone()[0] == 1
         assert database.connection.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
         assert database.connection.execute("PRAGMA busy_timeout").fetchone()[0] == 5000
@@ -118,7 +120,7 @@ def test_active_historical_database_remains_compatible_until_explicit_external_s
         assert database.connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0] == 3
         database.connection.execute("UPDATE runs SET status = 'completed' WHERE id = 'run_old'")
         database.ensure_external_schema()
-        assert database.connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0] == 4
+        assert database.connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0] == 5
         assert database.get_patch("patch_old") == patch
 
 
@@ -139,8 +141,87 @@ def test_concurrent_external_schema_upgrades_share_one_transaction(tmp_path) -> 
             return database.connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0]
 
         with ThreadPoolExecutor(max_workers=2) as pool:
-            assert list(pool.map(upgrade, (first, second))) == [4, 4]
-        assert first.connection.execute("SELECT COUNT(*) FROM schema_migrations WHERE version = 4").fetchone()[0] == 1
+            assert list(pool.map(upgrade, (first, second))) == [5, 5]
+        for version in (4, 5):
+            assert (
+                first.connection.execute(
+                    "SELECT COUNT(*) FROM schema_migrations WHERE version = ?", (version,)
+                ).fetchone()[0]
+                == 1
+            )
+
+
+def _insert_historical_finding(connection) -> None:
+    connection.execute(
+        """
+        INSERT INTO runs (
+            id, repository, commit_sha, tree_sha, profile, status, config_digest,
+            frozen_config_json, budget_usd, estimated_cost_usd, created_at, updated_at, error
+        ) VALUES ('run_old', '/tmp/paper', ?, ?, 'full', 'completed', ?, '{}', NULL, 0, ?, ?, NULL)
+        """,
+        ("a" * 40, "b" * 40, "c" * 64, "2026-01-01T00:00:00+00:00", "2026-01-01T00:00:00+00:00"),
+    )
+    connection.execute(
+        """
+        INSERT INTO tasks (id, run_id, stage, role, route, input_digest, status, created_at, updated_at)
+        VALUES ('task_old', 'run_old', 'review', 'copyedit', '', ?, 'completed', ?, ?)
+        """,
+        ("d" * 64, "2026-01-01T00:00:00+00:00", "2026-01-01T00:00:00+00:00"),
+    )
+    connection.execute(
+        """
+        INSERT INTO attempts (id, task_id, ordinal, status, created_at)
+        VALUES ('attempt_old', 'task_old', 1, 'completed', ?)
+        """,
+        ("2026-01-01T00:00:00+00:00",),
+    )
+    connection.execute(
+        """
+        INSERT INTO findings (
+            id, run_id, task_id, attempt_id, fingerprint, role, category, severity, title, claim,
+            evidence_json, explanation, suggested_action, confidence, status, created_at, updated_at
+        ) VALUES (
+            'finding_old', 'run_old', 'task_old', 'attempt_old', ?, 'copyedit', 'clarity', 'moderate', 'Title',
+            'Claim', '[]', 'Explanation', 'Fix it.', 0.5, 'pending', ?, ?
+        )
+        """,
+        ("f" * 64, "2026-01-01T00:00:00+00:00", "2026-01-01T00:00:00+00:00"),
+    )
+
+
+def test_external_database_adds_a_nullable_consequence_to_historical_findings(tmp_path) -> None:
+    path = tmp_path / "state.sqlite3"
+    connection = sqlite3.connect(path, isolation_level=None)
+    connection.execute("CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)")
+    for migration in (_MIGRATION_1, _MIGRATION_2, _MIGRATION_3, _MIGRATION_4):
+        connection.executescript(migration)
+    _insert_historical_finding(connection)
+    connection.close()
+
+    with Database(path) as database, Database(path) as reopened:
+        finding = database.get_finding("finding_old")
+
+        assert finding.consequence is None
+        assert finding.title == "Title"
+        assert reopened.get_finding("finding_old") == finding
+        assert database.connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0] == 5
+        assert (
+            database.connection.execute("SELECT COUNT(*) FROM schema_migrations WHERE version = 5").fetchone()[0] == 1
+        )
+
+
+def test_historical_schema_three_findings_decode_without_a_consequence_column(tmp_path) -> None:
+    path = tmp_path / "state.sqlite3"
+    connection = sqlite3.connect(path, isolation_level=None)
+    connection.execute("CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)")
+    for migration in (_MIGRATION_1, _MIGRATION_2, _MIGRATION_3):
+        connection.executescript(migration)
+    _insert_historical_finding(connection)
+    connection.close()
+
+    with Database(path) as database:
+        assert database.get_finding("finding_old").consequence is None
+        assert database.connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0] == 3
 
 
 def test_version_two_database_adds_nullable_validation_report_pointer(tmp_path) -> None:

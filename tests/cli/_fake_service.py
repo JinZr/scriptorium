@@ -32,8 +32,8 @@ class FakeService:
         self.calls.append(("doctor", profile, revision))
         return self.doctor_result
 
-    async def start_run(self, revision: str, profile: str) -> dict:
-        return self._record_run("start_run", revision, profile)
+    async def start_run(self, revision: str, profile: str, allow_duplicate: bool = False) -> dict:
+        return self._record_run("start_run", revision, profile, allow_duplicate)
 
     def _record_run(self, *call: object) -> dict:
         self._record(*call)
@@ -79,8 +79,14 @@ class FakeService:
         self.calls.append(("get_finding", finding_id))
         return {"id": finding_id}
 
-    def decide_finding(self, finding_id: str, decision: str, reason: str) -> Result:
-        return self._record("decide_finding", finding_id, decision, reason)
+    def export_task(self, attempt_id: str, directory: str) -> dict:
+        if self.error:
+            raise self.error
+        self.calls.append(("export_task", attempt_id, directory))
+        return {"attempt_id": attempt_id, "directory": directory, "files": []}
+
+    def decide_findings(self, finding_ids: list[str], decision: str, reason: str) -> Result:
+        return self._record("decide_findings", finding_ids, decision, reason)
 
     def get_patch(self, patch_id: str) -> dict:
         self.calls.append(("get_patch", patch_id))
