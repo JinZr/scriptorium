@@ -16,11 +16,11 @@ Git commits identify manuscript inputs. SQLite records workflow state and append
 Requires Python 3.10+, Git, `latexmk`, `kpsewhich`, a supported LaTeX engine, and PDF rendering support. `bash utils/preflight.sh` checks these host tools before and after installation and compiles a small test document; it does not inspect a manuscript. Install the tool in the environment used by the model's CLI:
 
 ```bash
-bash /path/to/scriptorium/utils/preflight.sh
-python -m pip install /path/to/scriptorium
+PYTHON=/path/to/python bash /path/to/scriptorium/utils/preflight.sh
+/path/to/python -m pip install /path/to/scriptorium
 ```
 
-`python` should be the interpreter the model's CLI uses.
+Use the same interpreter for both commands: the one the model's CLI runs with.
 
 For development:
 

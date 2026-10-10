@@ -50,7 +50,8 @@ bash /path/to/scriptorium/utils/preflight.sh
 
 ## 第四步：准备稿件仓库
 
-稿件必须在 Git 仓库里。还没有的话先 `git init` 并提交全部源文件。然后在仓库根目录：
+稿件必须在 Git 仓库里。还没有的话先 `git init` 并提交全部源文件。然后在仓库根目录运行下面的命令，
+把 `--engine` 换成 preflight `compile` 一行里报告可用的引擎（`pdflatex`、`xelatex` 或 `lualatex`）：
 
 ```bash
 scriptorium init . --main main.tex --engine pdflatex
@@ -77,8 +78,9 @@ scriptorium --json run status RUN_ID
 执行 `run status` 给出的 `next_actions`。模型会 claim 任务、读取冻结材料、提交结构化结果。
 你只需要在它停下时回到终端：
 
-- `finding decide` 逐条接受或拒绝发现；
-- `run resume` 进入修订任务，模型产出候选补丁；
+- `finding decide` 逐条确认、拒绝或豁免发现；
+- `run resume`：至少有一条确认的发现时进入修订任务，模型产出候选补丁；
+  一条都没有确认时运行直接完成，后面的补丁和验证步骤不会出现；
 - `patch decide` 批准或拒绝补丁，然后 `run resume`：批准会生成验证任务，
   拒绝会带着你的理由回到修订任务，模型重新产出补丁；
 - 验证任务必须在一个全新的对话里做，否则结果记为 inconclusive；

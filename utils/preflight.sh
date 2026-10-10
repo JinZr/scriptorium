@@ -166,7 +166,13 @@ if [ "$RUN_COMPILE" = 0 ]; then
 elif [ -z "$available_engines" ] || [ "$latexmk_ok" = 0 ]; then
     info "compile" "skipped because latexmk or a LaTeX engine is missing"
 else
-    workdir="$(mktemp -d 2>/dev/null || mktemp -d -t scriptorium-preflight)"
+    workdir="$(mktemp -d 2>/dev/null || mktemp -d -t scriptorium-preflight 2>/dev/null || true)"
+    if [ -z "$workdir" ] || [ ! -d "$workdir" ]; then
+        fail "compile" "cannot create a temporary directory for the smoke test (check TMPDIR and free space)"
+        workdir=""
+    fi
+fi
+if [ -n "${workdir:-}" ]; then
     cat > "$workdir/smoke.tex" <<'TEX'
 \documentclass{article}
 \begin{document}
@@ -224,7 +230,13 @@ if [ "$installed_in_python" = 1 ]; then
         fail "scriptorium" "importable from $PYTHON but '$PYTHON -m scriptorium --help' fails"
     fi
     if [ -n "$scriptorium_path" ]; then
-        info "scriptorium_cli" "$scriptorium_path"
+        # The guide and the shared skill invoke the bare command, so the PATH
+        # entry point itself must run, not only the module in $PYTHON.
+        if "$scriptorium_path" --help >/dev/null 2>&1; then
+            pass "scriptorium_cli" "$scriptorium_path"
+        else
+            fail "scriptorium_cli" "$scriptorium_path is in PATH but cannot run; remove the stale entry point or reinstall with $PYTHON -m pip install --force-reinstall"
+        fi
     else
         # Report the scripts directory of the installation scheme that holds the
         # entry point: the interpreter's own scheme, or the user scheme for
