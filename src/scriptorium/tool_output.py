@@ -120,6 +120,41 @@ def run_overview(view, next_actions=None):
     )
 
 
+def run_list(total, rows, limit):
+    """Bound a newest-first run listing to the response limit, dropping the oldest rows that do not fit."""
+    entries = []
+    for run, task_counts, brief in rows:
+        entry = {
+            "run_id": run.id,
+            "status": run.status.value,
+            "commit_sha": run.commit_sha,
+            "profile": run.profile,
+            "created_at": run.created_at,
+            "updated_at": run.updated_at,
+            "task_counts": task_counts,
+        }
+        if brief is not None:
+            entry.update({key: brief[key] for key in ("venue_family", "venue", "stage")})
+        entries.append(entry)
+
+    def listing(count):
+        return {
+            "total": total,
+            "limit": limit,
+            "returned": count,
+            "truncated": count < total,
+            "runs": entries[:count],
+            "next_actions": [{"command": "run status", "run_id": entry["run_id"]} for entry in entries[:1]],
+        }
+
+    count = len(entries)
+    while count and not fits_response(listing(count)):
+        count -= 1
+    if entries and count == 0:
+        raise ConfigurationError("run metadata exceeds the 7000-byte tool response limit")
+    return listing(count)
+
+
 def report_fragment(run_id, report, part, offset, expected_digest):
     report_digest = digest_json(report)
     if expected_digest is not None and expected_digest != report_digest:

@@ -140,6 +140,8 @@ def test_run_commands_dispatch_to_service(monkeypatch, capsys) -> None:
 
     commands = [
         (["run", "status", "run_1"], ("run_status", "run_1")),
+        (["run", "list"], ("list_runs", None, 20)),
+        (["run", "list", "--status", "reviewing", "--limit", "5"], ("list_runs", "reviewing", 5)),
         (["run", "resume", "run_1"], ("resume_run", "run_1")),
         (["run", "continue", "run_1", "--task", "task_1"], ("continue_review", "run_1", "task_1")),
         (

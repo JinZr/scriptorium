@@ -70,6 +70,10 @@ def build_parser() -> argparse.ArgumentParser:
     status_parser = run_commands.add_parser("status", help="show a bounded run overview and next actions")
     status_parser.add_argument("run_id", help="run ID")
 
+    list_parser = run_commands.add_parser("list", help="list this project's runs, newest first")
+    list_parser.add_argument("--status", metavar="STATUS", help="only runs in this status (a run status value)")
+    list_parser.add_argument("--limit", type=int, default=20, help="maximum runs to return (default: 20, at most 100)")
+
     resume_parser = run_commands.add_parser("resume", help="replay accepted work and prepare the next stage")
     resume_parser.add_argument("run_id", help="run ID")
 
@@ -345,6 +349,8 @@ def _dispatch_run(service: Any, arguments: argparse.Namespace) -> tuple[Any, int
         return run_overview(result), 0, None
     if arguments.run_command == "status":
         return service.run_status(arguments.run_id), 0, None
+    if arguments.run_command == "list":
+        return service.list_runs(arguments.status, arguments.limit), 0, None
     if arguments.run_command == "resume":
         return run_overview(_run_async(service.resume_run(arguments.run_id))), 0, None
     if arguments.run_command == "retry":
