@@ -284,3 +284,60 @@ def test_native_build_rejects_hidden_content_in_user_texmf(tmp_path, monkeypatch
     with pytest.raises(InfrastructureError, match="outside the snapshot.*scriptorium-hidden.tex"):
         manager.build(workspace, ManuscriptConfig("main.tex", "pdflatex"))
     assert (workspace / "main.pdf").is_file()
+
+
+@pytest.mark.skipif(shutil.which("latexmk") is None, reason="latexmk required; exercised in LaTeX CI")
+@pytest.mark.parametrize(
+    "command, name",
+    [
+        (r"\usepackage{listings}", "algorithm.py"),
+        (r"\usepackage{fancyvrb}", "notes"),
+        (r"\usepackage{fancyvrb}", "notes.vrb"),
+    ],
+)
+def test_verbatim_files_of_any_suffix_are_frozen_review_inputs(tmp_path, command, name):
+    macro = r"\lstinputlisting" if "listings" in command else r"\VerbatimInput"
+    (tmp_path / "main.tex").write_text(
+        "\\documentclass{article}" + command + "\n\\begin{document}\n" + macro + "{" + name + "}\n\\end{document}\n"
+    )
+    (tmp_path / name).write_text("print('shown')\n")
+    manager = ManuscriptManager(tmp_path)
+    sources = manager.scan_sources(tmp_path, "main.tex")
+    assert {source.path for source in sources} == {"main.tex", name}
+    workspace = tmp_path / "build"
+    shutil.copytree(tmp_path, workspace)
+    build = manager.build(workspace, ManuscriptConfig(main="main.tex", engine="pdflatex"))
+    assert build.compiler_inputs is not None
+    assert next(item for item in build.compiler_inputs if item.path == name).kind == "review"
+    manager.validate_build_sources(build, sources)
+
+
+@pytest.mark.skipif(shutil.which("latexmk") is None, reason="latexmk required; exercised in LaTeX CI")
+@pytest.mark.parametrize(
+    "uses", [r"\lstinputlisting{sample.py}\input{sample.py}", r"\input{sample.py}\lstinputlisting{sample.py}"]
+)
+def test_verbatim_input_may_also_be_an_ordinary_input(tmp_path, uses):
+    (tmp_path / "main.tex").write_text(
+        "\\documentclass{article}\\usepackage{listings}\n\\begin{document}\n" + uses + "\n\\end{document}\n"
+    )
+    (tmp_path / "sample.py").write_text("x = 1\n")
+    manager = ManuscriptManager(tmp_path)
+    sources = manager.scan_sources(tmp_path, "main.tex")
+    workspace = tmp_path / "build"
+    shutil.copytree(tmp_path, workspace)
+    build = manager.build(workspace, ManuscriptConfig(main="main.tex", engine="pdflatex"))
+    manager.validate_build_sources(build, sources)
+    assert next(item for item in build.compiler_inputs if item.path == "sample.py").kind == "review"
+
+
+@pytest.mark.skipif(shutil.which("latexmk") is None, reason="latexmk required; exercised in LaTeX CI")
+def test_verbatim_input_rejects_a_file_the_compiler_writes(tmp_path):
+    (tmp_path / "main.tex").write_text(
+        "\\documentclass{article}\\usepackage{fancyvrb}\n\\begin{document}\n"
+        "\\tableofcontents\\section{A}\n\\VerbatimInput{main.toc}\n\\end{document}\n"
+    )
+    (tmp_path / "main.toc").write_text("committed\n")
+    workspace = tmp_path / "build"
+    shutil.copytree(tmp_path, workspace)
+    with pytest.raises(InfrastructureError, match=r"must not be a file the compiler writes: main\.toc"):
+        ManuscriptManager(tmp_path).build(workspace, ManuscriptConfig(main="main.tex", engine="pdflatex"))
