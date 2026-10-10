@@ -90,37 +90,48 @@ def _anchors(finding: Finding) -> Iterable[tuple[str, str, int, int]]:
             yield "lines", anchor["source_path"], anchor["start_line"], anchor["end_line"]
 
 
-def _components(findings: Sequence[Finding]) -> list[list[Finding]]:
-    """Union findings whose line anchors overlap on one source path or whose PDF anchors name one page."""
-    parent = {finding.id: finding.id for finding in findings}
+def _overlaps(first: tuple[str, str, int, int], second: tuple[str, str, int, int]) -> bool:
+    """Whether two anchors of one kind on one path overlap by at least half of the shorter one."""
+    covered = min(first[3], second[3]) - max(first[2], second[2]) + 1
+    shorter = min(first[3] - first[2], second[3] - second[2]) + 1
+    return first[:2] == second[:2] and 2 * covered >= shorter
 
-    def root(finding_id: str) -> str:
-        while parent[finding_id] != finding_id:
-            parent[finding_id] = parent[parent[finding_id]]
-            finding_id = parent[finding_id]
-        return finding_id
 
-    def union(first: str, second: str) -> None:
-        first, second = root(first), root(second)
-        if first != second:
-            parent[max(first, second)] = min(first, second)
+def _mostly_covered(first: set[tuple[str, str, int, int]], second: set[tuple[str, str, int, int]]) -> bool:
+    """Whether more than half of either side's distinct anchors overlap an anchor of the other side."""
+    return any(
+        2 * sum(1 for anchor in mine if any(_overlaps(anchor, other) for other in theirs)) > len(mine)
+        for mine, theirs in ((first, second), (second, first))
+    )
 
-    spans: dict[tuple[str, str], list[tuple[int, int, str]]] = {}
-    for finding in findings:
-        for kind, path, start, end in _anchors(finding):
-            spans.setdefault((kind, path), []).append((start, end, finding.id))
-    for intervals in spans.values():
-        reach, owner = 0, None
-        for start, end, finding_id in sorted(intervals):
-            if owner is not None and start <= reach:
-                union(finding_id, owner)
-                reach = max(reach, end)
-            else:
-                reach, owner = end, finding_id
-    members: dict[str, list[Finding]] = {}
-    for finding in findings:
-        members.setdefault(root(finding.id), []).append(finding)
-    return list(members.values())
+
+def _shares_evidence(first: Finding, second: Finding, claims: Mapping[str, Mapping[str, Any]]) -> bool:
+    """Whether two findings cite mostly the same evidence, so they likely report one issue.
+
+    Line anchors decide whenever either finding has one. A PDF page is too coarse to decide alone, so two
+    findings with only page anchors must also link to the same claim.
+    """
+    anchors = [set(_anchors(item)) for item in (first, second)]
+    lines = [{anchor for anchor in found if anchor[0] == "lines"} for found in anchors]
+    if any(lines):
+        return all(lines) and _mostly_covered(*lines)
+    texts = [claims[item.id]["text"] if item.id in claims else None for item in (first, second)]
+    return texts[0] is not None and texts[0] == texts[1] and _mostly_covered(*anchors)
+
+
+def _components(findings: Sequence[Finding], claims: Mapping[str, Mapping[str, Any]]) -> list[list[Finding]]:
+    """Gather each finding, in primary order, with the later ungrouped findings that share evidence with it.
+
+    Groups never chain: every member shares evidence with its group's primary, the group's first finding.
+    """
+    remaining = sorted(findings, key=_primary_key)
+    components = []
+    while remaining:
+        primary, *rest = remaining
+        joined = {item.id for item in rest if _shares_evidence(primary, item, claims)}
+        components.append([primary] + [item for item in rest if item.id in joined])
+        remaining = [item for item in rest if item.id not in joined]
+    return components
 
 
 def _merged_evidence(members: Sequence[Finding]) -> list[dict[str, Any]]:
@@ -237,7 +248,9 @@ def finding_groups(
     for duplicate in duplicates:
         if duplicate.get("role"):
             duplicate_roles.setdefault(duplicate["finding_id"], set()).add(duplicate["role"])
-    groups = sorted((_group(members, claims, duplicate_roles) for members in _components(findings)), key=_group_order)
+    groups = sorted(
+        (_group(members, claims, duplicate_roles) for members in _components(findings, claims)), key=_group_order
+    )
     counts = {
         tier: {
             "groups": sum(1 for group in groups if group["tier"] == tier),
