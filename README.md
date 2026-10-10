@@ -13,9 +13,10 @@ Git commits identify manuscript inputs. SQLite records workflow state and append
 
 ## Install
 
-Requires Python 3.10+, Git, `latexmk`, `kpsewhich`, a supported LaTeX engine, and PDF rendering support. Install the tool in the environment used by the model's CLI:
+Requires Python 3.10+, Git, `latexmk`, `kpsewhich`, a supported LaTeX engine, and PDF rendering support. `bash utils/preflight.sh` checks these host tools before and after installation and compiles a small test document; it does not inspect a manuscript. Install the tool in the environment used by the model's CLI:
 
 ```bash
+bash utils/preflight.sh
 python -m pip install .
 ```
 
@@ -100,7 +101,7 @@ Human finding decisions, patch approval, and patch application remain separate o
 - The external client controls model calls and costs. Unknown token usage and cost are reported as unknown. Scriptorium does not enforce a spending cap or restrict the host's unrelated filesystem tools.
 - Runs made by the removed internal SDK executor remain readable with `run status`, `run report`, and `run gate`; these commands leave an existing legacy database at its old schema version so the original version can still execute the run. Starting a new external run upgrades the database only after all historical runs are completed or cancelled.
 
-See [configuration](docs/configuration.md), [architecture](docs/architecture.md), and [operations](docs/operations.md). The optional PeerReviewBench example prepares external review tasks and collects their validated results under `egs/peerreviewbench/`.
+See [configuration](docs/configuration.md), [architecture](docs/architecture.md), [operations](docs/operations.md), and the lab [onboarding guide](docs/onboarding.md). The optional PeerReviewBench example prepares external review tasks and collects their validated results under `egs/peerreviewbench/`.
 
 The separate [external review evaluation example](egs/external_review/README.md) seals real LaTeX run records,
 prepares anonymous candidate-judging inputs, and reports external judges' assessments and disagreements.
