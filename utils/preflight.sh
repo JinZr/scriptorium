@@ -4,7 +4,7 @@
 # not read a manuscript repository; run `scriptorium doctor` inside the
 # committed manuscript repository for the project-level check.
 #
-# Usage: bash utils/preflight.sh [--no-compile]
+# Usage: bash /path/to/scriptorium/utils/preflight.sh [--no-compile]
 #   PYTHON=/path/to/python  interpreter to check (default: python3, then python)
 #
 # Exit status: 0 when every required check passes, 1 otherwise.
@@ -45,7 +45,8 @@ fail() {
 }
 
 require_tool() {
-    # require_tool NAME HINT [VERSION_COMMAND...]
+    # require_tool NAME HINT [PROBE_COMMAND...]
+    # A probe command must exit 0; its first output line becomes the detail.
     local name="$1" hint="$2" path detail
     shift 2
     path="$(command -v "$name" 2>/dev/null || true)"
@@ -53,11 +54,16 @@ require_tool() {
         fail "$name" "not found in PATH${hint:+; $hint}"
         return 1
     fi
-    detail=""
-    if [ "$#" -gt 0 ]; then
-        detail="$("$@" 2>/dev/null | head -n 1 || true)"
+    if [ "$#" -eq 0 ]; then
+        pass "$name" "$path"
+        return 0
     fi
-    pass "$name" "${detail:-$path}"
+    if detail="$("$@" 2>&1)"; then
+        pass "$name" "${detail%%$'\n'*}"
+        return 0
+    fi
+    fail "$name" "$path is present but '$*' failed: ${detail%%$'\n'*}"
+    return 1
 }
 
 echo "Scriptorium preflight"
@@ -100,29 +106,59 @@ fi
 
 # --- Git and TeX tools ------------------------------------------------------
 require_tool git "" git --version
-require_tool latexmk "install a TeX distribution such as TeX Live or MacTeX" latexmk --version
-require_tool kpsewhich "part of TeX Live; needed to identify TeX installation inputs"
+latexmk_ok=0
+require_tool latexmk "install a TeX distribution such as TeX Live or MacTeX" latexmk --version && latexmk_ok=1
 
-first_engine=""
+# Scriptorium resolves TeX installation roots with these two expansions before
+# every build; probe them the same way so a broken configuration fails here.
+if require_tool kpsewhich "part of TeX Live; needed to identify TeX installation inputs"; then
+    for expression in '{$TEXMFDIST,$TEXMFMAIN}' '{$TEXMF,$TEXMFCNF,$TEXMFCACHE}'; do
+        roots="$(kpsewhich "--expand-path=$expression" 2>/dev/null || true)"
+        roots="${roots//!!/}"
+        if [ -z "$roots" ] || [ "$roots" = "/" ] || [ "${roots#/}" = "$roots" ]; then
+            fail "texmf_roots" "kpsewhich --expand-path='$expression' returned no absolute TeX roots"
+        else
+            pass "texmf_roots" "$expression -> ${roots%%:*}"
+        fi
+    done
+fi
+
+available_engines=""
 for engine in pdflatex xelatex lualatex; do
     engine_path="$(command -v "$engine" 2>/dev/null || true)"
     if [ -n "$engine_path" ]; then
         info "engine" "$engine available at $engine_path"
-        [ -z "$first_engine" ] && first_engine="$engine"
+        available_engines="$available_engines $engine"
     else
         info "engine" "$engine not found (optional if another engine is present)"
     fi
 done
-if [ -n "$first_engine" ]; then
-    pass "latex_engine" "at least one supported engine present"
+if [ -n "$available_engines" ]; then
+    pass "latex_engine" "available:$available_engines"
 else
     fail "latex_engine" "none of pdflatex, xelatex, lualatex found"
 fi
 
 # --- Compile smoke test -----------------------------------------------------
+# Uses the same latexmk flags as Scriptorium's build: -norc ignores user rc
+# files and -recorder must produce the .fls dependency evidence it reads.
+smoke_compile() {
+    # smoke_compile ENGINE WORKDIR -> 0 on success; log at WORKDIR/ENGINE.log
+    local engine="$1" workdir="$2" flag
+    case "$engine" in
+        pdflatex) flag="-pdf" ;;
+        xelatex) flag="-xelatex" ;;
+        lualatex) flag="-lualatex" ;;
+    esac
+    rm -f "$workdir"/smoke.pdf "$workdir"/smoke.fls "$workdir"/smoke.fdb_latexmk "$workdir"/smoke.xdv
+    (cd "$workdir" && latexmk -norc "$flag" -g -recorder -interaction=nonstopmode -halt-on-error smoke.tex \
+        >"$workdir/$engine.log" 2>&1) || return 1
+    [ -s "$workdir/smoke.pdf" ] && [ -s "$workdir/smoke.fls" ] && [ -s "$workdir/smoke.fdb_latexmk" ]
+}
+
 if [ "$RUN_COMPILE" = 0 ]; then
     info "compile" "skipped (--no-compile)"
-elif [ -z "$first_engine" ] || ! command -v latexmk >/dev/null 2>&1; then
+elif [ -z "$available_engines" ] || [ "$latexmk_ok" = 0 ]; then
     info "compile" "skipped because latexmk or a LaTeX engine is missing"
 else
     workdir="$(mktemp -d 2>/dev/null || mktemp -d -t scriptorium-preflight)"
@@ -136,17 +172,24 @@ else
 Scriptorium preflight smoke test: $E = mc^2$.
 \end{document}
 TEX
-    case "$first_engine" in
-        pdflatex) engine_flag="-pdf" ;;
-        xelatex) engine_flag="-xelatex" ;;
-        lualatex) engine_flag="-lualatex" ;;
-    esac
-    if (cd "$workdir" && latexmk "$engine_flag" -interaction=nonstopmode -halt-on-error smoke.tex \
-            >"$workdir/latexmk.log" 2>&1) && [ -s "$workdir/smoke.pdf" ]; then
-        pass "compile" "latexmk $engine_flag compiled a test document with amsmath, graphicx, hyperref"
+    compiled_with=""
+    failed_engines=""
+    for engine in $available_engines; do
+        if smoke_compile "$engine" "$workdir"; then
+            compiled_with="$compiled_with $engine"
+        else
+            failed_engines="$failed_engines $engine"
+        fi
+    done
+    if [ -n "$compiled_with" ]; then
+        pass "compile" "latexmk -norc -recorder compiled the test document with:$compiled_with"
+        [ -n "$failed_engines" ] && warn "compile" "failed with:$failed_engines (choose a working engine in scriptorium.toml)"
     else
-        fail "compile" "latexmk $engine_flag failed; last log lines follow"
-        tail -n 15 "$workdir/latexmk.log" 2>/dev/null | sed 's/^/      /'
+        fail "compile" "latexmk -norc -recorder failed with every engine:$failed_engines; last log lines follow"
+        for engine in $failed_engines; do
+            echo "      [$engine]"
+            tail -n 10 "$workdir/$engine.log" 2>/dev/null | sed 's/^/      /'
+        done
     fi
     rm -rf "$workdir"
 fi
@@ -167,7 +210,25 @@ if [ "$installed_in_python" = 1 ]; then
     if [ -n "$scriptorium_path" ]; then
         info "scriptorium_cli" "$scriptorium_path"
     else
-        warn "scriptorium_cli" "'scriptorium' is not in PATH; add $(dirname "$(command -v "$PYTHON")") to PATH or activate that environment in the model client"
+        # Report the scripts directory of the installation scheme that holds the
+        # entry point: the interpreter's own scheme, or the user scheme for
+        # `pip install --user`.
+        scripts_dir="$("$PYTHON" - <<'PY' 2>/dev/null
+import os, sysconfig
+candidates = [sysconfig.get_path("scripts")]
+try:
+    candidates.append(sysconfig.get_path("scripts", sysconfig.get_preferred_scheme("user")))
+except (AttributeError, KeyError):
+    pass
+for path in candidates:
+    if path and os.path.exists(os.path.join(path, "scriptorium")):
+        print(path)
+        break
+else:
+    print(candidates[0] or "")
+PY
+)"
+        warn "scriptorium_cli" "'scriptorium' is not in PATH; add ${scripts_dir:-its scripts directory} to PATH or activate that environment in the model client"
     fi
     if "$PYTHON" -c 'import pymupdf' >/dev/null 2>&1; then
         pass "pdf_rendering" "pymupdf imports in $PYTHON"

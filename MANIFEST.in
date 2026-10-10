@@ -5,4 +5,4 @@ recursive-include skills *.md *.yaml
 recursive-include tests *.md *.py
 include tests/manuscript/fixtures/retrieval_cases.json
 include requirements.txt requirements-dev.txt
-include utils/check_complexity.py
+include utils/check_complexity.py utils/preflight.sh

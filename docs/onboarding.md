@@ -15,23 +15,24 @@
 
 ## 第一步：检查机器
 
-在任意目录运行仓库自带的检查脚本：
+在任意目录运行仓库自带的检查脚本，把 `/path/to/scriptorium` 换成你克隆的位置：
 
 ```bash
-bash utils/preflight.sh
+bash /path/to/scriptorium/utils/preflight.sh
 ```
 
-它检查 Python 3.10+、pip、Git、`latexmk`、`kpsewhich`、至少一个 LaTeX 引擎，并真实编译一个
-小文档。全部 `ok` 再继续。有 `FAIL` 先按提示装齐 TeX Live 或 MacTeX。`warn` 行是提醒，
+它检查 Python 3.10+、pip、Git、`latexmk`、`kpsewhich` 及其 TeX 根目录、至少一个 LaTeX 引擎，
+并用 Scriptorium 构建时相同的 `latexmk` 参数真实编译一个小文档。全部 `ok` 再继续。有 `FAIL` 先按提示装齐 TeX Live 或 MacTeX。`warn` 行是提醒，
 不阻塞。Windows 不在脚本覆盖范围内，请在 WSL 里操作。
 
 ## 第二步：安装
 
 把工具装进你的模型 CLI 实际使用的那个 Python 环境里。不确定是哪一个时，
-用 `PYTHON=/path/to/python bash utils/preflight.sh` 指定解释器再看结果。
+用 `PYTHON=/path/to/python bash /path/to/scriptorium/utils/preflight.sh` 指定解释器再看结果，
+然后用同一个解释器安装：
 
 ```bash
-python -m pip install /path/to/scriptorium
+/path/to/python -m pip install /path/to/scriptorium
 ```
 
 装完再跑一次 `preflight.sh`，确认 `scriptorium` 和 `pdf_rendering` 两行为 `ok`。
@@ -78,7 +79,7 @@ scriptorium --json run status RUN_ID
 
 - `finding decide` 逐条接受或拒绝发现；
 - `run resume` 进入修订任务，模型产出候选补丁；
-- `patch decide` 批准或拒绝补丁；
+- `patch decide` 批准或拒绝补丁，再 `run resume` 生成验证任务；
 - 验证任务必须在一个全新的对话里做，否则结果记为 inconclusive；
 - `patch apply` 把验证通过的补丁写入工作区，`run gate` 查看放行结论。
 

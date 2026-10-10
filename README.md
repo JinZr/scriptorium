@@ -20,6 +20,8 @@ bash utils/preflight.sh
 python -m pip install .
 ```
 
+Run the script by its path from any directory; `python` should be the interpreter the model's CLI uses.
+
 For development:
 
 ```bash
