@@ -127,7 +127,7 @@ def test_a_run_without_a_brief_has_no_brief_part(tmp_path) -> None:
         with pytest.raises(ConfigurationError, match="without a review brief"):
             service.task_view(context, "brief")
 
-    assert set(overview["inputs"]) == {"prompt", "schema", "source-map"}
+    assert set(overview["inputs"]) == {"prompt", "schema", "source-map", "example"}
     assert "review_brief" not in status
     assert report["run"]["brief_digest"] is None and "review_brief" not in report["run"]
 

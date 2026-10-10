@@ -12,7 +12,7 @@ You are the reviewer in the current client conversation. Use the model selected 
 ```text
 run status RUN_ID                         -> next_actions; follow them
 task claim TASK_ID --client C --model M --effort E --session-id S --session-source host
-task show ATTEMPT_ID [--part prompt|schema|source-map|brief]
+task show ATTEMPT_ID [--part prompt|schema|source-map|brief|example]
 task nav ATTEMPT_ID --command heading|reference|citation|label|caption|graphics|table|equation|quantity [--query Q] [--path P]
 task search ATTEMPT_ID --query Q [--path P] [--context 2] [--include-metadata]
 task read ATTEMPT_ID --path P --start-line A [--end-line B] [--anchor]
@@ -44,7 +44,7 @@ Use `client=codex`, `claude_code`, or `antigravity`. Report the model and effort
 
 ## Retrieve and inspect
 
-Claim and plain `task show` return an overview with `data.input_digest`, the navigation digest, and commands in `data.inputs.prompt.command` and `data.inputs.schema.command`. Run both input commands and follow each `data.next_command` until null. Concatenate `data.text` fragments in offset order without adding separators; parse the complete schema text as JSON. Each part's digest and total character count identify the frozen input. Run `data.source_map_command` (equivalently `task show ATTEMPT_ID --part source-map`) and concatenate its text fragments for the `sources` array of evidence paths and digests. These frozen inputs remain inspectable after the attempt finishes; normal `task read/search/page/nav` still require an active attempt. Inspect the schema's `required` fields and the complete frozen prompt before writing the answer; do not copy an output shape from another role or run. Read `manifest.json` to inventory the sources and rendered pages. Use `task nav` for headings, labels, references, citations, captions, figure paths, tables, equations, and reported numbers (`--command heading` gives the outline; `--command quantity` lists heuristic locations of decimals, uncertainties, and percentages to recompute, not every number; add `--query` or `--path` to narrow it); then read their source and adjacent context:
+Claim and plain `task show` return an overview with `data.input_digest`, the navigation digest, and commands in `data.inputs.prompt.command` and `data.inputs.schema.command`. Run both input commands and follow each `data.next_command` until null. Concatenate `data.text` fragments in offset order without adding separators; parse the complete schema text as JSON. Each part's digest and total character count identify the frozen input. Run `data.source_map_command` (equivalently `task show ATTEMPT_ID --part source-map`) and concatenate its text fragments for the `sources` array of evidence paths and digests. These frozen inputs remain inspectable after the attempt finishes; normal `task read/search/page/nav` still require an active attempt. Inspect the schema's `required` fields and the complete frozen prompt before writing the answer; do not copy an output shape from another role or run. Before writing the answer, read `task show ATTEMPT_ID --part example`, a placeholder output checked against this attempt's frozen schema, for the exact shape; replace all of its content with your own review. Read `manifest.json` to inventory the sources and rendered pages. Use `task nav` for headings, labels, references, citations, captions, figure paths, tables, equations, and reported numbers (`--command heading` gives the outline; `--command quantity` lists heuristic locations of decimals, uncertainties, and percentages to recompute, not every number; add `--query` or `--path` to narrow it); then read their source and adjacent context:
 
 ```bash
 scriptorium --json task nav ATTEMPT_ID --command heading
@@ -52,6 +52,7 @@ scriptorium --json task nav ATTEMPT_ID --command reference --query sec:results
 scriptorium --json task show ATTEMPT_ID --part prompt
 scriptorium --json task show ATTEMPT_ID --part schema
 scriptorium --json task show ATTEMPT_ID --part source-map
+scriptorium --json task show ATTEMPT_ID --part example
 scriptorium --json task search ATTEMPT_ID --query TERM
 scriptorium --json task read ATTEMPT_ID --path manifest.json --start-line 1
 scriptorium --json task read ATTEMPT_ID --path SOURCE_PATH --start-line LINE

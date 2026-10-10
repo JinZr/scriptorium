@@ -40,7 +40,14 @@ from .domain import (
     new_id,
     utc_now,
 )
-from .errors import ConfigurationError, DuplicateRunError, InfrastructureError, NotFoundError, StateError
+from .errors import (
+    ConfigurationError,
+    DuplicateRunError,
+    ExampleUnavailableError,
+    InfrastructureError,
+    NotFoundError,
+    StateError,
+)
 from .manuscript import (
     EQUATION_ENVIRONMENTS,
     QUANTITY_COMMANDS,
@@ -527,6 +534,10 @@ class ScriptoriumService:
         prompt = self.armarius._load_prompt_artifact(attempt.prompt_digest)
         schema = self.armarius._load_schema_artifact(run, metadata["schema_kind"], attempt.schema_digest)
         source_map_bytes = (bundle.workspace / "source-map.json").read_bytes()
+        try:
+            example, example_error = self.armarius.output_example(run, task, metadata, schema, bundle), None
+        except ExampleUnavailableError as exc:
+            example, example_error = None, str(exc)
         return {
             "run_id": run.id,
             "task": task,
@@ -541,6 +552,9 @@ class ScriptoriumService:
             "source_map_text": source_map_bytes.decode("utf-8"),
             "source_map_digest": ArtifactStore.digest_bytes(source_map_bytes),
             "brief": self.armarius.review_brief(run),
+            "example": example,
+            "example_digest": None if example is None else ArtifactStore.digest_bytes(example.encode("utf-8")),
+            "example_error": example_error,
         }
 
     def task_view(self, context: dict[str, Any], part: str | None = None, offset: int = 0):

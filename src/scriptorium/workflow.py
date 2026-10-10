@@ -34,7 +34,8 @@ from .domain import (
     canonical_json,
     digest_json,
 )
-from .errors import InfrastructureError, StateError
+from .errors import ExampleUnavailableError, InfrastructureError, StateError
+from .examples import EXAMPLE_ROLES, build_review_example
 from .manuscript import (
     NON_TEXT_ANCHOR_EXTENSIONS,
     BuildResult,
@@ -1075,6 +1076,62 @@ class Armarius:
         if set(properties) == set(required) == {"summary", "findings"}:
             return ReviewOutput
         raise InfrastructureError(f"run {run.id} has an unsupported frozen review output schema")
+
+    def output_example(
+        self, run: Run, task: Task, metadata: dict[str, str], schema: dict[str, Any], bundle: ManuscriptBundle
+    ) -> str:
+        """Return an illustrative output that parses under the attempt's frozen model and cites frozen anchors."""
+        kind = metadata["schema_kind"]
+        unavailable = f"no example is available for this attempt's frozen {kind} output schema shape"
+        if kind not in {"review", "scientific_review"} or task.role.value not in EXAMPLE_ROLES:
+            raise ExampleUnavailableError(unavailable)
+        try:
+            model = self._output_model_for_schema(run, kind, schema)
+        except InfrastructureError as exc:
+            raise ExampleUnavailableError(unavailable) from exc
+        # Runs frozen before the evidence-anchor contract have no anchors an example could demonstrate.
+        contract = self._evidence_anchor_contract_for_run(run, allow_missing=True)
+        if contract is None:
+            raise ExampleUnavailableError(unavailable)
+        snapshot = self._run_dir(run.id) / "snapshot"
+        source_anchor, source_area = self._example_source(bundle.anchor_map, snapshot, contract)
+        text = json.dumps(
+            build_review_example(schema, task.role.value, source_anchor, source_area), ensure_ascii=False, indent=2
+        )
+        # The example is served only when it passes the same parse and anchor checks a submission would.
+        parsed, issues = self._parse_and_validate_output(
+            model, text, lambda output: self._validate_review_output(output, bundle.anchor_map, snapshot, contract)
+        )
+        if parsed is None or issues:
+            raise ExampleUnavailableError(unavailable)
+        return text
+
+    @staticmethod
+    def _example_source(anchor_map: EvidenceAnchorMap, snapshot: Path, contract: EvidenceAnchorContract):
+        """Return a one-line anchor and its source's scope area, preferring a compiled entrypoint."""
+        entrypoints = {document.entrypoint for document in anchor_map.compiled_pdf.documents}
+        candidates = sorted(
+            (source for source in anchor_map.sources if source.text_anchorable),
+            key=lambda source: source.source_path not in entrypoints,
+        )
+        for source in candidates:
+            try:
+                lines = contract.split_lines((snapshot / source.source_path).read_text(encoding="utf-8"))
+            except UnicodeDecodeError:
+                continue
+            except OSError as exc:
+                raise InfrastructureError(f"failed to read frozen source: {source.source_path}") from exc
+            number, line = next(((number, line) for number, line in enumerate(lines, 1) if line.strip()), (0, ""))
+            if number:
+                anchor = {
+                    "source_path": source.source_path,
+                    "start_line": number,
+                    "end_line": number,
+                    "source_digest": source.source_digest,
+                    "quoted_text": line.strip(),
+                }
+                return anchor, {"source_path": source.source_path, "start_line": 1, "end_line": source.line_count}
+        return None, None
 
     @staticmethod
     def _finding_definition(schema: dict[str, Any]) -> dict[str, Any]:

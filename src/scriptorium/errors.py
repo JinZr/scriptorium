@@ -17,6 +17,10 @@ class DuplicateRunError(StateError):
     code = "duplicate_run"
 
 
+class ExampleUnavailableError(ConfigurationError):
+    code = "example_unavailable"
+
+
 class InfrastructureError(ScriptoriumError):
     code = "infrastructure_error"
     exit_code = 3
