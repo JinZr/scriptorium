@@ -160,6 +160,14 @@ def test_report_fragments_dispatch_with_continuation_identity(monkeypatch, capsy
     assert service.calls[-1] == ("read_report", "run_1", "findings", 120, "abc")
 
 
+def test_decision_stats_part_dispatches_through_the_bounded_report_reader(monkeypatch, capsys):
+    service = FakeService()
+    install_fake_service(monkeypatch, service)
+    assert cli.main(["--json", "run", "report", "run_1", "--part", "decision_stats"]) == 0
+    assert service.calls[-1] == ("read_report", "run_1", "decision_stats", 0, None)
+    assert json.loads(capsys.readouterr().out)["data"]["part"] == "decision_stats"
+
+
 @pytest.mark.parametrize(
     "options",
     [

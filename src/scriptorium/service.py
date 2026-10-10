@@ -21,6 +21,7 @@ from typing import Any, Iterator
 
 from .artifacts import ArtifactError, ArtifactStore
 from .config import find_repo, load_project_config, reject_legacy_local_config, validate_ready
+from .decision_stats import decision_stats, markdown_lines as markdown_decision_stats
 from .domain import (
     Attempt,
     AttemptStatus,
@@ -1297,15 +1298,14 @@ class ScriptoriumService:
         review_coverage_audit = (
             self._collect_review_coverage_audits(run_view, review_scopes, events) if external_run else []
         )
+        finding_records = [
+            {"finding": finding, "decisions": self._storage(self.database.list_decisions, "finding", finding.id)}
+            for finding in findings
+        ]
         payload = {
             **run_view,
-            "findings": [
-                {
-                    "finding": finding,
-                    "decisions": self._storage(self.database.list_decisions, "finding", finding.id),
-                }
-                for finding in findings
-            ],
+            "findings": finding_records,
+            "decision_stats": decision_stats((item["finding"], item["decisions"]) for item in finding_records),
             "patches": [
                 {
                     "patch": patch,
@@ -1710,6 +1710,7 @@ class ScriptoriumService:
                 lines.append(f"- `{finding['id']}` — {finding['severity']} / {finding['status']}: {finding['title']}")
         else:
             lines.append("- None")
+        lines.extend(markdown_decision_stats(plain["decision_stats"]))
         lines.extend(["", "## Patches", ""])
         if plain["patches"]:
             for item in plain["patches"]:
