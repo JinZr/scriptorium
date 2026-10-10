@@ -1,9 +1,10 @@
 import asyncio
+import dataclasses
 import json
 import shlex
 
 from scriptorium import cli
-from scriptorium.domain import AgentRole, canonical_json
+from scriptorium.domain import AgentRole, FindingStatus, canonical_json
 from scriptorium.service import ScriptoriumService
 from scriptorium.tool_output import MAX_TOOL_RESPONSE_BYTES
 
@@ -176,3 +177,24 @@ def test_a_long_decision_stats_part_is_bounded_and_traversable(tmp_path, monkeyp
         assert fragments > 2
         assert text == content
         assert json.loads(text) == full["decision_stats"]
+
+
+def test_exports_agree_when_findings_were_read_before_a_decision(tmp_path, monkeypatch):
+    repo = make_repository(tmp_path)
+    with _service(repo) as service:
+        run, ids = _two_role_run(service)
+        service.decide_finding(ids["a"], "reject", "Early view.")
+        service.decide_finding(ids["a"], "waive", "Later view.")
+        service.decide_finding(ids["b"], "confirm", "Holds.")
+        listed = service.database.list_findings(run.id)
+        stale = [dataclasses.replace(finding, status=FindingStatus.PENDING) for finding in listed]
+        monkeypatch.setattr(service.database, "list_findings", lambda _run_id: stale)
+        report = service.render_report(run.id, "json")
+        statuses = {item["finding"]["id"]: item["finding"]["status"] for item in report["findings"]}
+        assert statuses[ids["a"]] == "waived"
+        assert statuses[ids["b"]] == "confirmed"
+        assert statuses[ids["c"]] == "pending"
+        assert report["decision_stats"]["totals"] == {**_counts(confirmed=1, waived=1, pending=6), "total": 8}
+        assert [entry["decision"] for entry in report["decision_stats"]["reasons"]] == ["waived"]
+        assert f"`{ids['a']}` — blocker / waived:" in service.render_report(run.id, "markdown")
+        assert service.database.get_finding(ids["a"]).status == FindingStatus.WAIVED

@@ -1,4 +1,4 @@
-from scriptorium.decision_stats import MAX_REASONS, REASON_CHARS, decision_stats, markdown_lines
+from scriptorium.decision_stats import MAX_REASONS, REASON_CHARS, current_status, decision_stats, markdown_lines
 from scriptorium.domain import AgentRole, Decision, Finding, FindingSeverity, FindingStatus
 
 _STATUS_BY_DECISION = {
@@ -86,3 +86,10 @@ def test_the_latest_decision_wins_over_a_stale_finding_status():
 def test_markdown_escapes_a_backslash_before_a_pipe_so_the_cell_stays_whole():
     stats = decision_stats([_decided(_finding(1, category="math\\|notation"), ("reject", "No.", "2026-01-01"))])
     assert "| math\\\\\\|notation | 0 | 1 | 0 | 0 |" in markdown_lines(stats)
+
+
+def test_current_status_follows_the_latest_decision_and_falls_back_to_the_stored_status():
+    confirmed, records = _decided(_finding(1), ("confirm", "Yes.", "2026-01-01"))
+    assert current_status(_finding(1), records) == FindingStatus.CONFIRMED
+    assert current_status(confirmed, []) == FindingStatus.CONFIRMED
+    assert current_status(_finding(2), []) == FindingStatus.PENDING

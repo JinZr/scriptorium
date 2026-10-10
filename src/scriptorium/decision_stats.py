@@ -28,6 +28,13 @@ def _inline(value: object) -> str:
     return " ".join(str(value).split())
 
 
+def current_status(finding: Finding, decisions: Sequence[Decision]) -> FindingStatus:
+    """Return the status implied by the latest decision, or the stored status when none exists."""
+    if not decisions:
+        return finding.status
+    return FindingStatus(_STATE_BY_DECISION.get(decisions[-1].decision, finding.status.value))
+
+
 def _severity_key(severity: str) -> tuple[int, str]:
     return (_SEVERITY_ORDER.get(severity, len(_SEVERITY_ORDER)), severity)
 
@@ -47,7 +54,7 @@ def decision_stats(items: Iterable[tuple[Finding, Sequence[Decision]]]) -> dict:
     by_role_severity: dict[tuple[str, str], dict[str, int]] = {}
     reasons = []
     for finding, decisions in items:
-        state = _STATE_BY_DECISION.get(decisions[-1].decision, finding.status.value) if decisions else "pending"
+        state = current_status(finding, decisions).value
         role, category, severity = finding.role.value, finding.category, finding.severity.value
         totals[state] += 1
         for table, key in (
