@@ -79,7 +79,8 @@ scriptorium --json run status RUN_ID
 
 - `finding decide` 逐条接受或拒绝发现；
 - `run resume` 进入修订任务，模型产出候选补丁；
-- `patch decide` 批准或拒绝补丁，再 `run resume` 生成验证任务；
+- `patch decide` 批准或拒绝补丁，然后 `run resume`：批准会生成验证任务，
+  拒绝会带着你的理由回到修订任务，模型重新产出补丁；
 - 验证任务必须在一个全新的对话里做，否则结果记为 inconclusive；
 - `patch apply` 把验证通过的补丁写入工作区，`run gate` 查看放行结论。
 

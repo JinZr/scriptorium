@@ -113,7 +113,10 @@ require_tool latexmk "install a TeX distribution such as TeX Live or MacTeX" lat
 # every build; probe them the same way so a broken configuration fails here.
 if require_tool kpsewhich "part of TeX Live; needed to identify TeX installation inputs"; then
     for expression in '{$TEXMFDIST,$TEXMFMAIN}' '{$TEXMF,$TEXMFCNF,$TEXMFCACHE}'; do
-        roots="$(kpsewhich "--expand-path=$expression" 2>/dev/null || true)"
+        if ! roots="$(kpsewhich "--expand-path=$expression" 2>/dev/null)"; then
+            fail "texmf_roots" "kpsewhich --expand-path='$expression' exited with an error"
+            continue
+        fi
         roots="${roots//!!/}"
         if [ -z "$roots" ] || [ "$roots" = "/" ] || [ "${roots#/}" = "$roots" ]; then
             fail "texmf_roots" "kpsewhich --expand-path='$expression' returned no absolute TeX roots"
@@ -140,6 +143,8 @@ else
 fi
 
 # --- Compile smoke test -----------------------------------------------------
+# The document uses only the base article class so a minimal TeX installation
+# is not failed for missing packages; package coverage is reported separately.
 # Uses the same latexmk flags as Scriptorium's build: -norc ignores user rc
 # files and -recorder must produce the .fls dependency evidence it reads.
 smoke_compile() {
@@ -164,9 +169,6 @@ else
     workdir="$(mktemp -d 2>/dev/null || mktemp -d -t scriptorium-preflight)"
     cat > "$workdir/smoke.tex" <<'TEX'
 \documentclass{article}
-\usepackage{amsmath}
-\usepackage{graphicx}
-\usepackage{hyperref}
 \begin{document}
 \section{Preflight}
 Scriptorium preflight smoke test: $E = mc^2$.
@@ -182,7 +184,7 @@ TEX
         fi
     done
     if [ -n "$compiled_with" ]; then
-        pass "compile" "latexmk -norc -recorder compiled the test document with:$compiled_with"
+        pass "compile" "latexmk -norc -recorder compiled a base article document with:$compiled_with"
         [ -n "$failed_engines" ] && warn "compile" "failed with:$failed_engines (choose a working engine in scriptorium.toml)"
     else
         fail "compile" "latexmk -norc -recorder failed with every engine:$failed_engines; last log lines follow"
@@ -192,6 +194,20 @@ TEX
         done
     fi
     rm -rf "$workdir"
+fi
+
+# Common manuscript packages: informational, because the manuscript decides
+# what it needs and `scriptorium doctor` compiles the real sources.
+if command -v kpsewhich >/dev/null 2>&1; then
+    missing_packages=""
+    for package in amsmath graphicx hyperref natbib biblatex booktabs; do
+        kpsewhich "$package.sty" >/dev/null 2>&1 || missing_packages="$missing_packages $package"
+    done
+    if [ -z "$missing_packages" ]; then
+        info "packages" "amsmath, graphicx, hyperref, natbib, biblatex, booktabs are installed"
+    else
+        warn "packages" "not installed:$missing_packages (needed only if the manuscript uses them)"
+    fi
 fi
 
 # --- Scriptorium package ----------------------------------------------------
