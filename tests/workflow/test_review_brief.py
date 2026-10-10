@@ -4,7 +4,7 @@ import json
 import pytest
 
 from scriptorium.domain import canonical_json, digest_json
-from scriptorium.errors import ConfigurationError, StateError
+from scriptorium.errors import ConfigurationError, InfrastructureError, StateError
 from scriptorium.schemas import SEVERITY_RUBRIC, ReviewBrief, render_review_brief
 from scriptorium.service import ScriptoriumService
 from scriptorium.tool_output import run_overview
@@ -162,3 +162,15 @@ def test_briefs_that_render_alike_still_give_distinct_bound_input_digests(tmp_pa
     assert claims[0]["input_digest"] == digest_json({key: tasks[0][key] for key in keys})
     briefed_inputs = {key: tasks[2][key] for key in keys}
     assert claims[2]["input_digest"] == digest_json({**briefed_inputs, "brief_digest": second.brief_digest})
+
+
+def test_a_corrupt_brief_artifact_blocks_submission(tmp_path) -> None:
+    repo = make_repository(tmp_path, roles=("copyedit",))
+    with ScriptoriumService(repo, manuscript_manager=PdfBuildingManuscriptManager(repo)) as service:
+        run = _start(service, _BRIEF)["run"]
+        context = claim(service, run.id, "copyedit")
+        path = service.artifacts.path_for(run.brief_digest)
+        path.chmod(0o644)
+        path.write_text("corrupt", encoding="utf-8")
+        with pytest.raises(InfrastructureError, match="missing or corrupt review brief"):
+            service.check_submission(context["attempt"].id, context["input_digest"], "{}")

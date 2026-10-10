@@ -1479,6 +1479,7 @@ class Armarius:
         if input_digest != task_input_digest(run, attempt.prompt_digest, attempt.schema_digest, attempt.bundle_digest):
             raise StateError("submitted input digest does not match frozen attempt")
         self._load_prompt_artifact(attempt.prompt_digest)
+        self.review_brief(run)
         metadata = self.database.get_external_task(task.id)
         if attempt.bundle_digest != metadata["bundle_digest"] or attempt.schema_digest != metadata["schema_digest"]:
             raise InfrastructureError("attempt is not bound to its frozen task")
