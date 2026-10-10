@@ -452,10 +452,13 @@ class Database:
     def list_run_summaries(self, status: RunStatus | None, limit: int) -> tuple[int, list[tuple[Run, dict[str, int]]]]:
         """Return the matching run count and the newest ``limit`` runs with their task counts by status."""
         clause, parameters = ("WHERE status = ?", (status.value,)) if status is not None else ("", ())
-        total = self.connection.execute(f"SELECT COUNT(*) FROM runs {clause}", parameters).fetchone()[0]
+        # One statement keeps total and rows in a single snapshot; limit >= 1, so no rows means no matches.
         rows = self.connection.execute(
-            f"SELECT * FROM runs {clause} ORDER BY created_at DESC, id DESC LIMIT ?", (*parameters, limit)
+            f"SELECT *, (SELECT COUNT(*) FROM runs {clause}) AS match_total FROM runs {clause} "
+            "ORDER BY created_at DESC, id DESC LIMIT ?",
+            (*parameters, *parameters, limit),
         ).fetchall()
+        total = rows[0]["match_total"] if rows else 0
         runs = [self._run_from_row(row) for row in rows]
         counts: dict[str, dict[str, int]] = {run.id: {} for run in runs}
         marks = ",".join("?" for _ in runs)

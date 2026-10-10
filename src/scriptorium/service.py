@@ -419,7 +419,7 @@ class ScriptoriumService:
         for run, task_counts in summaries:
             try:
                 brief = self.armarius.review_brief(run)
-            except InfrastructureError:
+            except (InfrastructureError, OSError):
                 brief = None  # one unreadable brief must not hide the other runs; `run status` reports it
             rows.append((run, task_counts, None if brief is None else brief["content"]))
         return run_list(total, rows, limit)

@@ -77,3 +77,26 @@ def test_run_list_rejects_bad_filters_with_an_error_envelope(tmp_path, monkeypat
         assert error["ok"] is False and error["error"]["code"] == "configuration_error"
         with pytest.raises(ConfigurationError):
             service.list_runs(*(arguments[1:] if arguments[0] == "--status" else [None, int(arguments[1])]))
+
+
+@pytest.mark.parametrize("failure", ["corrupt", "unreadable"])
+def test_run_list_omits_the_brief_of_one_unreadable_run_and_lists_the_rest(tmp_path, monkeypatch, failure) -> None:
+    repo = make_repository(tmp_path, roles=("copyedit",))
+    with ScriptoriumService(repo, manuscript_manager=PdfBuildingManuscriptManager(repo)) as service:
+        broken = _start(service, _BRIEF)
+        healthy = _start(service, {**_BRIEF, "venue": "ICML 2026"})
+        if failure == "corrupt":
+            service.artifacts.path_for(broken.brief_digest).write_text("corrupt")
+        else:
+            original = service.artifacts.get_bytes
+
+            def get_bytes(digest):
+                if digest == broken.brief_digest:
+                    raise PermissionError("denied")
+                return original(digest)
+
+            monkeypatch.setattr(service.artifacts, "get_bytes", get_bytes)
+
+        rows = {row["run_id"]: row for row in service.list_runs()["runs"]}
+        assert set(rows) == {broken.id, healthy.id}
+        assert "venue" not in rows[broken.id] and rows[healthy.id]["venue"] == "ICML 2026"
