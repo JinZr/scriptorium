@@ -287,6 +287,8 @@ SEVERITY_RULES = (
     "Assign a level only when its definition is fully met; a problem that does not change how a reader should "
     "interpret any claim is minor or suggestion no matter how many places it appears.",
     "Do not assign moderate or above unless consequence states a concrete misreading or failure.",
+    "A finding at moderate or above names the claim whose reading it changes, in affected_claim or, in a substantive "
+    "review, through its claim check; a blocker needs a headline claim.",
 )
 _CONSEQUENCE = "what a reader would wrongly believe, or be unable to do, if this is not fixed"
 _COMPLIANCE_RULE = (
@@ -299,6 +301,7 @@ SEVERITY_RUBRIC = "\n".join(
         *(f"- {level.value}: {definition}" for level, definition in SEVERITY_DEFINITIONS.items()),
         SEVERITY_RULES[0],
         f"A finding's consequence states {_CONSEQUENCE}. {SEVERITY_RULES[1]}",
+        SEVERITY_RULES[2],
         _COMPLIANCE_RULE,
     )
 )
@@ -403,6 +406,27 @@ class RatedFinding(FindingCandidate):
         return self
 
 
+_CLAIM_SEVERITIES = (Severity.BLOCKER, Severity.MAJOR, Severity.MODERATE)
+
+
+class ClaimedFinding(RatedFinding):
+    affected_claim: str | None = Field(
+        default=None,
+        min_length=1,
+        description="The manuscript claim or result whose reading changes because of this finding, in one sentence. "
+        "Required at moderate or above.",
+    )
+
+    @model_validator(mode="after")
+    def validate_affected_claim(self) -> "ClaimedFinding":
+        if self.severity in _CLAIM_SEVERITIES and (self.affected_claim is None or not self.affected_claim.strip()):
+            raise ValueError(
+                f"a {self.severity.value} finding must name its affected_claim, the claim or result whose reading "
+                "it changes, or be rated minor or suggestion"
+            )
+        return self
+
+
 class ReviewOutput(StrictModel):
     summary: str = Field(min_length=1)
     findings: list[FindingCandidate]
@@ -493,6 +517,10 @@ class RatedReviewOutput(ScopedReviewOutput):
     findings: list[RatedFinding]
 
 
+class ClaimedReviewOutput(RatedReviewOutput):
+    findings: list[ClaimedFinding]
+
+
 def _integral_indices(value: Any) -> Any:
     if not isinstance(value, list):
         return value
@@ -581,24 +609,26 @@ class JudgedClaimCheck(ClaimCheck):
 
     @model_validator(mode="after")
     def validate_judgment(self) -> "JudgedClaimCheck":
-        if (self.check_type == "recomputation") != (self.recomputation is not None):
-            raise ValueError('a recomputation is recorded exactly when check_type is "recomputation"')
-        if (self.assessment == "supported") != (self.question_answer == "yes"):
-            raise ValueError('assessment "supported" goes with question_answer "yes", and only with it')
-        if self.question_answer == "yes" and self.exceptions:
-            raise ValueError('question_answer "yes" lists no exceptions; use "partly"')
-        if self.question_answer == "partly" and not self.exceptions:
-            raise ValueError('question_answer "partly" lists at least one exception')
-        if self.recomputation is not None and (self.recomputation.outcome, self.question_answer) in {
-            ("matches", "no"),
-            ("differs", "yes"),
-        }:
-            raise ValueError(
-                'a recomputation that differs cannot answer "yes", and one that matches cannot answer "no"'
-            )
-        if self.question_answer == "not_checkable" and self.assessment != "unresolved":
-            raise ValueError('question_answer "not_checkable" requires assessment "unresolved"')
+        _validate_judgment(self)
         return self
+
+
+def _validate_judgment(check: JudgedClaimCheck | LinkedClaimCheck) -> None:
+    if (check.check_type == "recomputation") != (check.recomputation is not None):
+        raise ValueError('a recomputation is recorded exactly when check_type is "recomputation"')
+    if (check.assessment == "supported") != (check.question_answer == "yes"):
+        raise ValueError('assessment "supported" goes with question_answer "yes", and only with it')
+    if check.question_answer == "yes" and check.exceptions:
+        raise ValueError('question_answer "yes" lists no exceptions; use "partly"')
+    if check.question_answer == "partly" and not check.exceptions:
+        raise ValueError('question_answer "partly" lists at least one exception')
+    if check.recomputation is not None and (check.recomputation.outcome, check.question_answer) in {
+        ("matches", "no"),
+        ("differs", "yes"),
+    }:
+        raise ValueError('a recomputation that differs cannot answer "yes", and one that matches cannot answer "no"')
+    if check.question_answer == "not_checkable" and check.assessment != "unresolved":
+        raise ValueError('question_answer "not_checkable" requires assessment "unresolved"')
 
 
 class JudgedScientificReviewOutput(ScientificReviewOutput):
@@ -663,6 +693,125 @@ class InventoriedScientificReviewOutput(JudgedScientificReviewOutput):
 
 class RatedScientificReviewOutput(InventoriedScientificReviewOutput):
     findings: list[RatedFinding]
+
+
+class LinkedClaimCheck(StrictModel):
+    claim_index: int = Field(
+        ge=0, strict=True, description="Zero-based position in this output's claim_inventory of the claim assessed."
+    )
+    evidence: list[Evidence] = Field(min_length=1)
+    critical_question: str = Field(min_length=1)
+    countercheck: str = Field(min_length=1)
+    stated_scope: str = Field(
+        min_length=1,
+        description="The population, conditions, range, threshold, and qualifications under which the authors "
+        "state the claim.",
+    )
+    check_type: Literal[
+        "reporting_consistency",
+        "recomputation",
+        "design_and_analysis",
+        "alternative_explanation",
+        "scope_and_generality",
+    ] = Field(description="What the countercheck examined.")
+    question_answer: Literal["yes", "partly", "no", "not_checkable"] = Field(
+        description="Whether the countercheck shows the claim holds at its stated scope: yes, partly, no, or "
+        "not_checkable when the frozen bundle cannot decide it."
+    )
+    exceptions: list[Annotated[str, Field(min_length=1)]] = Field(
+        description="Cases, conditions, or values within the stated scope where the claim fails or is not shown."
+    )
+    recomputation: Recomputation | None = Field(
+        default=None, description='Required when check_type is "recomputation"; omit it otherwise.'
+    )
+    assessment: Literal["supported", "unresolved", "finding"]
+    finding_indices: list[Annotated[int, Field(ge=0, strict=True)]]
+
+    @field_validator("claim_index", mode="before")
+    @classmethod
+    def accept_integral_index(cls, value: Any) -> Any:
+        return _integral_indices([value])[0]
+
+    @field_validator("finding_indices", mode="before")
+    @classmethod
+    def accept_integral_indices(cls, value: Any) -> Any:
+        return _integral_indices(value)
+
+    @model_validator(mode="after")
+    def validate_judgment(self) -> "LinkedClaimCheck":
+        _validate_judgment(self)
+        return self
+
+
+class LinkedClaim(StrictModel):
+    claim: str = Field(min_length=1, description="The central claim as the authors state it.")
+    claim_anchor: Evidence = Field(description="Where the authors state the claim, as an exact frozen anchor.")
+    prominence: Literal["headline", "supporting"] = Field(
+        description='"headline" for a claim in the abstract, stated contributions, or conclusions; "supporting" '
+        "for a claim the headline claims depend on."
+    )
+    not_checked_reason: str | None = Field(
+        default=None,
+        min_length=1,
+        description="Why no claim check in this submission names this claim by claim_index; omit it when one does.",
+    )
+
+
+class Verdict(StrictModel):
+    recommendation: Literal["accept", "minor_revision", "major_revision", "reject"] = Field(
+        description="Decided before listing findings; reject or major_revision rests on at least one major or "
+        "blocker finding of this review, and accept or minor_revision allows none."
+    )
+    decisive_questions: list[Annotated[str, Field(min_length=1)]] = Field(
+        min_length=1,
+        max_length=3,
+        description="One to three questions whose answers would change the recommendation.",
+    )
+
+
+_HIGH_SEVERITIES = (Severity.BLOCKER, Severity.MAJOR)
+
+
+class LinkedScientificReviewOutput(RatedScientificReviewOutput):
+    claim_checks: list[LinkedClaimCheck]
+    claim_inventory: list[LinkedClaim] = Field(
+        description="The central claims identified in the manuscript; claim checks refer to them by claim_index."
+    )
+    verdict: Verdict
+
+    @model_validator(mode="after")
+    def validate_claim_inventory(self) -> "LinkedScientificReviewOutput":
+        if any(check.claim_index >= len(self.claim_inventory) for check in self.claim_checks):
+            raise ValueError("a claim check refers to an unknown claim_index")
+        referenced = {check.claim_index for check in self.claim_checks}
+        for index, entry in enumerate(self.claim_inventory):
+            if (index in referenced) == (entry.not_checked_reason is not None):
+                raise ValueError(
+                    "an inventoried claim has a not_checked_reason exactly when no claim check names it by claim_index"
+                )
+        if self.scope.completion == "complete" and any(
+            entry.prominence == "headline" and index not in referenced
+            for index, entry in enumerate(self.claim_inventory)
+        ):
+            raise ValueError("a complete substantive review must check every inventoried headline claim")
+        headline_findings = {
+            finding_index
+            for check in self.claim_checks
+            if self.claim_inventory[check.claim_index].prominence == "headline"
+            for finding_index in check.finding_indices
+        }
+        if any(
+            finding.severity == Severity.BLOCKER and index not in headline_findings
+            for index, finding in enumerate(self.findings)
+        ):
+            raise ValueError("a blocker finding needs a headline claim: link it from a check of a headline claim")
+        if self.verdict.recommendation in {"accept", "minor_revision"} and any(
+            finding.severity in _HIGH_SEVERITIES for finding in self.findings
+        ):
+            raise ValueError(
+                f"a {self.verdict.recommendation} verdict cannot be submitted with a major or blocker finding"
+            )
+        return self
 
 
 # Historical runs still deserialize these persisted outputs, but new runs never schedule this role.
@@ -747,8 +896,8 @@ class ValidationReport(StrictModel):
 
 
 SCHEMA_MODELS: dict[str, type[StrictModel]] = {
-    "review": RatedReviewOutput,
-    "scientific_review": RatedScientificReviewOutput,
+    "review": ClaimedReviewOutput,
+    "scientific_review": LinkedScientificReviewOutput,
     "visual_transcription": VisualTranscriptionOutput,
     "revision": RevisionOutput,
     "verification": VerificationOutput,

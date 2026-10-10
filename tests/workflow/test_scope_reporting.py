@@ -36,6 +36,7 @@ def test_review_scope_is_reported_separately_from_tool_returns(tmp_path):
                         "scope": scope,
                         "claim_checks": [],
                         "claim_inventory": [],
+                        "verdict": {"recommendation": "accept", "decisive_questions": ["Is the result supported?"]},
                     }
                 ),
             )
@@ -367,6 +368,10 @@ def test_finalized_scoped_run_keeps_prior_gate_result(tmp_path, monkeypatch, com
                             "findings": [],
                             "claim_checks": [],
                             "claim_inventory": [],
+                            "verdict": {
+                                "recommendation": "accept",
+                                "decisive_questions": ["Is the reported result supported?"],
+                            },
                             "scope": {
                                 "completion": completion,
                                 "checked": [],

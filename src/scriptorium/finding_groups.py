@@ -40,15 +40,11 @@ def _claim_checks(entry: Mapping[str, Any]) -> Iterable[tuple[Mapping[str, Any],
             yield check, next((claim for claim in inventory if index in claim.get("check_indices", ())), None)
 
 
-def linked_claims(
-    findings: Sequence[Finding],
-    review_outputs: Iterable[Mapping[str, Any]],
-    claim_reports: Iterable[Mapping[str, Any]],
-) -> dict[str, dict[str, Any]]:
+def linked_claims(findings: Sequence[Finding], claim_reports: Iterable[Mapping[str, Any]]) -> dict[str, dict[str, Any]]:
     """Return, by finding ID, the most prominent claim a stored finding is linked to.
 
     Substantive findings link through their claim check to an inventoried claim; detail-role findings through
-    their affected_claim. Outputs frozen before either shape yield no link.
+    their stored affected_claim. Findings and outputs recorded before either link yield none.
     """
     stored = {
         _identity(item.task_id, item.category, item.severity.value, item.title, item.claim, item.evidence): item.id
@@ -56,8 +52,7 @@ def linked_claims(
     }
     linked: dict[str, dict[str, Any]] = {}
 
-    def link(task_id: str, submitted: Mapping[str, Any], text: str, prominence: str | None) -> None:
-        finding_id = stored.get(_submitted_identity(task_id, submitted))
+    def link(finding_id: str | None, text: str, prominence: str | None) -> None:
         if finding_id is None:
             return
         current = linked.get(finding_id)
@@ -67,11 +62,11 @@ def linked_claims(
     for entry in claim_reports:
         for check, claim in _claim_checks(entry):
             for index in check["finding_indices"] if claim is not None else ():
-                link(entry["task_id"], entry["submitted_findings"][index], claim["claim"], claim["prominence"])
-    for entry in review_outputs:
-        for submitted in entry["submitted_findings"]:
-            if submitted.get("affected_claim"):
-                link(entry["task_id"], submitted, submitted["affected_claim"], None)
+                submitted = _submitted_identity(entry["task_id"], entry["submitted_findings"][index])
+                link(stored.get(submitted), claim["claim"], claim["prominence"])
+    for finding in findings:
+        if finding.affected_claim:
+            link(finding.id, finding.affected_claim, None)
     return linked
 
 
@@ -198,17 +193,13 @@ def _group_order(group: Mapping[str, Any]) -> tuple:
     return (TIERS.index(group["tier"]), _SEVERITY_ORDER[group["max_severity"]], group["primary_finding_id"])
 
 
-def finding_groups(
-    findings: Sequence[Finding],
-    review_outputs: Iterable[Mapping[str, Any]],
-    claim_reports: Sequence[Mapping[str, Any]],
-) -> dict[str, Any]:
+def finding_groups(findings: Sequence[Finding], claim_reports: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
     """Group findings across roles and attempts by overlapping evidence and order the groups for triage.
 
-    `findings` carry the status their latest decision implies. `review_outputs` list each completed review
-    attempt's task ID and submitted findings; `claim_reports` are the report's substantive claim-check entries.
+    `findings` carry the status their latest decision implies; `claim_reports` are the report's substantive
+    claim-check entries.
     """
-    claims = linked_claims(findings, review_outputs, claim_reports)
+    claims = linked_claims(findings, claim_reports)
     groups = sorted((_group(members, claims) for members in _components(findings)), key=_group_order)
     counts = {
         tier: {

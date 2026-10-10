@@ -10,7 +10,7 @@ from scriptorium.service import ScriptoriumService
 from ._support import (
     PdfBuildingManuscriptManager,
     claim,
-    claim_inventory,
+    link_claims,
     make_repository,
     prepare_verification,
     review_finding,
@@ -40,7 +40,7 @@ def _review_output(review, *, findings=None):
             }
         ],
     }
-    return {**output, "claim_inventory": claim_inventory(output["claim_checks"])}
+    return link_claims(output)
 
 
 def _state(service, run_id, attempt_id):

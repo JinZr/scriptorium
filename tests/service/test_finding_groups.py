@@ -27,6 +27,7 @@ def _finding(
     status=FindingStatus.PENDING,
     created_at="2026-10-10T00:00:00Z",
     task_id=None,
+    affected_claim=None,
 ):
     return Finding(
         run_id="run",
@@ -46,6 +47,7 @@ def _finding(
         id=f"finding_{name}",
         status=status,
         created_at=created_at,
+        affected_claim=affected_claim,
     )
 
 
@@ -71,7 +73,7 @@ def test_overlapping_line_ranges_on_one_path_share_a_group():
         _finding("c", _lines("main.tex", 8, 9)),
         _finding("d", _lines("other.tex", 3, 5)),
     ]
-    grouped = finding_groups(findings, [], [])
+    grouped = finding_groups(findings, [])
 
     assert sorted(_ids(grouped)) == [["finding_a", "finding_b"], ["finding_c"], ["finding_d"]]
     (shared,) = [group for group in grouped["groups"] if len(group["finding_ids"]) == 2]
@@ -85,7 +87,7 @@ def test_a_finding_with_several_anchors_bridges_two_groups():
         _finding("c", _lines("main.tex", 2), _lines("intro.tex", 11)),
         _finding("d", _lines("main.tex", 4)),
     ]
-    grouped = finding_groups(findings, [], [])
+    grouped = finding_groups(findings, [])
 
     assert sorted(_ids(grouped)) == [["finding_a", "finding_b", "finding_c"], ["finding_d"]]
     bridged = next(group for group in grouped["groups"] if len(group["finding_ids"]) == 3)
@@ -102,7 +104,7 @@ def test_pdf_anchors_group_by_identical_page_and_never_join_line_anchors():
         _finding("c", _page(4)),
         _finding("d", _lines("manuscript.pdf", 2)),
     ]
-    grouped = finding_groups(findings, [], [])
+    grouped = finding_groups(findings, [])
 
     assert sorted(_ids(grouped)) == [["finding_a", "finding_b"], ["finding_c"], ["finding_d"]]
     paged = next(group for group in grouped["groups"] if len(group["finding_ids"]) == 2)
@@ -117,20 +119,20 @@ def test_the_primary_is_the_most_severe_then_substantive_then_earliest():
         _finding("c", _lines("main.tex", 3), severity=FindingSeverity.MINOR, role=AgentRole.SUBSTANTIVE_REVIEW),
         _finding("d", _lines("main.tex", 3), severity=FindingSeverity.MAJOR, created_at="2025-01-01"),
     ]
-    (group,) = finding_groups(findings, [], [])["groups"]
+    (group,) = finding_groups(findings, [])["groups"]
     assert group["primary_finding_id"] == "finding_b"
     assert group["max_severity"] == "major"
     assert group["consequence"] == "Consequence b."
     assert group["titles"] == ["Title a", "Title b", "Title c", "Title d"]
 
     without_substantive = [finding for finding in findings if finding.id != "finding_b"]
-    assert finding_groups(without_substantive, [], [])["groups"][0]["primary_finding_id"] == "finding_d"
+    assert finding_groups(without_substantive, [])["groups"][0]["primary_finding_id"] == "finding_d"
 
 
 def test_the_group_id_depends_only_on_the_member_ids():
     findings = [_finding("a", _lines("main.tex", 3)), _finding("b", _lines("main.tex", 3))]
-    first = finding_groups(findings, [], [])["groups"][0]["group_id"]
-    assert first == finding_groups(list(reversed(findings)), [], [])["groups"][0]["group_id"]
+    first = finding_groups(findings, [])["groups"][0]["group_id"]
+    assert first == finding_groups(list(reversed(findings)), [])["groups"][0]["group_id"]
     assert first.startswith("group_") and len(first) == len("group_") + 16
 
 
@@ -157,7 +159,7 @@ def _tiered_findings():
     supporting = _finding(
         "s", _lines("main.tex", 20), role=AgentRole.SUBSTANTIVE_REVIEW, severity=FindingSeverity.MODERATE
     )
-    affected = _finding("x", _lines("main.tex", 30), severity=FindingSeverity.MAJOR)
+    affected = _finding("x", _lines("main.tex", 30), severity=FindingSeverity.MAJOR, affected_claim="Table 2 holds.")
     other_major = _finding("o", _lines("main.tex", 40), severity=FindingSeverity.MAJOR)
     other_minor = _finding("m", _lines("main.tex", 50))
     compliance = _finding("c", _page(9), category="submission_compliance", role=AgentRole.CONSISTENCY)
@@ -170,11 +172,7 @@ def test_tiers_follow_claim_links_and_order_groups_for_triage():
     claim_report = _linked_claim_report(
         headline.task_id, [_submitted(headline), _submitted(supporting)], ["headline", "supporting"]
     )
-    outputs = [
-        {"task_id": affected.task_id, "submitted_findings": [_submitted(affected, affected_claim="Table 2 holds.")]},
-        {"task_id": other_major.task_id, "submitted_findings": [_submitted(other_major), _submitted(other_minor)]},
-    ]
-    grouped = finding_groups(findings, outputs, [claim_report])
+    grouped = finding_groups(findings, [claim_report])
 
     assert [(group["tier"], group["primary_finding_id"]) for group in grouped["groups"]] == [
         ("headline", "finding_h"),
@@ -210,7 +208,7 @@ def test_a_headline_link_lifts_the_whole_group_and_mixed_compliance_is_not_compl
         _finding("q", _page(1), category="style"),
     ]
     claim_report = _linked_claim_report(headline.task_id, [_submitted(headline)], ["headline"])
-    grouped = finding_groups([detail, headline, *mixed], [], [claim_report])
+    grouped = finding_groups([detail, headline, *mixed], [claim_report])
 
     tiers = {tuple(group["finding_ids"]): group["tier"] for group in grouped["groups"]}
     assert tiers == {("finding_d", "finding_h"): "headline", ("finding_p", "finding_q"): "other"}
@@ -233,19 +231,19 @@ def test_outputs_frozen_before_claim_index_link_through_inventory_check_indices(
         "claim_inventory": [{"claim": "Restated claim.", "prominence": "supporting", "check_indices": [0]}],
     }
 
-    without_inventory = finding_groups([finding], [], [restated])
+    without_inventory = finding_groups([finding], [restated])
     assert without_inventory["groups"][0]["claim"] is None
     assert without_inventory["groups"][0]["tier"] == "other"
     assert without_inventory["verdict"] is None
-    with_inventory = finding_groups([finding], [], [inventoried])["groups"][0]
+    with_inventory = finding_groups([finding], [inventoried])["groups"][0]
     assert with_inventory["claim"] == {"text": "Restated claim.", "prominence": "supporting", "finding_id": "finding_h"}
     assert with_inventory["tier"] == "supporting"
 
 
-def test_a_submitted_finding_from_another_task_does_not_link():
-    finding = _finding("x", _lines("main.tex", 3))
-    output = {"task_id": "task_elsewhere", "submitted_findings": [_submitted(finding, affected_claim="A claim.")]}
-    assert finding_groups([finding], [output], [])["groups"][0]["claim"] is None
+def test_a_claim_check_from_another_task_does_not_link():
+    finding = _finding("x", _lines("main.tex", 3), role=AgentRole.SUBSTANTIVE_REVIEW)
+    claim_report = _linked_claim_report("task_elsewhere", [_submitted(finding)], ["headline"])
+    assert finding_groups([finding], [claim_report])["groups"][0]["claim"] is None
 
 
 def test_decision_state_is_pending_until_every_member_is_decided():
@@ -253,21 +251,21 @@ def test_decision_state_is_pending_until_every_member_is_decided():
         _finding("a", _lines("main.tex", 3), status=FindingStatus.CONFIRMED),
         _finding("b", _lines("main.tex", 3)),
     ]
-    assert finding_groups(pending, [], [])["groups"][0]["decision_state"] == "pending"
+    assert finding_groups(pending, [])["groups"][0]["decision_state"] == "pending"
     decided = [
         _finding("a", _lines("main.tex", 3), status=FindingStatus.WAIVED),
         _finding("b", _lines("main.tex", 3), status=FindingStatus.CONFIRMED),
         _finding("c", _lines("main.tex", 3), status=FindingStatus.WAIVED),
     ]
-    assert finding_groups(decided, [], [])["groups"][0]["decision_state"] == "confirmed+waived"
+    assert finding_groups(decided, [])["groups"][0]["decision_state"] == "confirmed+waived"
     same = [_finding("a", _lines("main.tex", 3), status=FindingStatus.REJECTED)]
-    assert finding_groups(same, [], [])["groups"][0]["decision_state"] == "rejected"
+    assert finding_groups(same, [])["groups"][0]["decision_state"] == "rejected"
 
 
 def test_markdown_lists_the_verdict_first_and_compliance_last():
     headline, supporting, affected, other_major, other_minor, compliance = _tiered_findings()
     claim_report = _linked_claim_report(headline.task_id, [_submitted(headline)], ["headline"])
-    grouped = finding_groups([compliance, other_major, headline], [], [claim_report])
+    grouped = finding_groups([compliance, other_major, headline], [claim_report])
     lines = markdown_lines(grouped)
 
     assert lines[1:4] == [
@@ -282,7 +280,7 @@ def test_markdown_lists_the_verdict_first_and_compliance_last():
 
 
 def test_an_empty_run_has_no_groups_and_no_verdict():
-    grouped = finding_groups([], [], [])
+    grouped = finding_groups([], [])
     assert grouped["groups"] == [] and grouped["verdict"] is None
     assert all(count == {"groups": 0, "findings": 0} for count in grouped["counts"].values())
     assert markdown_lines(grouped)[3:] == ["- Verdict: none recorded", "- No findings"]

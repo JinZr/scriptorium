@@ -60,11 +60,10 @@ def _review_json(summary: str, findings: list | None = None) -> str:
             "scope": {"completion": "complete", "checked": [], "outstanding": [], "limitations": []},
             "claim_checks": [
                 {
-                    "claim": "The manuscript reports a result.",
+                    "claim_index": 0,
                     "evidence": [{"source_path": "manuscript.pdf", "page": 1}],
                     "critical_question": "Does the evidence support the result?",
                     "countercheck": "Checked the manuscript and supplement.",
-                    "claim_anchor": {"source_path": "manuscript.pdf", "page": 1},
                     "stated_scope": "As stated in the manuscript.",
                     "check_type": "design_and_analysis",
                     "question_answer": "no" if findings else "yes",
@@ -78,9 +77,12 @@ def _review_json(summary: str, findings: list | None = None) -> str:
                     "claim": "The manuscript reports a result.",
                     "claim_anchor": {"source_path": "manuscript.pdf", "page": 1},
                     "prominence": "headline",
-                    "check_indices": [0],
                 }
             ],
+            "verdict": {
+                "recommendation": "minor_revision" if findings else "accept",
+                "decisive_questions": ["Does the evidence support the result?"],
+            },
         }
     )
 

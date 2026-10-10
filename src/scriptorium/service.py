@@ -55,6 +55,7 @@ from .manuscript import (
 from .schemas import (
     EvidenceAnchorContract,
     InventoriedScientificReviewOutput,
+    LinkedScientificReviewOutput,
     ReviewBrief,
     ScientificReviewOutput,
     ScopedReviewOutput,
@@ -1284,7 +1285,6 @@ class ScriptoriumService:
         review_scopes = []
         review_claim_checks = []
         review_tool_access = []
-        review_outputs = []
         for item in run_view["tasks"]:
             task = item["task"]
             schema_kind = {
@@ -1331,32 +1331,8 @@ class ScriptoriumService:
                                     f"completed review attempt {attempt.id} has invalid scope output"
                                 )
                             scope = output.scope.model_dump(mode="json", exclude_none=True)
-                            review_outputs.append(self._submitted_review_output(task.id, output))
                             if isinstance(output, ScientificReviewOutput):
-                                review_claim_checks.append(
-                                    {
-                                        "task_id": task.id,
-                                        "attempt_id": attempt.id,
-                                        "submitted_findings": [
-                                            finding.model_dump(mode="json", exclude_none=True)
-                                            for finding in output.findings
-                                        ],
-                                        "claim_checks": [
-                                            check.model_dump(mode="json", exclude_none=True)
-                                            for check in output.claim_checks
-                                        ],
-                                        **(
-                                            {
-                                                "claim_inventory": [
-                                                    entry.model_dump(mode="json", exclude_none=True)
-                                                    for entry in output.claim_inventory
-                                                ]
-                                            }
-                                            if isinstance(output, InventoriedScientificReviewOutput)
-                                            else {}
-                                        ),
-                                    }
-                                )
+                                review_claim_checks.append(self._claim_check_report(task.id, attempt.id, output))
                     review_scopes.append(
                         {"task_id": task.id, "attempt_id": attempt.id, "role": task.role.value, "scope": scope}
                     )
@@ -1396,9 +1372,7 @@ class ScriptoriumService:
             **run_view,
             "run": self._report_run(run_view["run"]),
             "findings": finding_records,
-            "findings_grouped": finding_groups(
-                [item["finding"] for item in finding_records], review_outputs, review_claim_checks
-            ),
+            "findings_grouped": finding_groups([item["finding"] for item in finding_records], review_claim_checks),
             "decision_stats": decision_stats((item["finding"], item["decisions"]) for item in finding_records),
             "patches": [
                 {
@@ -1419,13 +1393,6 @@ class ScriptoriumService:
         if format == "json":
             return _plain(payload)
         return self._markdown_report(payload)
-
-    @staticmethod
-    def _submitted_review_output(task_id: str, output: ScopedReviewOutput) -> dict[str, Any]:
-        return {
-            "task_id": task_id,
-            "submitted_findings": [finding.model_dump(mode="json", exclude_none=True) for finding in output.findings],
-        }
 
     def _report_run(self, run: Run) -> Run | dict[str, Any]:
         brief = self.armarius.review_brief(run)
@@ -1648,30 +1615,72 @@ class ScriptoriumService:
             raise InfrastructureError(f"patched snapshot does not match immutable diff {patch.diff_digest}")
 
     @staticmethod
+    def _markdown_findings(items: list[dict[str, Any]]) -> list[str]:
+        lines = ["", "## Findings", ""]
+        if not items:
+            return [*lines, "- None"]
+        for item in items:
+            finding = item["finding"]
+            lines.append(f"- `{finding['id']}` — {finding['severity']} / {finding['status']}: {finding['title']}")
+            if finding.get("affected_claim"):
+                lines.append(f"  - affected claim: {finding['affected_claim']}")
+        return lines
+
+    @staticmethod
+    def _claim_check_report(task_id: str, attempt_id: str, output: ScientificReviewOutput) -> dict[str, Any]:
+        entry: dict[str, Any] = {
+            "task_id": task_id,
+            "attempt_id": attempt_id,
+            "submitted_findings": [finding.model_dump(mode="json", exclude_none=True) for finding in output.findings],
+            "claim_checks": [check.model_dump(mode="json", exclude_none=True) for check in output.claim_checks],
+        }
+        if isinstance(output, InventoriedScientificReviewOutput):
+            entry["claim_inventory"] = [
+                claim.model_dump(mode="json", exclude_none=True) for claim in output.claim_inventory
+            ]
+        if isinstance(output, LinkedScientificReviewOutput):
+            entry["verdict"] = output.verdict.model_dump(mode="json")
+        return entry
+
+    @staticmethod
     def _markdown_claim_checks(items: list[dict[str, Any]]) -> list[str]:
         lines = ["", "## Scientific claim checks", ""]
         if not items:
             return [*lines, "- None"]
         for item in items:
             lines.append(f"- `{item['attempt_id']}`: {len(item['claim_checks'])} checks")
+            if verdict := item.get("verdict"):
+                lines.append(
+                    f"  - verdict: {verdict['recommendation']}; decisive questions: "
+                    + " | ".join(verdict["decisive_questions"])
+                )
             for index, finding in enumerate(item["submitted_findings"]):
                 lines.append(f"  - submitted finding [{index}]: {finding['severity']} — {finding['title']}")
-            for entry in item.get("claim_inventory", []):
+            inventory = item.get("claim_inventory", [])
+            # Checks either restate their claim or, since the verdict shape, refer to it by claim_index.
+            claims = [
+                inventory[check["claim_index"]] if "claim_index" in check else check for check in item["claim_checks"]
+            ]
+            for entry_index, entry in enumerate(inventory):
                 location = ScriptoriumService._markdown_location(entry["claim_anchor"])
-                status = (
-                    f"claim checks {entry['check_indices']}"
-                    if entry["check_indices"]
-                    else f"not checked: {entry['not_checked_reason']}"
+                checked = entry.get(
+                    "check_indices",
+                    [
+                        index
+                        for index, check in enumerate(item["claim_checks"])
+                        if check.get("claim_index") == entry_index
+                    ],
                 )
+                status = f"claim checks {checked}" if checked else f"not checked: {entry['not_checked_reason']}"
                 lines.append(
                     f"  - inventoried {entry['prominence']} claim at `{location}`: {entry['claim']} — {status}"
                 )
-            for index, check in enumerate(item["claim_checks"]):
+            for index, (check, claim) in enumerate(zip(item["claim_checks"], claims)):
                 lines.append(
-                    f"  - [{index}] {check['claim']} — {check['assessment']}; question: {check['critical_question']}; "
+                    f"  - [{index}] {claim['claim']} — {check['assessment']}; question: {check['critical_question']}; "
                     f"countercheck: {check['countercheck']}; submitted finding indices: {check['finding_indices']}"
                 )
-                lines.extend(ScriptoriumService._markdown_claim_judgment(check))
+                lines.extend(ScriptoriumService._markdown_claim_judgment(check, claim.get("claim_anchor")))
                 for evidence in check["evidence"]:
                     lines.append(f"    - evidence: `{ScriptoriumService._markdown_location(evidence)}`")
         lines.append("Claim checks are reviewer declarations; valid anchors do not establish scientific correctness.")
@@ -1684,10 +1693,10 @@ class ScriptoriumService:
         return f"{anchor['source_path']}:{anchor['start_line']}-{anchor['end_line']}"
 
     @staticmethod
-    def _markdown_claim_judgment(check: dict[str, Any]) -> list[str]:
+    def _markdown_claim_judgment(check: dict[str, Any], claim_anchor: dict[str, Any] | None) -> list[str]:
         if "question_answer" not in check:
             return []
-        location = ScriptoriumService._markdown_location(check["claim_anchor"])
+        location = ScriptoriumService._markdown_location(claim_anchor)
         lines = [
             f"    - claim at `{location}`; stated scope: {check['stated_scope']}",
             f"    - {check['check_type']}; answer: {check['question_answer']}",
@@ -1828,13 +1837,7 @@ class ScriptoriumService:
         else:
             lines.append("- None")
         lines.extend(markdown_finding_groups(plain["findings_grouped"]))
-        lines.extend(["", "## Findings", ""])
-        if plain["findings"]:
-            for item in plain["findings"]:
-                finding = item["finding"]
-                lines.append(f"- `{finding['id']}` — {finding['severity']} / {finding['status']}: {finding['title']}")
-        else:
-            lines.append("- None")
+        lines.extend(ScriptoriumService._markdown_findings(plain["findings"]))
         lines.extend(markdown_decision_stats(plain["decision_stats"]))
         lines.extend(["", "## Patches", ""])
         if plain["patches"]:
