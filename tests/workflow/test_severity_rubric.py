@@ -36,7 +36,7 @@ def test_every_review_role_freezes_the_rubric_once_into_its_task_input(tmp_path,
         current = _role_inputs(service, run.id)
 
         monkeypatch.setattr(scriptorium.workflow, "SEVERITY_RUBRIC", "Severity rubric: a different frozen text.")
-        changed = _role_inputs(service, asyncio.run(service.start_run("HEAD", "quick"))["run"].id)
+        changed = _role_inputs(service, asyncio.run(service.start_run("HEAD", "quick", allow_duplicate=True))["run"].id)
 
     for role in _REVIEW_ROLES:
         assert changed[role][1] != current[role][1]
