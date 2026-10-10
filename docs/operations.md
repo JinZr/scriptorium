@@ -5,6 +5,7 @@ Run commands from the manuscript Git repository and use `--json` for machine-rea
 ```bash
 scriptorium --json doctor --revision COMMIT --profile full
 scriptorium --json run start --revision COMMIT --profile full
+scriptorium --json run list
 scriptorium --json run status RUN_ID
 scriptorium --json task claim TASK_ID --client codex --model MODEL --effort EFFORT \
   --session-id SESSION_ID --session-source host
@@ -49,11 +50,14 @@ option. Bounded responses stay within 7,000 UTF-8 bytes; run `next_command` unch
 | `task page ATTEMPT_ID --number N` | Rendered page image, zoomed view, or text layer | `page`, `path`, `digest`, `document`, `document_page`; `view`, or `text` with `text_digest` | `next_command` with `--text` |
 | `task submit ATTEMPT_ID ... --check` | Validate without recording | `valid`, `recorded: false`, `output_digest`, `validation_report` | `task submit` without `--check` |
 | `task submit ATTEMPT_ID ...` | Validate one output | `attempt`, `validation_report`, `run_status`, `next_actions` | `run status` |
+| `run list [--status S] [--limit N]` | This project's runs, newest first | `total`, `truncated`, `runs[]` with `run_id`, `status`, `commit_sha`, `profile`, `created_at`, `updated_at`, `task_counts`, and `venue_family`, `venue`, `stage` when the run has a brief | `run status` |
 | `run status RUN_ID` | Overview and next actions | `task_counts`, `next_actions`, `report_parts` | none |
 | `run report RUN_ID --part P` | One report section | `text`, `offset`, `digest`, `report_digest` | `next_command` |
 
 Errors use `{"ok": false, "error": {"code", "message"}}` with `--json`. `task read/search/nav/page/export` need an
 active attempt; `task show` also works for finished attempts.
+
+`run list` is how to find a `RUN_ID`; do not read `.scriptorium/` by hand. It reads the database without taking a run lock and makes no model call. `--status` takes a run status value (`preparing`, `reviewing`, `awaiting_decision`, `revising`, `awaiting_patch_approval`, `verifying`, `ready_to_apply`, `completed`, `waiting_budget`, `failed`, `cancelled`); `--limit` defaults to 20 and is at most 100. Bad values return `configuration_error`. The listing is bounded to 7,000 bytes like `run status`: if the rows do not fit, the oldest are dropped and `truncated` is true (`total` counts every matching run), so narrow with `--status` or a smaller `--limit`. A run whose frozen brief cannot be read omits the brief fields; `run status` reports that failure.
 
 `run status` returns a compact run identity and status, task counts, finding/patch counts, `has_error`, current `next_actions`, and `report_parts` commands. It omits frozen configuration and attempt history; these remain available through the `run` and `tasks` report sections. Costs remain unknown for external runs. Historical SDK runs return `execution: legacy_read_only` with no executable next actions.
 

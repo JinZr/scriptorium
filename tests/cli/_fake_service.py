@@ -53,6 +53,9 @@ class FakeService:
     def run_status(self, run_id: str) -> Result:
         return self._record("run_status", run_id)
 
+    def list_runs(self, status: str | None, limit: int) -> Result:
+        return self._record("list_runs", status, limit)
+
     async def resume_run(self, run_id: str) -> dict:
         return self._record_run("resume_run", run_id)
 

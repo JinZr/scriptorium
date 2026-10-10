@@ -70,10 +70,13 @@ from .tool_output import (
     page_text_fragment,
     report_fragment,
     require_bounded,
+    run_list,
     run_overview,
     task_view,
 )
 from .workflow import Armarius, task_input_digest
+
+RUN_LIST_MAX_LIMIT = 100
 
 
 class _RunBusyError(StateError):
@@ -402,6 +405,24 @@ class ScriptoriumService:
             external = view["run"].frozen_config.get("execution") == "external"
             next_actions = self.list_tasks(run_id)["next_actions"] if external else []
             return run_overview(self._with_brief(view), next_actions)
+
+    def list_runs(self, status: str | None = None, limit: int = 20) -> dict[str, Any]:
+        if status is not None and status not in {item.value for item in RunStatus}:
+            allowed = ", ".join(item.value for item in RunStatus)
+            raise ConfigurationError(f"unknown run status {status!r}; use one of: {allowed}")
+        if not 1 <= limit <= RUN_LIST_MAX_LIMIT:
+            raise ConfigurationError(f"--limit must be between 1 and {RUN_LIST_MAX_LIMIT}")
+        total, summaries = self._storage(
+            self.database.list_run_summaries, None if status is None else RunStatus(status), limit
+        )
+        rows = []
+        for run, task_counts in summaries:
+            try:
+                brief = self.armarius.review_brief(run)
+            except InfrastructureError:
+                brief = None  # one unreadable brief must not hide the other runs; `run status` reports it
+            rows.append((run, task_counts, None if brief is None else brief["content"]))
+        return run_list(total, rows, limit)
 
     async def resume_run(self, run_id: str) -> dict[str, Any]:
         run = self._storage(self.database.get_run, run_id)

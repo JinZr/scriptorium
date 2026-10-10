@@ -449,6 +449,23 @@ class Database:
         rows = self.connection.execute("SELECT * FROM runs ORDER BY created_at, id").fetchall()
         return [self._run_from_row(row) for row in rows]
 
+    def list_run_summaries(self, status: RunStatus | None, limit: int) -> tuple[int, list[tuple[Run, dict[str, int]]]]:
+        """Return the matching run count and the newest ``limit`` runs with their task counts by status."""
+        clause, parameters = ("WHERE status = ?", (status.value,)) if status is not None else ("", ())
+        total = self.connection.execute(f"SELECT COUNT(*) FROM runs {clause}", parameters).fetchone()[0]
+        rows = self.connection.execute(
+            f"SELECT * FROM runs {clause} ORDER BY created_at DESC, id DESC LIMIT ?", (*parameters, limit)
+        ).fetchall()
+        runs = [self._run_from_row(row) for row in rows]
+        counts: dict[str, dict[str, int]] = {run.id: {} for run in runs}
+        marks = ",".join("?" for _ in runs)
+        for run_id, task_status, count in self.connection.execute(
+            f"SELECT run_id, status, COUNT(*) FROM tasks WHERE run_id IN ({marks}) GROUP BY run_id, status",
+            [run.id for run in runs],
+        ):
+            counts[run_id][task_status] = count
+        return total, [(run, counts[run.id]) for run in runs]
+
     def list_active_runs(self, commit_sha: str) -> list[Run]:
         # A failed run can still be resumed, so only completed and cancelled runs are inactive.
         inactive = (RunStatus.COMPLETED.value, RunStatus.CANCELLED.value)
