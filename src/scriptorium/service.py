@@ -41,6 +41,7 @@ from .domain import (
     utc_now,
 )
 from .errors import ConfigurationError, DuplicateRunError, InfrastructureError, NotFoundError, StateError
+from .finding_groups import finding_groups, markdown_lines as markdown_finding_groups
 from .manuscript import (
     EQUATION_ENVIRONMENTS,
     QUANTITY_COMMANDS,
@@ -1371,6 +1372,15 @@ class ScriptoriumService:
             **run_view,
             "run": self._report_run(run_view["run"]),
             "findings": finding_records,
+            "findings_grouped": finding_groups(
+                [item["finding"] for item in finding_records],
+                review_claim_checks,
+                [
+                    {"finding_id": event.entity_id, **event.payload}
+                    for event in events
+                    if event.event_type == "finding.duplicate"
+                ],
+            ),
             "decision_stats": decision_stats((item["finding"], item["decisions"]) for item in finding_records),
             "patches": [
                 {
@@ -1834,6 +1844,7 @@ class ScriptoriumService:
                 )
         else:
             lines.append("- None")
+        lines.extend(markdown_finding_groups(plain["findings_grouped"]))
         lines.extend(ScriptoriumService._markdown_findings(plain["findings"]))
         lines.extend(markdown_decision_stats(plain["decision_stats"]))
         lines.extend(["", "## Patches", ""])
