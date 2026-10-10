@@ -132,6 +132,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="read a frozen input, the run's review brief, or an output example as text fragments",
     )
     show_parser.add_argument("--offset", type=int, default=0, help="character offset from the previous fragment")
+    show_parser.add_argument("--example-digest", help="example digest returned by the previous example fragment")
     submit_parser = task_commands.add_parser("submit", help="submit one complete JSON output for validation")
     submit_parser.add_argument("attempt_id", help="active attempt ID")
     submit_parser.add_argument("--input-digest", required=True, help="input_digest returned by claim or show")
@@ -396,7 +397,13 @@ def _dispatch_task(service: Any, arguments: argparse.Namespace) -> tuple[Any, in
             None,
         )
     if arguments.task_command == "show":
-        return service.task_view(service.show_task(arguments.attempt_id), arguments.part, arguments.offset), 0, None
+        return (
+            service.task_view(
+                service.show_task(arguments.attempt_id), arguments.part, arguments.offset, arguments.example_digest
+            ),
+            0,
+            None,
+        )
     if arguments.task_command == "submit":
         if arguments.file == "-":
             raw = sys.stdin.buffer.read(2_000_001)

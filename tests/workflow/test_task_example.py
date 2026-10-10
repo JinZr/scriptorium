@@ -5,7 +5,7 @@ import subprocess
 import pytest
 
 from scriptorium.domain import AgentRole, AttemptStatus
-from scriptorium.errors import ExampleUnavailableError
+from scriptorium.errors import ConfigurationError, ExampleUnavailableError
 import scriptorium.schemas
 from scriptorium.schemas import (
     InventoriedScientificReviewOutput,
@@ -26,13 +26,15 @@ _REVIEW_ROLES = ("substantive_review", "copyedit", "consistency", "figure_review
 
 def _example(service, attempt_id):
     """Follow the example fragments to the end, checking each response stays within the tool limit."""
-    pieces, offset, fragments = [], 0, 0
+    pieces, offset, fragments, digest = [], 0, 0, None
     while offset is not None:
-        fragment = service.task_view(service.show_task(attempt_id), "example", offset)
+        fragment = service.task_view(service.show_task(attempt_id), "example", offset, digest)
         assert len(success_json(fragment).encode("utf-8")) <= MAX_TOOL_RESPONSE_BYTES
         assert fragment["offset"] == offset
         pieces.append(fragment["text"])
-        offset, fragments = fragment["next_offset"], fragments + 1
+        offset, fragments, digest = fragment["next_offset"], fragments + 1, fragment["digest"]
+        if offset is not None:
+            assert fragment["next_command"].endswith(f"--offset {offset} --example-digest {digest}")
     return "".join(pieces), fragment["digest"], fragments
 
 
@@ -179,3 +181,37 @@ def test_revision_attempts_report_that_no_example_is_available(tmp_path):
             service.task_view(service.show_task(attempt_id), "example")
 
     assert "example" not in overview["inputs"]
+
+
+def test_example_fragments_are_bound_to_the_example_digest(tmp_path):
+    repo = make_repository(tmp_path, roles=("substantive_review",))
+    (repo / "main.tex").write_text(f"% {'x' * 3000}\n{MANUSCRIPT}", encoding="utf-8")
+    subprocess.run(["git", "-C", str(repo), "commit", "-q", "-am", "Long first line"], check=True)
+    with ScriptoriumService(repo, manuscript_manager=PdfBuildingManuscriptManager(repo)) as service:
+        run = asyncio.run(service.start_run("HEAD", "quick"))["run"]
+        attempt_id = claim(service, run.id, "substantive_review")["attempt"].id
+        first = service.task_view(service.show_task(attempt_id), "example")
+        offset = first["next_offset"]
+
+        with pytest.raises(ConfigurationError, match="example changed; restart at offset 0"):
+            service.task_view(service.show_task(attempt_id), "example", offset, "0" * 64)
+        with pytest.raises(ConfigurationError, match="nonzero example offset requires --example-digest"):
+            service.task_view(service.show_task(attempt_id), "example", offset)
+        with pytest.raises(ConfigurationError, match="--example-digest requires --part example"):
+            service.task_view(service.show_task(attempt_id), "prompt", 0, first["digest"])
+        following = service.task_view(service.show_task(attempt_id), "example", offset, first["digest"])
+
+    assert following["offset"] == offset and following["digest"] == first["digest"]
+
+
+def test_a_snapshot_that_disagrees_with_the_bundle_yields_no_example(tmp_path):
+    repo = make_repository(tmp_path, roles=("copyedit",))
+    with ScriptoriumService(repo, manuscript_manager=PdfBuildingManuscriptManager(repo)) as service:
+        run = asyncio.run(service.start_run("HEAD", "quick"))["run"]
+        attempt_id = claim(service, run.id, "copyedit")["attempt"].id
+        snapshot_source = service.armarius._run_dir(run.id) / "snapshot" / "main.tex"
+        snapshot_source.chmod(0o644)
+        snapshot_source.write_text(MANUSCRIPT.replace("article", "report"), encoding="utf-8")
+
+        with pytest.raises(ExampleUnavailableError):
+            service.task_view(service.show_task(attempt_id), "example")

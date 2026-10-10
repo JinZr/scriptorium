@@ -1094,7 +1094,7 @@ class Armarius:
         if contract is None:
             raise ExampleUnavailableError(unavailable)
         snapshot = self._run_dir(run.id) / "snapshot"
-        source_anchor, source_area = self._example_source(bundle.anchor_map, snapshot, contract)
+        source_anchor, source_area = self._example_source(bundle, contract)
         text = json.dumps(
             build_review_example(schema, task.role.value, source_anchor, source_area), ensure_ascii=False, indent=2
         )
@@ -1107,16 +1107,20 @@ class Armarius:
         return text
 
     @staticmethod
-    def _example_source(anchor_map: EvidenceAnchorMap, snapshot: Path, contract: EvidenceAnchorContract):
-        """Return a one-line anchor and its source's scope area, preferring a compiled entrypoint."""
-        entrypoints = {document.entrypoint for document in anchor_map.compiled_pdf.documents}
+    def _example_source(bundle: ManuscriptBundle, contract: EvidenceAnchorContract):
+        """Return a one-line anchor and its source's scope area, preferring a compiled entrypoint.
+
+        The line is read from the verified task bundle; the anchor check that follows reads the run snapshot, as a
+        submission's would, so a snapshot that disagrees with the bundle yields no example.
+        """
+        entrypoints = {document.entrypoint for document in bundle.anchor_map.compiled_pdf.documents}
         candidates = sorted(
-            (source for source in anchor_map.sources if source.text_anchorable),
+            (source for source in bundle.anchor_map.sources if source.text_anchorable),
             key=lambda source: source.source_path not in entrypoints,
         )
         for source in candidates:
             try:
-                lines = contract.split_lines((snapshot / source.source_path).read_text(encoding="utf-8"))
+                lines = contract.split_lines((bundle.workspace / source.read_path).read_text(encoding="utf-8"))
             except UnicodeDecodeError:
                 continue
             except OSError as exc:

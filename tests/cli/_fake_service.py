@@ -46,8 +46,10 @@ class FakeService:
         self.calls.append(("show_task", attempt_id))
         return {"attempt_id": attempt_id}
 
-    def task_view(self, context: dict, part: str | None = None, offset: int = 0) -> dict:
-        self.calls.append(("task_view", context["attempt_id"], part, offset))
+    def task_view(
+        self, context: dict, part: str | None = None, offset: int = 0, example_digest: str | None = None
+    ) -> dict:
+        self.calls.append(("task_view", context["attempt_id"], part, offset, example_digest))
         return {"part": part, "offset": offset}
 
     def run_status(self, run_id: str) -> Result:

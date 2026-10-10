@@ -557,8 +557,10 @@ class ScriptoriumService:
             "example_error": example_error,
         }
 
-    def task_view(self, context: dict[str, Any], part: str | None = None, offset: int = 0):
-        response = task_view(context, part, offset)
+    def task_view(
+        self, context: dict[str, Any], part: str | None = None, offset: int = 0, example_digest: str | None = None
+    ):
+        response = task_view(context, part, offset, example_digest)
         access = {"part": part or "overview", "input_digest": context["input_digest"]}
         if part is not None:
             access.update(digest=response["digest"], start_offset=offset, end_offset=offset + len(response["text"]))
