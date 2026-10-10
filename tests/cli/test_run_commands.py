@@ -31,6 +31,48 @@ def test_start_emits_json_and_passes_frozen_inputs(monkeypatch, capsys) -> None:
     assert output["data"]["next_actions"] == [{"command": "run status", "run_id": "run_1"}]
 
 
+def test_start_passes_the_brief_file_text_to_the_service(monkeypatch, capsys, tmp_path) -> None:
+    service = FakeService()
+    install_fake_service(monkeypatch, service)
+    brief = tmp_path / "brief.json"
+    brief.write_text('{"venue_family": "other", "stage": "internal_draft"}', encoding="utf-8")
+
+    assert cli.main(["--json", "run", "start", "--profile", "quick", "--brief", str(brief)]) == 0
+
+    assert service.calls == [("start_run", "HEAD", "quick", brief.read_text(encoding="utf-8"))]
+    assert json.loads(capsys.readouterr().out)["ok"] is True
+
+
+@pytest.mark.parametrize(
+    ("contents", "message"),
+    [(None, "cannot read review brief"), (b"\xff", "must be UTF-8"), (b" " * 256_001, "256 KB")],
+)
+def test_start_rejects_an_unreadable_brief_before_calling_the_service(
+    monkeypatch, capsys, tmp_path, contents, message
+) -> None:
+    service = FakeService()
+    install_fake_service(monkeypatch, service)
+    brief = tmp_path / "brief.json"
+    if contents is not None:
+        brief.write_bytes(contents)
+
+    assert cli.main(["--json", "run", "start", "--brief", str(brief)]) == 2
+
+    assert service.calls == []
+    error = json.loads(capsys.readouterr().out)["error"]
+    assert error["code"] == "configuration_error" and message in error["message"]
+
+
+def test_task_show_accepts_the_brief_part(monkeypatch, capsys) -> None:
+    service = FakeService()
+    install_fake_service(monkeypatch, service)
+
+    assert cli.main(["--json", "task", "show", "attempt_1", "--part", "brief", "--offset", "3"]) == 0
+    assert cli.main(["--json", "task", "show", "attempt_1", "--part", "summary"]) == 2
+
+    assert service.calls == [("show_task", "attempt_1"), ("task_view", "attempt_1", "brief", 3)]
+
+
 def test_doctor_passes_default_and_explicit_revision(monkeypatch, capsys) -> None:
     service = FakeService()
     install_fake_service(monkeypatch, service)

@@ -26,9 +26,10 @@ class _ArgumentParser(argparse.ArgumentParser):
 
 
 _RETIRED = argparse.SUPPRESS
+_BRIEF_LIMIT_BYTES = 256_000
 _TASK_DESCRIPTION = """Use a frozen task from the current host model session.
 
-Typical order: claim, show (overview), show --part prompt|schema|source-map, nav, search, read, page,
+Typical order: claim, show (overview), show --part prompt|schema|source-map|brief, nav, search, read, page,
 then submit. Successful JSON responses for claim, show, read, search, nav, and page stay within 7,000
 UTF-8 bytes. Follow each next_command unchanged until it is null to finish a traversal."""
 
@@ -55,6 +56,9 @@ def build_parser() -> argparse.ArgumentParser:
     start_parser.add_argument("--revision", default="HEAD", help="committed revision to freeze (default: HEAD)")
     start_parser.add_argument("--profile", default="full", help="review profile from scriptorium.toml (default: full)")
     start_parser.add_argument("--budget-usd", help=_RETIRED)
+    start_parser.add_argument(
+        "--brief", help="review brief JSON file agreed with the authors, frozen into every review prompt"
+    )
 
     status_parser = run_commands.add_parser("status", help="show a bounded run overview and next actions")
     status_parser.add_argument("run_id", help="run ID")
@@ -116,7 +120,9 @@ def build_parser() -> argparse.ArgumentParser:
     show_parser = task_commands.add_parser("show", help="show an attempt overview or one frozen input")
     show_parser.add_argument("attempt_id", help="attempt ID from claim")
     show_parser.add_argument(
-        "--part", choices=("prompt", "schema", "source-map"), help="read a frozen input as text fragments"
+        "--part",
+        choices=("prompt", "schema", "source-map", "brief"),
+        help="read a frozen input or the run's review brief as text fragments",
     )
     show_parser.add_argument("--offset", type=int, default=0, help="character offset from the previous fragment")
     submit_parser = task_commands.add_parser("submit", help="submit one complete JSON output for validation")
@@ -317,6 +323,7 @@ def _dispatch_run(service: Any, arguments: argparse.Namespace) -> tuple[Any, int
             service.start_run(
                 revision=arguments.revision,
                 profile=arguments.profile,
+                brief=None if arguments.brief is None else _read_brief(arguments.brief),
             )
         )
         return run_overview(result), 0, None
@@ -581,6 +588,20 @@ def _jsonable(value: Any) -> Any:
     if isinstance(value, Path):
         return str(value)
     return value
+
+
+def _read_brief(path: str) -> str:
+    try:
+        with Path(path).open("rb") as brief:
+            raw = brief.read(_BRIEF_LIMIT_BYTES + 1)
+    except OSError as exc:
+        raise ConfigurationError(f"cannot read review brief: {exc}") from exc
+    if len(raw) > _BRIEF_LIMIT_BYTES:
+        raise ConfigurationError("review brief exceeds the 256 KB limit")
+    try:
+        return raw.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise ConfigurationError("review brief must be UTF-8") from exc
 
 
 def _nonnegative_float(value: str) -> float:

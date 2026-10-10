@@ -36,6 +36,18 @@ ADDBIB_PATTERN = re.compile(r"\\addbibresource(?:\[[^\]]*\])?\s*\{([^}]+)\}")
 GRAPHICS_PATTERN = re.compile(r"\\includegraphics\*?(?:\s*\[[^\]]*\])?\s*\{([^}]+)\}")
 GRAPHICSPATH_PATTERN = re.compile(r"\\graphicspath(?![A-Za-z@])\s*(\{(?:\s*\{[^{}]*\}\s*)*\})?")
 GRAPHICS_EXTENSIONS = ("", ".pdf", ".png", ".jpg", ".jpeg", ".eps")
+TEMPLATE_DECLARATION_PATTERN = re.compile(r"\\(?:documentclass|usepackage)\s*(?:\[[^\]]*\]\s*)?\{([^{}]*)\}")
+# Known submission templates, matched against whole class or package names; an intake default, not a venue policy.
+KNOWN_TEMPLATES = (
+    (re.compile(r"neurips_\d{4}"), "ml_conference"),
+    (re.compile(r"iclr\d{4}_conference"), "ml_conference"),
+    (re.compile(r"icml\d{4}"), "ml_conference"),
+    (re.compile(r"colm\d{4}(?:_conference)?"), "ml_conference"),
+    (re.compile(r"(?:acl|naacl|eacl|emnlp)(?:\d{4})?"), "ml_conference"),
+    (re.compile(r"IEEEtran"), "other"),
+    (re.compile(r"sn-jnl"), "nature_family"),
+    (re.compile(r"nature(?:mag)?"), "nature_family"),
+)
 TABLE_ENVIRONMENTS = (
     "table",
     "table*",
@@ -636,6 +648,21 @@ class ManuscriptManager:
             line_count = len(data.decode("utf-8", errors="replace").splitlines())
             sources.append(SourceFile(relative.as_posix(), sha256(data).hexdigest(), line_count))
         return tuple(sources)
+
+    def detect_template(self, snapshot: Path, manuscript: ManuscriptConfig) -> dict[str, str | None]:
+        """Name the first known class or package declared by an entrypoint, in configured document order."""
+        root = snapshot.resolve()
+        for entrypoint in manuscript.entrypoints:
+            path = root / self._normalized_relative(root, Path(entrypoint))
+            if not path.is_file():
+                continue
+            text = self._dependency_text(path.read_text(encoding="utf-8", errors="replace"))
+            for match in TEMPLATE_DECLARATION_PATTERN.finditer(text):
+                for name in (part.strip() for part in match.group(1).split(",")):
+                    family = next((family for pattern, family in KNOWN_TEMPLATES if pattern.fullmatch(name)), None)
+                    if family is not None:
+                        return {"template": name, "venue_family": family}
+        return {"template": None, "venue_family": "unknown"}
 
     def scan_project_sources(self, snapshot: Path, manuscript: ManuscriptConfig) -> tuple[SourceFile, ...]:
         roots = [self._normalized_relative(snapshot.resolve(), Path(entry)) for entry in manuscript.entrypoints]

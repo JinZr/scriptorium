@@ -12,7 +12,7 @@ You are the reviewer in the current client conversation. Use the model selected 
 ```text
 run status RUN_ID                         -> next_actions; follow them
 task claim TASK_ID --client C --model M --effort E --session-id S --session-source host
-task show ATTEMPT_ID [--part prompt|schema|source-map]
+task show ATTEMPT_ID [--part prompt|schema|source-map|brief]
 task nav ATTEMPT_ID --command heading|reference|citation|label|caption|graphics|table|equation|quantity [--query Q] [--path P]
 task search ATTEMPT_ID --query Q [--path P] [--context 2] [--include-metadata]
 task read ATTEMPT_ID --path P --start-line A [--end-line B] [--anchor]
@@ -22,6 +22,10 @@ run continue|retry RUN_ID --task TASK_ID  -> then claim again
 ```
 
 Prefix each with `scriptorium --json`. Run every `next_command` unchanged until it is null.
+
+## Review brief
+
+Before a new `run start`, agree a short review brief with the author. Read `detected_template` from `doctor` and infer the venue family (`ml_conference`, `nature_family`, or `other`); `reference/venues/` beside this skill lists what to ask and sensible defaults for each family. Ask only what you cannot infer: the stage (`internal_draft`, `presubmission`, `rebuttal_revision`, or `camera_ready`), the two or three claims they most want checked, what earlier reviewers said, and what to ignore this round. Show the drafted brief and let the author confirm, edit it, or say "defaults". Write it to `brief.json` in the format documented in Scriptorium's `docs/configuration.md`, then run `run start --revision REVISION --profile PROFILE --brief brief.json`. The brief is not a manuscript source and need not be committed. It is frozen with the run, rendered into every review prompt, and returned to any reviewer by `task show ATTEMPT_ID --part brief`; it cannot be changed later.
 
 ## Start or resume
 
