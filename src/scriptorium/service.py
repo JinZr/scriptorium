@@ -41,6 +41,7 @@ from .domain import (
     utc_now,
 )
 from .errors import ConfigurationError, DuplicateRunError, InfrastructureError, NotFoundError, StateError
+from .finding_groups import finding_groups, markdown_lines as markdown_finding_groups
 from .manuscript import (
     EQUATION_ENVIRONMENTS,
     QUANTITY_COMMANDS,
@@ -1283,6 +1284,7 @@ class ScriptoriumService:
         review_scopes = []
         review_claim_checks = []
         review_tool_access = []
+        review_outputs = []
         for item in run_view["tasks"]:
             task = item["task"]
             schema_kind = {
@@ -1329,6 +1331,7 @@ class ScriptoriumService:
                                     f"completed review attempt {attempt.id} has invalid scope output"
                                 )
                             scope = output.scope.model_dump(mode="json", exclude_none=True)
+                            review_outputs.append(self._submitted_review_output(task.id, output))
                             if isinstance(output, ScientificReviewOutput):
                                 review_claim_checks.append(
                                     {
@@ -1393,6 +1396,9 @@ class ScriptoriumService:
             **run_view,
             "run": self._report_run(run_view["run"]),
             "findings": finding_records,
+            "findings_grouped": finding_groups(
+                [item["finding"] for item in finding_records], review_outputs, review_claim_checks
+            ),
             "decision_stats": decision_stats((item["finding"], item["decisions"]) for item in finding_records),
             "patches": [
                 {
@@ -1413,6 +1419,13 @@ class ScriptoriumService:
         if format == "json":
             return _plain(payload)
         return self._markdown_report(payload)
+
+    @staticmethod
+    def _submitted_review_output(task_id: str, output: ScopedReviewOutput) -> dict[str, Any]:
+        return {
+            "task_id": task_id,
+            "submitted_findings": [finding.model_dump(mode="json", exclude_none=True) for finding in output.findings],
+        }
 
     def _report_run(self, run: Run) -> Run | dict[str, Any]:
         brief = self.armarius.review_brief(run)
@@ -1814,6 +1827,7 @@ class ScriptoriumService:
                 )
         else:
             lines.append("- None")
+        lines.extend(markdown_finding_groups(plain["findings_grouped"]))
         lines.extend(["", "## Findings", ""])
         if plain["findings"]:
             for item in plain["findings"]:
