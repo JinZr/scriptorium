@@ -107,5 +107,6 @@ def test_a_resumable_failed_run_still_blocks_a_replacement(tmp_path):
     with _service(repo) as service:
         first = asyncio.run(service.start_run("HEAD", "quick"))["run"]
         service.database.update_run(first.id, RunStatus.FAILED, "host crashed")
-        with pytest.raises(DuplicateRunError, match=first.id):
+        with pytest.raises(DuplicateRunError, match=first.id) as caught:
             asyncio.run(service.start_run("HEAD", "quick"))
+        assert "resume it" in str(caught.value)

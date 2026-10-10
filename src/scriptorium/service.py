@@ -323,9 +323,10 @@ class ScriptoriumService:
         active = self._storage(self.database.list_active_runs, commit_sha)
         if active:
             existing = active[0]
+            remedy = "resume" if existing.status == RunStatus.FAILED else "cancel"
             raise DuplicateRunError(
                 f"run {existing.id} is already {existing.status.value} on commit {commit_sha[:12]}; "
-                f"inspect it with `run status {existing.id}`, cancel it, or pass --allow-duplicate to start another"
+                f"inspect it with `run status {existing.id}`, {remedy} it, or pass --allow-duplicate to start another"
             )
 
     async def start_run(self, revision: str, profile: str, allow_duplicate: bool = False) -> dict[str, Any]:
