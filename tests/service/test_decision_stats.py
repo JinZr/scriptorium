@@ -70,3 +70,19 @@ def test_markdown_keeps_line_separators_in_one_table_row_and_bullet():
     assert "| line one ## heading line two end | 0 | 1 | 0 | 0 |" in lines
     assert any(line.endswith("/ line one ## heading line two end / major: Why ## no split here.") for line in lines)
     assert not any(line.startswith("## heading") or line.startswith("## no") for line in lines)
+
+
+def test_the_latest_decision_wins_over_a_stale_finding_status():
+    stale, records = _decided(_finding(1), ("reject", "Early.", "2026-01-01"))
+    records.append(Decision("finding", stale.id, "waive", "Later.", id="decision_later", created_at="2026-01-02"))
+    undecided = _finding(2)
+    stats = decision_stats([(stale, records), (undecided, [])])
+    assert stats["totals"] == {"confirmed": 0, "rejected": 0, "waived": 1, "pending": 1, "total": 2}
+    assert [(entry["finding_id"], entry["decision"], entry["reason"]) for entry in stats["reasons"]] == [
+        (stale.id, "waived", "Later.")
+    ]
+
+
+def test_markdown_escapes_a_backslash_before_a_pipe_so_the_cell_stays_whole():
+    stats = decision_stats([_decided(_finding(1, category="math\\|notation"), ("reject", "No.", "2026-01-01"))])
+    assert "| math\\\\\\|notation | 0 | 1 | 0 | 0 |" in markdown_lines(stats)
