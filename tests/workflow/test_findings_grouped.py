@@ -2,6 +2,8 @@ import asyncio
 import json
 import shlex
 
+import pytest
+
 from scriptorium import cli
 from scriptorium.domain import AgentRole, canonical_json
 from scriptorium.service import ScriptoriumService
@@ -17,11 +19,20 @@ def _service(repo):
     return ScriptoriumService(repo, manuscript_manager=PdfBuildingManuscriptManager(repo))
 
 
-def _finding(review, line, title, *, category="style", severity="minor"):
+def _accepts_affected_claim(review):
+    schema = review["schema"]
+    reference = schema["properties"]["findings"]["items"]["$ref"].rpartition("/")[2]
+    return "affected_claim" in schema["$defs"][reference]["properties"]
+
+
+def _finding(review, line, title, *, category="style", severity="minor", affected_claim=None):
     finding = review_finding(review)
+    finding.pop("affected_claim", None)
     anchor = {**finding["evidence"][0], "start_line": line, "end_line": line, "quoted_text": _LINES[line]}
     finding.update(category=category, severity=severity, title=title, claim=f"{title} at line {line}.")
     finding["evidence"] = [anchor]
+    if affected_claim is not None:
+        finding["affected_claim"] = affected_claim
     return finding
 
 
@@ -96,6 +107,32 @@ def test_findings_from_several_roles_on_shared_evidence_are_grouped_and_ordered(
     assert lines[-1] == (
         f"- compliance / minor / consistency / `{ids['Template class differs']}` — Template class differs (waived)"
     )
+
+
+def test_a_detail_finding_with_an_affected_claim_forms_a_supporting_group(tmp_path):
+    repo = make_repository(tmp_path, roles=("copyedit",))
+    with _service(repo) as service:
+        run = asyncio.run(service.start_run("HEAD", "quick"))["run"]
+        review = claim(service, run.id, AgentRole.COPYEDIT)
+        if not _accepts_affected_claim(review):
+            pytest.skip("this frozen review contract has no affected_claim")
+        findings = [
+            _finding(review, 3, "Misread result", severity="moderate", affected_claim="The result is clear."),
+            _finding(review, 4, "Unbalanced environment"),
+        ]
+        submit(service, review, {"summary": "Reviewed.", "findings": findings})
+        grouped = service.render_report(run.id, "json")["findings_grouped"]
+
+    assert [(group["tier"], group["titles"]) for group in grouped["groups"]] == [
+        ("supporting", ["Misread result"]),
+        ("other", ["Unbalanced environment"]),
+    ]
+    supporting = grouped["groups"][0]
+    assert supporting["claim"] == {
+        "text": "The result is clear.",
+        "prominence": None,
+        "finding_id": supporting["primary_finding_id"],
+    }
 
 
 def test_a_long_grouped_findings_part_is_bounded_and_traversable(tmp_path, monkeypatch, capsys):
