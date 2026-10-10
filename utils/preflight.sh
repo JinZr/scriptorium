@@ -277,7 +277,18 @@ except OSError:
 words = first[2:].split() if first.startswith("#!") else []
 interpreter = words[0] if words else ""
 if interpreter and os.path.basename(interpreter) not in ("sh", "bash", "env"):
-    same = os.path.realpath(interpreter) == os.path.realpath(sys.executable)
+    # Compare environments, not binaries: two venvs made from one base Python
+    # share a realpath but have different sys.prefix values.
+    import subprocess
+    try:
+        probe = subprocess.run(
+            [interpreter, "-c", "import sys; print(sys.prefix)"],
+            capture_output=True, text=True, timeout=30, check=False,
+        )
+        other_prefix = probe.stdout.strip() if probe.returncode == 0 else None
+    except (OSError, subprocess.SubprocessError):
+        other_prefix = None
+    same = other_prefix is not None and os.path.realpath(other_prefix) == os.path.realpath(sys.prefix)
     print("selected" if same else "other")
     raise SystemExit
 # Fallback for wrapper shebangs: the entry point must live in a scripts directory of this interpreter.
@@ -315,7 +326,9 @@ else:
     print(candidates[0] or "")
 PY
 )"
-        warn "scriptorium_cli" "'scriptorium' is not in PATH; add ${scripts_dir:-its scripts directory} to PATH or activate that environment in the model client"
+        # The guide and the shared skill run the bare command, so a missing entry
+        # point is a real post-install failure, not a note.
+        fail "scriptorium_cli" "'scriptorium' is not in PATH; add ${scripts_dir:-its scripts directory} to PATH or activate that environment in the model client"
     fi
     if "$PYTHON" -c 'import pymupdf' >/dev/null 2>&1; then
         pass "pdf_rendering" "pymupdf imports in $PYTHON"

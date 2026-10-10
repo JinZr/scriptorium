@@ -35,7 +35,8 @@ bash /path/to/scriptorium/utils/preflight.sh
 /path/to/python -m pip install /path/to/scriptorium
 ```
 
-装完再跑一次 `preflight.sh`，确认 `scriptorium` 和 `pdf_rendering` 两行为 `ok`。
+装完再跑一次 `preflight.sh`，确认 `scriptorium`、`scriptorium_cli` 和 `pdf_rendering` 三行为 `ok`。
+`scriptorium_cli` 失败说明入口不在 PATH 里，按提示把该解释器的 scripts 目录加进 PATH。
 
 ## 第三步：让模型客户端加载 skill
 
