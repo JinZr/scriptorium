@@ -261,7 +261,7 @@ if [ "$installed_in_python" = 1 ]; then
         fail "scriptorium" "importable from $PYTHON but '$PYTHON -m scriptorium --help' fails"
     fi
     if [ -n "$scriptorium_path" ]; then
-        # The guide and the shared skill invoke the bare command, so the PATH
+        # The guide and the skills invoke the bare command, so the PATH
         # entry point must run and must belong to the checked interpreter's
         # installation (its base or user scripts directory).
         entry_owner="$("$PYTHON" - "$scriptorium_path" <<'PY' 2>/dev/null
@@ -329,7 +329,7 @@ else:
     print(candidates[0] or "")
 PY
 )"
-        # The guide and the shared skill run the bare command, so a missing entry
+        # The guide and the skills run the bare command, so a missing entry
         # point is a real post-install failure, not a note.
         fail "scriptorium_cli" "'scriptorium' is not in PATH; add ${scripts_dir:-its scripts directory} to PATH or activate that environment in the model client"
     fi

@@ -528,6 +528,7 @@ class ScriptoriumService:
         prompt = self.armarius._load_prompt_artifact(attempt.prompt_digest)
         schema = self.armarius._load_schema_artifact(run, metadata["schema_kind"], attempt.schema_digest)
         source_map_bytes = (bundle.workspace / "source-map.json").read_bytes()
+        example = self.armarius.frozen_output_example(metadata)
         return {
             "run_id": run.id,
             "task": task,
@@ -542,6 +543,8 @@ class ScriptoriumService:
             "source_map_text": source_map_bytes.decode("utf-8"),
             "source_map_digest": ArtifactStore.digest_bytes(source_map_bytes),
             "brief": self.armarius.review_brief(run),
+            "example": example,
+            "example_digest": metadata.get("example_digest"),
         }
 
     def task_view(self, context: dict[str, Any], part: str | None = None, offset: int = 0):

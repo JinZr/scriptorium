@@ -38,8 +38,8 @@ conversation distinct from review and revision; a declared or reused ID cannot p
 ## Read the frozen task
 
 Claim and plain `task show` return `input_digest` and a command per input. Read the prompt, the schema (parse it as
-JSON), and the source map (`sources` with paths and digests). When `data.inputs.example` is present, read the
-example: a placeholder output checked against this attempt's schema. Copy its shape and replace all of its content.
+JSON), and the source map (`sources` with paths and digests). When `data.inputs.example` is present, run its
+command: a placeholder output frozen with the task and checked against its schema. Copy its shape and replace all of its content.
 `--part brief` returns the author's brief, if any. The frozen prompt defines the role's method, including claim
 tracing, counterchecks, recomputation, and verdict rules; follow it.
 

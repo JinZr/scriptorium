@@ -13,7 +13,9 @@ UTF-8 bytes, including the envelope. Requested line, character, and match counts
 - Frozen inputs stay readable after the attempt finishes. `read`, `search`, `page`, and `nav` need an active
   attempt.
 - A part the attempt does not have fails instead of returning text: `brief` for a run without one, and `example`
-  (`example_unavailable`) for revision and verification attempts or schemas the example builder cannot fill.
+  (`example_unavailable`) when no example was frozen with the task: revision and verification tasks, tasks
+  prepared before examples existed, and schema shapes the example builder cannot fill. The overview's `inputs`
+  lists `example` only when one is stored.
 
 ## Reading sources
 

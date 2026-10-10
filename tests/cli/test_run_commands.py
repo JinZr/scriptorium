@@ -3,7 +3,7 @@ import json
 import pytest
 
 from scriptorium import cli
-from scriptorium.errors import DuplicateRunError
+from scriptorium.errors import DuplicateRunError, ExampleUnavailableError
 
 from ._fake_service import FakeService, install_fake_service
 
@@ -72,6 +72,34 @@ def test_task_show_accepts_the_brief_part(monkeypatch, capsys) -> None:
     assert cli.main(["--json", "task", "show", "attempt_1", "--part", "summary"]) == 2
 
     assert service.calls == [("show_task", "attempt_1"), ("task_view", "attempt_1", "brief", 3)]
+
+
+def test_task_show_accepts_the_example_part(monkeypatch, capsys) -> None:
+    service = FakeService()
+    install_fake_service(monkeypatch, service)
+
+    assert cli.main(["--json", "task", "show", "attempt_1", "--part", "example", "--offset", "5"]) == 0
+
+    assert service.calls == [("show_task", "attempt_1"), ("task_view", "attempt_1", "example", 5)]
+    assert json.loads(capsys.readouterr().out)["data"] == {"part": "example", "offset": 5}
+
+
+def test_an_unavailable_example_is_a_structured_error(monkeypatch, capsys) -> None:
+    class NoExampleService(FakeService):
+        def task_view(self, context, part=None, offset=0):
+            raise ExampleUnavailableError(
+                "no example is available for this attempt's frozen review output schema shape"
+            )
+
+    install_fake_service(monkeypatch, NoExampleService())
+
+    assert cli.main(["--json", "task", "show", "attempt_1", "--part", "example"]) == 2
+
+    error = json.loads(capsys.readouterr().out)["error"]
+    assert error == {
+        "code": "example_unavailable",
+        "message": "no example is available for this attempt's frozen review output schema shape",
+    }
 
 
 def test_start_passes_allow_duplicate(monkeypatch, capsys) -> None:

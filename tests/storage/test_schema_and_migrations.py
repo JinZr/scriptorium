@@ -19,6 +19,7 @@ from scriptorium.storage import (
     _MIGRATION_4,
     _MIGRATION_5,
     _MIGRATION_6,
+    _MIGRATION_7,
     ConflictError,
     Database,
 )
@@ -53,7 +54,7 @@ def test_schema_and_pragmas(tmp_path) -> None:
         assert {"consequence", "affected_claim"} <= finding_columns
         run_columns = {row["name"] for row in database.connection.execute("PRAGMA table_info(runs)").fetchall()}
         assert "brief_digest" in run_columns
-        assert database.connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0] == 7
+        assert database.connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0] == 8
         assert database.connection.execute("PRAGMA foreign_keys").fetchone()[0] == 1
         assert database.connection.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
         assert database.connection.execute("PRAGMA busy_timeout").fetchone()[0] == 5000
@@ -133,7 +134,7 @@ def test_active_historical_database_remains_compatible_until_explicit_external_s
         assert database.connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0] == 3
         database.connection.execute("UPDATE runs SET status = 'completed' WHERE id = 'run_old'")
         database.ensure_external_schema()
-        assert database.connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0] == 7
+        assert database.connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0] == 8
         assert database.get_patch("patch_old") == patch
         assert database.get_run("run_old").brief_digest is None
 
@@ -155,8 +156,8 @@ def test_concurrent_external_schema_upgrades_share_one_transaction(tmp_path) -> 
             return database.connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0]
 
         with ThreadPoolExecutor(max_workers=2) as pool:
-            assert list(pool.map(upgrade, (first, second))) == [7, 7]
-        for version in (4, 5, 6, 7):
+            assert list(pool.map(upgrade, (first, second))) == [8, 8]
+        for version in (4, 5, 6, 7, 8):
             assert (
                 first.connection.execute(
                     "SELECT COUNT(*) FROM schema_migrations WHERE version = ?", (version,)
@@ -218,7 +219,7 @@ def test_external_database_adds_a_nullable_consequence_to_historical_findings(tm
         assert finding.consequence is None
         assert finding.title == "Title"
         assert reopened.get_finding("finding_old") == finding
-        assert database.connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0] == 7
+        assert database.connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0] == 8
         assert (
             database.connection.execute("SELECT COUNT(*) FROM schema_migrations WHERE version = 5").fetchone()[0] == 1
         )
@@ -255,7 +256,7 @@ def test_version_five_database_adds_a_nullable_brief_digest_to_historical_runs(t
         assert run.status.value == "completed"
         assert reopened.get_run("run_old") == run
         assert database.get_finding("finding_old").title == "Title"
-        assert database.connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0] == 7
+        assert database.connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0] == 8
         assert (
             database.connection.execute("SELECT COUNT(*) FROM schema_migrations WHERE version = 6").fetchone()[0] == 1
         )
@@ -398,7 +399,37 @@ def test_version_six_database_adds_a_nullable_affected_claim_to_historical_findi
 
         assert finding.affected_claim is None
         assert finding.title == "Title"
-        assert database.connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0] == 7
+        assert database.connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0] == 8
         assert (
-            database.connection.execute("SELECT COUNT(*) FROM schema_migrations WHERE version = 7").fetchone()[0] == 1
+            database.connection.execute("SELECT COUNT(*) FROM schema_migrations WHERE version = 8").fetchone()[0] == 1
         )
+
+
+def test_version_seven_database_adds_a_null_example_digest_to_prepared_external_tasks(tmp_path) -> None:
+    path = tmp_path / "state.sqlite3"
+    connection = sqlite3.connect(path, isolation_level=None)
+    connection.execute("CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)")
+    migrations = (_MIGRATION_1, _MIGRATION_2, _MIGRATION_3, _MIGRATION_4, _MIGRATION_5, _MIGRATION_6, _MIGRATION_7)
+    for migration in migrations:
+        connection.executescript(migration)
+    _insert_historical_finding(connection)
+    for digest in ("e" * 64, "f" * 64):
+        connection.execute(
+            "INSERT INTO artifacts (digest, relative_path, size, media_type, created_at) VALUES (?, ?, 1, ?, ?)",
+            (digest, f"sha256/{digest}", "text/plain", "2026-01-01T00:00:00+00:00"),
+        )
+    connection.execute(
+        """
+        INSERT INTO external_tasks (task_id, prompt_digest, schema_digest, bundle_digest, bundle_path, schema_kind)
+        VALUES ('task_old', ?, ?, ?, 'bundle', 'review')
+        """,
+        ("e" * 64, "f" * 64, "0" * 64),
+    )
+    connection.close()
+
+    with Database(path) as database:
+        external = database.get_external_task("task_old")
+
+        assert external["example_digest"] is None
+        assert external["prompt_digest"] == "e" * 64
+        assert database.connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0] == 8

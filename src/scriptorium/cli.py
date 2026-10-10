@@ -29,7 +29,7 @@ _RETIRED = argparse.SUPPRESS
 _BRIEF_LIMIT_BYTES = 256_000
 _TASK_DESCRIPTION = """Use a frozen task from the current host model session.
 
-Typical order: claim, show (overview), show --part prompt|schema|source-map|brief, nav, search, read, page,
+Typical order: claim, show (overview), show --part prompt|schema|source-map|brief|example, nav, search, read, page,
 then submit. Successful JSON responses for claim, show, read, search, nav, page, and export stay within
 7,000 UTF-8 bytes. Follow each next_command unchanged until it is null to finish a traversal. For long
 sources, export writes the frozen bundle files to a directory (a recorded side effect on disk) for reading
@@ -128,8 +128,8 @@ def build_parser() -> argparse.ArgumentParser:
     show_parser.add_argument("attempt_id", help="attempt ID from claim")
     show_parser.add_argument(
         "--part",
-        choices=("prompt", "schema", "source-map", "brief"),
-        help="read a frozen input or the run's review brief as text fragments",
+        choices=("prompt", "schema", "source-map", "brief", "example"),
+        help="read a frozen input, the run's review brief, or an output example as text fragments",
     )
     show_parser.add_argument("--offset", type=int, default=0, help="character offset from the previous fragment")
     submit_parser = task_commands.add_parser("submit", help="submit one complete JSON output for validation")
