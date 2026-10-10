@@ -1155,13 +1155,18 @@ class Armarius:
         return TaskOutcome(task, completed, output)
 
     def completed_review_output(self, task: Task) -> tuple[Attempt, ReviewOutput] | None:
+        accepted = self.completed_review_outputs(task)
+        return accepted[-1] if accepted else None
+
+    def completed_review_outputs(self, task: Task) -> list[tuple[Attempt, ReviewOutput]]:
+        """Every accepted output of a review task, in attempt order."""
         completed_attempts = [
             item for item in self.database.list_attempts(task.id) if item.status == AttemptStatus.COMPLETED
         ]
         if not completed_attempts:
-            return None
+            return []
         run = self.database.get_run(task.run_id)
-        latest = None
+        accepted = []
         for completed in completed_attempts:
             schema_kind = self.database.get_external_task(task.id)["schema_kind"]
             schema = self._load_schema_artifact(run, schema_kind, completed.schema_digest)
@@ -1175,8 +1180,8 @@ class Armarius:
             output, issues = self._parse_and_validate_output(model, output_text, lambda _: [])
             if output is None or issues:
                 raise InfrastructureError(f"completed review attempt {completed.id} has invalid output")
-            latest = (completed, output)
-        return latest
+            accepted.append((completed, output))
+        return accepted
 
     def review_completion(self, task: Task) -> str | None:
         accepted = self.completed_review_output(task)
@@ -1526,14 +1531,11 @@ class Armarius:
 
     def _stage_validator(self, task: Task, run: Run, bundle, contract: EvidenceAnchorContract):
         if task.stage == "review":
-            accepted = self.completed_review_output(task)
-            # A continuation's verdict also rests on the findings this review recorded earlier, whatever their
-            # human decision, so a later decision cannot change which submissions validate.
-            recorded = (
-                [finding for finding in self.database.list_findings(run.id) if finding.task_id == task.id]
-                if accepted
-                else []
-            )
+            outputs = self.completed_review_outputs(task)
+            accepted = outputs[-1] if outputs else None
+            # A continuation's verdict also rests on the findings this task's accepted outputs submitted, whatever
+            # their human decision or the task that owns a deduplicated finding row.
+            recorded = [finding.severity.value for _, output in outputs for finding in output.findings]
 
             def validator(output):
                 return (
@@ -1605,13 +1607,12 @@ class Armarius:
             for entry in dropped
         ]
 
-    def _verdict_issues(self, output: ReviewOutput, recorded: list[Finding]) -> list[ValidationIssue]:
+    def _verdict_issues(self, output: ReviewOutput, recorded: list[str]) -> list[ValidationIssue]:
         """A substantive verdict agrees with the major and blocker findings this review submitted or recorded."""
         if not isinstance(output, LinkedScientificReviewOutput):
             return []
         high = {FindingSeverity.BLOCKER.value, FindingSeverity.MAJOR.value}
-        severities = [finding.severity.value for finding in output.findings]
-        severities.extend(finding.severity.value for finding in recorded)
+        severities = [finding.severity.value for finding in output.findings] + recorded
         recommendation = output.verdict.recommendation
         if recommendation in {"reject", "major_revision"} and high.isdisjoint(severities):
             message = f"A {recommendation} verdict requires at least one major or blocker finding from this review."

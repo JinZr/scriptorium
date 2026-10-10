@@ -196,3 +196,23 @@ def test_other_review_roles_must_name_the_affected_claim_at_moderate_or_above(tm
         minor = {**finding, "severity": "minor"}
         receipt = submit(service, review, {"summary": "Checked.", "findings": [minor]})
         assert receipt["attempt"].status == AttemptStatus.COMPLETED
+
+
+def test_continuation_verdict_counts_its_own_findings_deduplicated_into_another_task(tmp_path):
+    repo = make_repository(tmp_path, roles=("substantive_review", "copyedit"))
+    with ScriptoriumService(repo, manuscript_manager=PdfBuildingManuscriptManager(repo)) as service:
+        run = asyncio.run(service.start_run("HEAD", "quick"))["run"]
+        copyedit = claim(service, run.id, AgentRole.COPYEDIT)
+        shared = review_finding(copyedit)
+        receipt = submit(service, copyedit, {"summary": "Found a typo.", "findings": [shared]})
+        assert receipt["attempt"].status == AttemptStatus.COMPLETED
+        first = claim(service, run.id, AgentRole.SUBSTANTIVE_REVIEW)
+        same = {key: value for key, value in shared.items() if key != "affected_claim"}
+        partial = _output([same], "major_revision", scope=_PARTIAL)
+        assert submit(service, first, partial)["attempt"].status == AttemptStatus.COMPLETED
+        # The identical finding keeps the copyedit task's row, yet it is part of this review's accepted output.
+        assert [finding.task_id for finding in service.database.list_findings(run.id)] == [copyedit["task"].id]
+        asyncio.run(service.continue_review(run.id, first["task"].id))
+        second = claim(service, run.id, AgentRole.SUBSTANTIVE_REVIEW)
+        receipt = submit(service, second, _output([], "major_revision", inventory=[_claim()]))
+        assert receipt["attempt"].status == AttemptStatus.COMPLETED
