@@ -39,7 +39,7 @@ and revision; a declared or reused ID cannot pass.
 Claim and plain `task show` return `input_digest` and a command per input. Read the prompt, the schema (parse as
 JSON), and the source map. When `data.inputs.example` is present, run its
 command: a placeholder output checked against the schema. Copy its shape, not its content.
-`--part brief` returns the author's brief. The frozen prompt defines the role's method (claim tracing,
+`--part brief` returns the author's brief, if any. The frozen prompt defines the role's method (claim tracing,
 counterchecks, recomputation, verdict rules); follow it.
 
 ## Retrieve
@@ -50,7 +50,7 @@ counterchecks, recomputation, verdict rules); follow it.
   lines. A match may be a comment or inactive text; read the range first.
 - `task read ... --anchor` reads an inclusive range and returns a ready evidence anchor for the completely returned
   lines. Prefer the source map's `read_path`.
-- `task page` renders a global page of `manuscript.pdf`. Open the returned image; a path is not inspection. Crop
+- `task page` renders a global page of `manuscript.pdf`. Open the returned image; a path is no inspection. Crop
   figures with `--scale 3 --crop x0,y0,x1,y1` (page fractions). `--text` is a reading aid, never evidence, and
   is not a page render for the audit.
 - `task export` writes the frozen files into a new or empty directory. It replaces neither
@@ -63,11 +63,11 @@ A text anchor has exactly `source_path`, `start_line`, `end_line`, `source_diges
 `page`. Details: `reference/anchors.md`.
 
 A review output declares `scope`: `completion` (`complete`, `partial`, or `unknown`), `checked` and `outstanding`
-areas, and `limitations`, even with no findings. Never mark it complete while anything is outstanding. Declare
+areas, and `limitations`, even with no findings. Never mark it complete with anything outstanding. Declare
 `checked` only what you assessed. The audit corroborates just this task's `task read`, `task page`, and own
-`task export`; re-read anything else (another task's export, files outside the task tools) here, or name it in
-`limitations` expecting an audit gap. A graphics source cannot be read: declare the pages
-rendering it, never `outstanding`. Area shapes and audit: `reference/scope.md`.
+`task export`; re-read anything else (another task's export, outside files) here, or name it in `limitations`
+expecting an audit gap. A graphics source cannot be read: inspect and declare its rendered
+pages. Area shapes, audit, graphics: `reference/scope.md`.
 
 ## Check, then submit
 
@@ -76,7 +76,7 @@ scriptorium --json task submit ATTEMPT_ID --input-digest DIGEST --file answer.js
 scriptorium --json task submit ATTEMPT_ID --input-digest DIGEST --file answer.json
 ```
 
-`--check` validates fully, records nothing, and keeps the attempt active. When `data.valid` is false, fix each entry
+`--check` validates fully, records no output or findings, and keeps the attempt active. When `data.valid` is false, fix each entry
 of `data.validation_report.issues` and check again. Each has a `code` (`json.invalid` is often an unescaped LaTeX
 backslash; `schema.*` is shape; `evidence.*` and `scope.*` compare your locations with the frozen sources), a
 JSON-pointer `path`, a `message`, often `expected` and `actual`. A passing check is not a receipt; submit the

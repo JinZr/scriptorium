@@ -55,12 +55,14 @@ consistency, figure) does not inherit it.
 A frozen source that is not text, such as `figures/fig1.pdf` or `fig2.png`, cannot be returned by `task read` or
 `task page`, and takes no line fields.
 
-- Inspect it as rendered where the manuscript places it. `task nav --command graphics` locates the placements; render
-  those pages with `task page`, and use `--scale 3 --crop` for detail.
+- Inspect it as rendered where the manuscript places it. `task nav --command graphics` gives only the TeX location
+  and candidate paths, not the page. Locate the page from the nearby caption (`task nav --command caption`, then step
+  through `task page`, using `--text` only to find it), open the image, and use `--scale 3 --crop` for detail.
 - Declare those global pages in `checked` as `manuscript.pdf` page areas.
-- Never list the graphics file in `outstanding`: no tool can clear it, so the run could never reach `complete`.
-  Validation does accept a graphics path as a whole-file area (the audit reports it under `not_comparable`), but a
-  line range on it fails `scope.line_out_of_range`.
+- A not-yet-inspected graphics file may stay in `outstanding` with `partial`. Do not leave it there as unreadable:
+  `task read` and `task page` cannot return it, so inspect the rendered pages, and drop it from `outstanding` once
+  you have. Validation accepts a graphics path as a whole-file area (the audit reports it under `not_comparable`), but
+  a line range on it fails `scope.line_out_of_range`.
 - State in `limitations` that the standalone file was inspected only as rendered on the manuscript pages.
 
 ## Continuations
