@@ -148,13 +148,17 @@ def test_markdown_findings_quote_evidence_as_literal_code_spans():
         "tick ` and `` runs",
         "`leading and trailing`",
         "line one\nline two",
+        " x ",
+        "  ",
     ]
     evidence = [{"source_path": "main.tex", "start_line": 1, "end_line": 1, "quoted_text": quote} for quote in quotes]
     lines = ScriptoriumService._markdown_findings([_finding_record(evidence=evidence)], ("\r\n", "\r", "\n"))
 
-    assert lines[-4:] == [
+    assert lines[-6:] == [
         "  - evidence: `main.tex:1-1`: `a\\_b $x$ <!-- hidden -->`",
         "  - evidence: `main.tex:1-1`: ```tick ` and `` runs```",
         "  - evidence: `main.tex:1-1`: `` `leading and trailing` ``",
         "  - evidence: `main.tex:1-1`: `line one ⏎ line two`",
+        "  - evidence: `main.tex:1-1`: `  x  `",
+        "  - evidence: `main.tex:1-1`: `  `",
     ]

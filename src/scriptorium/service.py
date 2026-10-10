@@ -1704,7 +1704,9 @@ class ScriptoriumService:
         """Show evidence verbatim: LaTeX escapes, math, and comments must not be consumed by a Markdown renderer."""
         longest = max((len(run) for run in re.findall("`+", text)), default=0)
         fence = "`" * (longest + 1)
-        pad = " " if text.startswith("`") or text.endswith("`") else ""
+        # A renderer strips one space from both ends of a span that has spaces on both and some other content.
+        spaced = text.startswith(" ") and text.endswith(" ") and text.strip(" ") != ""
+        pad = " " if spaced or text.startswith("`") or text.endswith("`") else ""
         return f"{fence}{pad}{text}{pad}{fence}"
 
     @staticmethod
