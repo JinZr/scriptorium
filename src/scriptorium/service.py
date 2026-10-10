@@ -1654,8 +1654,28 @@ class ScriptoriumService:
         for item in items:
             finding = item["finding"]
             lines.append(f"- `{finding['id']}` — {finding['severity']} / {finding['status']}: {finding['title']}")
+            lines.append(
+                f"  - category: {finding['category']}; role: {finding['role']}; confidence: {finding['confidence']}"
+            )
+            lines.append(f"  - claim: {finding['claim']}")
             if finding.get("affected_claim"):
                 lines.append(f"  - affected claim: {finding['affected_claim']}")
+            if finding.get("consequence"):
+                lines.append(f"  - consequence: {finding['consequence']}")
+            lines.append(f"  - explanation: {finding['explanation']}")
+            lines.append(f"  - suggested action: {finding['suggested_action']}")
+            lines.extend(ScriptoriumService._markdown_finding_evidence(finding["evidence"]))
+        return lines
+
+    @staticmethod
+    def _markdown_finding_evidence(evidence: list[dict[str, Any]]) -> list[str]:
+        lines = []
+        for anchor in evidence:
+            line = f"  - evidence: `{ScriptoriumService._markdown_location(anchor)}`"
+            if quoted_text := anchor.get("quoted_text"):
+                # A quote spanning several source lines stays one list item; ⏎ marks each line break.
+                line += ": " + " ⏎ ".join(quoted_text.splitlines())
+            lines.append(line)
         return lines
 
     @staticmethod
