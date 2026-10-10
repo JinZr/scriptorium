@@ -65,8 +65,11 @@ def links_claims(schema):
     return "verdict" in schema["properties"]
 
 
-def link_claims(output):
-    """Rewrite a claim-restating substantive output into the claim_index shape, adding a consistent verdict."""
+def link_claims(output, *, prior_high=False):
+    """Rewrite a claim-restating substantive output into the claim_index shape, adding a consistent verdict.
+
+    prior_high says whether the task's earlier accepted outputs already hold a major or blocker finding.
+    """
     checks = output.get("claim_checks", [])
     if any("claim" in check for check in checks):
         inventory = output.get("claim_inventory") or claim_inventory(checks)
@@ -83,7 +86,9 @@ def link_claims(output):
         inventory = [{key: value for key, value in entry.items() if key != "check_indices"} for entry in inventory]
         output = {**output, "claim_checks": checks, "claim_inventory": inventory}
     if "verdict" not in output:
-        high = any(finding.get("severity") in {"blocker", "major"} for finding in output.get("findings", []))
+        high = prior_high or any(
+            finding.get("severity") in {"blocker", "major"} for finding in output.get("findings", [])
+        )
         output = {
             **output,
             "verdict": {
@@ -121,7 +126,11 @@ def submit(service, claim_data, output):
             ],
         }
     if links_claims(claim_data["schema"]):
-        output = link_claims(output)
+        prior_high = any(
+            finding.task_id == claim_data["task"].id and finding.severity.value in {"blocker", "major"}
+            for finding in service.database.list_findings(claim_data["task"].run_id)
+        )
+        output = link_claims(output, prior_high=prior_high)
     elif "claim_inventory" in claim_data["schema"]["required"] and "claim_inventory" not in output:
         output = {**output, "claim_inventory": claim_inventory(output["claim_checks"])}
     return asyncio.run(

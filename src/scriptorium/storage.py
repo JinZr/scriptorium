@@ -31,7 +31,7 @@ from scriptorium.domain import (
     validate_task_transition,
 )
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 
 
 _MIGRATION_1 = """
@@ -271,6 +271,14 @@ INSERT INTO schema_migrations (version, applied_at) VALUES (6, CURRENT_TIMESTAMP
 COMMIT;
 """
 
+# Findings recorded before affected_claim, and substantive findings, keep a null affected claim.
+_MIGRATION_7 = """
+BEGIN IMMEDIATE;
+ALTER TABLE findings ADD COLUMN affected_claim TEXT;
+INSERT INTO schema_migrations (version, applied_at) VALUES (7, CURRENT_TIMESTAMP);
+COMMIT;
+"""
+
 
 class StorageError(RuntimeError):
     pass
@@ -349,7 +357,7 @@ class Database:
         # executescript commits an open transaction, so run each fixed migration statement inside the caller's
         # write transaction, after rechecking a version that another process may already have advanced.
         version = connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0]
-        for target, migration in ((4, _MIGRATION_4), (5, _MIGRATION_5), (6, _MIGRATION_6)):
+        for target, migration in ((4, _MIGRATION_4), (5, _MIGRATION_5), (6, _MIGRATION_6), (7, _MIGRATION_7)):
             if version >= target:
                 continue
             for statement in migration.split(";"):
@@ -1024,9 +1032,9 @@ class Database:
                     """
                     INSERT INTO findings (
                         id, run_id, task_id, attempt_id, fingerprint, role, category, severity, title,
-                        claim, evidence_json, explanation, suggested_action, confidence, consequence, status,
-                        created_at, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        claim, evidence_json, explanation, suggested_action, confidence, consequence,
+                        affected_claim, status, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         finding.id,
@@ -1044,6 +1052,7 @@ class Database:
                         finding.suggested_action,
                         finding.confidence,
                         finding.consequence,
+                        finding.affected_claim,
                         finding.status.value,
                         finding.created_at,
                         finding.updated_at,
@@ -1684,6 +1693,7 @@ class Database:
             confidence=row["confidence"],
             # Historical SDK databases stay at their original schema without this column.
             consequence=row["consequence"] if "consequence" in row.keys() else None,
+            affected_claim=row["affected_claim"] if "affected_claim" in row.keys() else None,
             status=FindingStatus(row["status"]),
             created_at=row["created_at"],
             updated_at=row["updated_at"],

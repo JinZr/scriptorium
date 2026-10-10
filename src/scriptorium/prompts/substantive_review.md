@@ -40,8 +40,8 @@ in an earlier accepted attempt need not be repeated.
 Decide the verdict before listing findings. Set verdict.recommendation to accept, minor_revision, major_revision, or
 reject, and make verdict.decisive_questions the one to three questions whose answers would change the recommendation;
 when the review has major or blocker findings, they are the questions those findings answer. Reject or
-major_revision rests on at least one major or blocker finding of this review, and accept allows none. A blocker
-finding must be linked from a check of a headline claim.
+major_revision rests on at least one major or blocker finding of this review, and accept or minor_revision allows
+none. A blocker finding must be linked from a check of a headline claim.
 
 Phrase each critical question so the reported countercheck can answer it. A check that only confirms repeated
 numbers supports that narrow consistency question, not a broader scientific conclusion. If a material link in the

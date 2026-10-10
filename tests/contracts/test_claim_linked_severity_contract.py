@@ -134,6 +134,10 @@ def test_linked_output_accepts_indexed_checks_and_explained_unchecked_claims() -
             "a blocker finding needs a headline claim",
         ),
         ({"findings": [_finding("major")], "recommendation": "accept"}, "accept verdict cannot be submitted"),
+        (
+            {"findings": [_finding("blocker")], "recommendation": "minor_revision"},
+            "minor_revision verdict cannot be submitted",
+        ),
     ],
 )
 def test_linked_output_rejects_broken_links_and_unsupported_severity(changes, message) -> None:

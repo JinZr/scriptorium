@@ -1613,6 +1613,18 @@ class ScriptoriumService:
             raise InfrastructureError(f"patched snapshot does not match immutable diff {patch.diff_digest}")
 
     @staticmethod
+    def _markdown_findings(items: list[dict[str, Any]]) -> list[str]:
+        lines = ["", "## Findings", ""]
+        if not items:
+            return [*lines, "- None"]
+        for item in items:
+            finding = item["finding"]
+            lines.append(f"- `{finding['id']}` — {finding['severity']} / {finding['status']}: {finding['title']}")
+            if finding.get("affected_claim"):
+                lines.append(f"  - affected claim: {finding['affected_claim']}")
+        return lines
+
+    @staticmethod
     def _claim_check_report(task_id: str, attempt_id: str, output: ScientificReviewOutput) -> dict[str, Any]:
         entry: dict[str, Any] = {
             "task_id": task_id,
@@ -1822,13 +1834,7 @@ class ScriptoriumService:
                 )
         else:
             lines.append("- None")
-        lines.extend(["", "## Findings", ""])
-        if plain["findings"]:
-            for item in plain["findings"]:
-                finding = item["finding"]
-                lines.append(f"- `{finding['id']}` — {finding['severity']} / {finding['status']}: {finding['title']}")
-        else:
-            lines.append("- None")
+        lines.extend(ScriptoriumService._markdown_findings(plain["findings"]))
         lines.extend(markdown_decision_stats(plain["decision_stats"]))
         lines.extend(["", "## Patches", ""])
         if plain["patches"]:

@@ -760,7 +760,7 @@ class LinkedClaim(StrictModel):
 class Verdict(StrictModel):
     recommendation: Literal["accept", "minor_revision", "major_revision", "reject"] = Field(
         description="Decided before listing findings; reject or major_revision rests on at least one major or "
-        "blocker finding of this review, and accept allows none."
+        "blocker finding of this review, and accept or minor_revision allows none."
     )
     decisive_questions: list[Annotated[str, Field(min_length=1)]] = Field(
         min_length=1,
@@ -805,10 +805,12 @@ class LinkedScientificReviewOutput(RatedScientificReviewOutput):
             for index, finding in enumerate(self.findings)
         ):
             raise ValueError("a blocker finding needs a headline claim: link it from a check of a headline claim")
-        if self.verdict.recommendation == "accept" and any(
+        if self.verdict.recommendation in {"accept", "minor_revision"} and any(
             finding.severity in _HIGH_SEVERITIES for finding in self.findings
         ):
-            raise ValueError("an accept verdict cannot be submitted with a major or blocker finding")
+            raise ValueError(
+                f"a {self.verdict.recommendation} verdict cannot be submitted with a major or blocker finding"
+            )
         return self
 
 

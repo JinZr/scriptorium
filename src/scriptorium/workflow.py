@@ -47,6 +47,7 @@ from .schemas import (
     DEFAULT_EVIDENCE_ANCHOR_CONTRACT,
     SCHEMA_MODELS,
     SEVERITY_RUBRIC,
+    ClaimedFinding,
     ClaimedReviewOutput,
     EvidenceAnchorContract,
     EvidenceAnchorMap,
@@ -499,6 +500,8 @@ class Armarius:
                 suggested_action=candidate.suggested_action,
                 confidence=candidate.confidence,
                 consequence=consequence,
+                # The affected claim describes the concern; it stays out of the fingerprint so identity is unchanged.
+                affected_claim=candidate.affected_claim if isinstance(candidate, ClaimedFinding) else None,
             )
             stored = next((item for item in all_findings if item.fingerprint == fingerprint), None)
             if stored is None:
@@ -1282,6 +1285,7 @@ class Armarius:
                         "suggested_action": finding.suggested_action,
                         "confidence": finding.confidence,
                         **({} if finding.consequence is None else {"consequence": finding.consequence}),
+                        **({} if finding.affected_claim is None else {"affected_claim": finding.affected_claim}),
                         "status": finding.status.value,
                     }
                     for finding in recorded_findings
@@ -1638,8 +1642,11 @@ class Armarius:
         recommendation = output.verdict.recommendation
         if recommendation in {"reject", "major_revision"} and high.isdisjoint(severities):
             message = f"A {recommendation} verdict requires at least one major or blocker finding from this review."
-        elif recommendation == "accept" and not high.isdisjoint(severities):
-            message = "An accept verdict cannot stand with a major or blocker finding from this review."
+        elif recommendation in {"accept", "minor_revision"} and not high.isdisjoint(severities):
+            message = (
+                f"A {recommendation} verdict cannot stand with a major or blocker finding from this review; use "
+                "major_revision or reject."
+            )
         else:
             return []
         return [
@@ -1647,7 +1654,7 @@ class Armarius:
                 "verdict.inconsistent",
                 "/verdict/recommendation",
                 message,
-                expected={"major_or_blocker_findings": recommendation != "accept"},
+                expected={"major_or_blocker_findings": recommendation in {"reject", "major_revision"}},
                 actual=recommendation,
             )
         ]
