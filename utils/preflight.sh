@@ -128,7 +128,12 @@ if require_tool kpsewhich "part of TeX Live; needed to identify TeX installation
             [ "${entry#/}" = "$entry" ] && continue
             absolute_count=$((absolute_count + 1))
             [ -z "$first_root" ] && first_root="$entry"
-            trimmed="$(printf '%s' "$entry" | sed 's#/*$##')"
+            # Canonicalize like Path.resolve() so '/tmp/..' or a symlink to '/' is caught.
+            resolved="$entry"
+            if [ "$python_ok" = 1 ]; then
+                resolved="$("$PYTHON" -c 'import os, sys; print(os.path.realpath(sys.argv[1]))' "$entry" 2>/dev/null || printf '%s' "$entry")"
+            fi
+            trimmed="$(printf '%s' "$resolved" | sed 's#/*$##')"
             [ -z "$trimmed" ] && root_entry="$entry"
         done
         if [ "$absolute_count" -eq 0 ]; then
@@ -173,7 +178,18 @@ smoke_compile() {
     rm -f "$workdir"/smoke.pdf "$workdir"/smoke.fls "$workdir"/smoke.fdb_latexmk "$workdir"/smoke.xdv
     (cd "$workdir" && latexmk -norc "$flag" -g -recorder -interaction=nonstopmode -halt-on-error smoke.tex \
         >"$workdir/$engine.log" 2>&1) || return 1
-    [ -s "$workdir/smoke.pdf" ] && [ -s "$workdir/smoke.fls" ] && [ -s "$workdir/smoke.fdb_latexmk" ]
+    [ -s "$workdir/smoke.pdf" ] && [ -s "$workdir/smoke.fls" ] && [ -s "$workdir/smoke.fdb_latexmk" ] || return 1
+    # Scriptorium parses this database and accepts only this header and an engine rule.
+    local header
+    header="$(head -n 1 "$workdir/smoke.fdb_latexmk")"
+    if [ "$header" != "# Fdb version 4" ]; then
+        echo "unsupported latexmk dependency database header: $header (need '# Fdb version 4'; update latexmk)" >>"$workdir/$engine.log"
+        return 1
+    fi
+    if ! grep -q "^\[\"$engine\"\]" "$workdir/smoke.fdb_latexmk"; then
+        echo "latexmk dependency database has no $engine rule" >>"$workdir/$engine.log"
+        return 1
+    fi
 }
 
 if [ "$RUN_COMPILE" = 0 ]; then
@@ -250,13 +266,27 @@ if [ "$installed_in_python" = 1 ]; then
         # installation (its base or user scripts directory).
         entry_owner="$("$PYTHON" - "$scriptorium_path" <<'PY' 2>/dev/null
 import os, sys, sysconfig
-target_dir = os.path.dirname(os.path.realpath(sys.argv[1]))
+target = os.path.realpath(sys.argv[1])
+# pip writes the installing interpreter into the shebang; that identifies the
+# owner even when several Pythons share one user scripts directory.
+try:
+    with open(target, "rb") as handle:
+        first = handle.readline().decode("utf-8", "replace").strip()
+except OSError:
+    first = ""
+words = first[2:].split() if first.startswith("#!") else []
+interpreter = words[0] if words else ""
+if interpreter and os.path.basename(interpreter) not in ("sh", "bash", "env"):
+    same = os.path.realpath(interpreter) == os.path.realpath(sys.executable)
+    print("selected" if same else "other")
+    raise SystemExit
+# Fallback for wrapper shebangs: the entry point must live in a scripts directory of this interpreter.
 dirs = [sysconfig.get_path("scripts")]
 try:
     dirs.append(sysconfig.get_path("scripts", sysconfig.get_preferred_scheme("user")))
 except (AttributeError, KeyError):
     pass
-print("selected" if any(d and os.path.realpath(d) == target_dir for d in dirs) else "other")
+print("selected" if any(d and os.path.realpath(d) == os.path.dirname(target) for d in dirs) else "other")
 PY
 )"
         if [ "$entry_owner" != "selected" ]; then
