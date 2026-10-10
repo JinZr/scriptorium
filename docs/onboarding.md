@@ -43,7 +43,7 @@ python -m pip install /path/to/scriptorium
 
 - Claude Code：`~/.claude/skills/scriptorium/`
 - Codex：`~/.codex/skills/scriptorium/`
-- Antigravity：按其文档的 skills 位置放置同一目录
+- Antigravity（命令行工具名为 `agy`）：按其文档的 skills 位置放置同一目录
 
 重启客户端后，在对话里提到 Scriptorium 时它应能引用这份 skill。
 

@@ -184,7 +184,7 @@ fi
 
 # --- Host model clients -----------------------------------------------------
 host_found=0
-for host in codex claude; do
+for host in codex claude agy; do
     host_path="$(command -v "$host" 2>/dev/null || true)"
     if [ -n "$host_path" ]; then
         info "host_cli" "$host at $host_path"
@@ -192,7 +192,7 @@ for host in codex claude; do
     fi
 done
 if [ "$host_found" = 0 ]; then
-    warn "host_cli" "no codex or claude CLI in PATH; Scriptorium needs one of Codex, Claude Code, or Antigravity to run reviews"
+    warn "host_cli" "no codex, claude, or agy CLI in PATH; Scriptorium needs one of Codex, Claude Code, or Antigravity (agy) to run reviews"
 fi
 
 skill_file="$REPO_ROOT/skills/scriptorium/SKILL.md"
