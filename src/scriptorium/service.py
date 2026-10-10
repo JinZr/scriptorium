@@ -44,6 +44,8 @@ from .manuscript import (
     QUANTITY_COMMANDS,
     TABLE_ENVIRONMENTS,
     ManuscriptManager,
+    export_files,
+    export_root,
     page_text,
     render_page_view,
 )
@@ -56,6 +58,7 @@ from .schemas import (
 from .storage import ConflictError, Database, NotFoundError as StorageNotFoundError, StorageError
 from .tool_output import (
     REPORT_PARTS,
+    bound_export,
     bound_nav,
     bound_read,
     bound_search,
@@ -926,6 +929,39 @@ class ScriptoriumService:
         )
         return response
 
+    def export_task(self, attempt_id: str, directory: str | Path):
+        with self._retrieval_operation(attempt_id, "task export"):
+            return self._export_task(attempt_id, directory)
+
+    def _export_task(self, attempt_id: str, directory: str | Path):
+        attempt, task, bundle, files = self._readable_task(attempt_id)
+        root = export_root(directory)
+        names = self._export_names(bundle, files)
+        listing = [{"path": name, "digest": files[name]["digest"]} for name in names]
+        response = bound_export(attempt.id, str(root), listing, sum(files[name]["size"] for name in names))
+
+        def record() -> None:
+            payload = {"directory": str(root), "bundle_digest": attempt.bundle_digest, "files": listing}
+            self._record_access(task.run_id, attempt.id, "export", payload)
+
+        export_files(root, names, lambda name: self._frozen_bytes(bundle, files, name), record)
+        return response
+
+    @staticmethod
+    def _export_names(bundle, files) -> list[str]:
+        names = {source.read_path for source in bundle.anchor_map.sources}
+        names.update(name for name in (*_BUNDLE_METADATA, "manuscript.pdf") if name in files)
+        if not names <= files.keys():
+            raise InfrastructureError("a source is missing from the frozen bundle index")
+        return sorted(names)
+
+    def _frozen_bytes(self, bundle, files, name: str) -> bytes:
+        path = self.armarius._verify_retrieval_file(bundle.workspace, files, name)
+        data = path.read_bytes()
+        if len(data) != files[name]["size"] or ArtifactStore.digest_bytes(data) != files[name]["digest"]:
+            raise InfrastructureError(f"frozen bundle file changed during export: {name}")
+        return data
+
     def _record_access(self, run_id: str, attempt_id: str, operation: str, payload: dict[str, Any]) -> None:
         self._storage(
             self.database.append_event,
@@ -1086,6 +1122,20 @@ class ScriptoriumService:
                 missing.append({"start_line": cursor, "end_line": span["end_line"]})
         return missing
 
+    @staticmethod
+    def _exported_sources(events: list[Event], read_paths: dict[str, Any]) -> tuple[int, set[str]]:
+        count = 0
+        exported: set[str] = set()
+        for event in events:
+            if event.event_type != "tool.export":
+                continue
+            count += 1
+            for item in event.payload["files"]:
+                source = read_paths.get(item["path"])
+                if source is not None and item["digest"] == source.source_digest:
+                    exported.add(source.source_path)
+        return count, exported
+
     @classmethod
     def _review_coverage_audit(cls, scope: dict[str, Any], events: list[Event], sources) -> dict[str, Any]:
         source_index = {source.source_path: source for source in sources}
@@ -1130,6 +1180,12 @@ class ScriptoriumService:
                 declared_lines.setdefault(path, []).append((start, end))
             else:
                 not_comparable.append(area)
+        missing = [
+            {"source_path": path, **span}
+            for path, lines in sorted(declared_lines.items())
+            for span in cls._missing_line_spans(lines, read_lines.get(path, set()))
+        ]
+        export_count, exported = cls._exported_sources(events, read_paths)
         return {
             "read_lines": [
                 {"source_path": path, "ranges": cls._line_spans(lines)}
@@ -1140,11 +1196,11 @@ class ScriptoriumService:
                 {"source_path": path, "lines": sorted(lines)} for path, lines in sorted(search_matches.items()) if lines
             ],
             "pages_returned": sorted(pages),
-            "declared_without_task_read": [
-                {"source_path": path, **span}
-                for path, lines in sorted(declared_lines.items())
-                for span in cls._missing_line_spans(lines, read_lines.get(path, set()))
-            ],
+            "declared_without_task_read": missing,
+            "exports": export_count,
+            "exported_sources": sorted(exported),
+            "exported": [span for span in missing if span["source_path"] in exported],
+            "declared_without_access": [span for span in missing if span["source_path"] not in exported],
             "declared_without_task_page": sorted(declared_pages - pages),
             "not_comparable": not_comparable,
         }
@@ -1191,6 +1247,7 @@ class ScriptoriumService:
         events = self._storage(self.database.list_events, run_id)
         external_run = run_view["run"].frozen_config.get("execution") == "external"
         access_counts = {}
+        export_counts = Counter(event.entity_id for event in events if event.event_type == "tool.export")
         for event in events:
             if event.event_type in {"tool.read", "tool.search", "tool.page", "tool.nav", "tool.page_text"}:
                 counts = access_counts.setdefault(event.entity_id, dict.fromkeys(_RETURN_KINDS, 0))
@@ -1222,6 +1279,7 @@ class ScriptoriumService:
                             "returns": (
                                 access_counts.get(attempt.id, dict.fromkeys(_RETURN_KINDS, 0)) if external_run else None
                             ),
+                            "exports": export_counts.get(attempt.id, 0) if external_run else None,
                         }
                     )
                 if task.stage == "review" and attempt.status == AttemptStatus.COMPLETED:
@@ -1612,10 +1670,16 @@ class ScriptoriumService:
             if audit["pages_returned"]:
                 numbers = ", ".join(str(number) for number in audit["pages_returned"])
                 lines.append(f"  - task page returned paths: {numbers}")
+            if audit["exports"]:
+                lines.append(f"  - task export recorded {audit['exports']} time(s); exported files are not reads")
             for area in audit["declared_without_task_read"]:
+                state = (
+                    "exported but not returned by task read"
+                    if area in audit["exported"]
+                    else "without task read return"
+                )
                 lines.append(
-                    f"  - declared checked without task read return: "
-                    f"`{area['source_path']}:{area['start_line']}-{area['end_line']}`"
+                    f"  - declared checked {state}: `{area['source_path']}:{area['start_line']}-{area['end_line']}`"
                 )
             for page in audit["declared_without_task_page"]:
                 lines.append(f"  - declared checked without task page return: `manuscript.pdf:page {page}`")
@@ -1685,7 +1749,8 @@ class ScriptoriumService:
                     lines.append(
                         f"- `{item['attempt_id']}` / {item['status']}: "
                         f"read {counts['read']}, search {counts['search']}, page {counts['page']}, "
-                        f"nav {counts.get('nav', 0)}, page text {counts.get('page_text', 0)}"
+                        f"nav {counts.get('nav', 0)}, page text {counts.get('page_text', 0)}, "
+                        f"export {item.get('exports', 0)}"
                     )
         else:
             lines.append("- None")

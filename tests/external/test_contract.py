@@ -700,3 +700,89 @@ def test_duplicate_start_on_a_real_project_is_refused_until_the_first_run_ends(t
         service.cancel_run(run_id, "Superseded")
         restarted = asyncio.run(service.start_run("HEAD", "full"))["run"]
         assert restarted.id != run_id
+
+
+def _scoped_review_json(checked: list[dict]) -> str:
+    output = json.loads(_review_json("Checked the declared sources."))
+    output["scope"] = {"completion": "complete", "checked": checked, "outstanding": [], "limitations": []}
+    return json.dumps(output)
+
+
+def test_export_writes_the_frozen_bundle_and_the_audit_separates_exported_from_read(tmp_path: Path) -> None:
+    repo = _repo(tmp_path / "paper")
+    run_id, task_id = _start(repo)
+    destination = tmp_path / "exported"
+    with ScriptoriumService(repo) as service:
+        claim = service.claim_task(task_id, "codex", "model", "max", "session", "host")
+        attempt_id = claim["attempt"].id
+        response = service.export_task(attempt_id, destination)
+        expected = {
+            "manifest.json",
+            "manuscript.pdf",
+            "navigation.json",
+            "source-map.json",
+            "sources/main.tex",
+            "sources/supplement.tex",
+        }
+        assert response["directory"] == str(destination.resolve())
+        assert {item["path"] for item in response["files"]} == expected and not response["listing_truncated"]
+        assert "only task command" in response["note"] and "task read --anchor" in response["note"]
+        bundle = Path(claim["bundle_path"])
+        on_disk = {path.relative_to(destination).as_posix() for path in destination.rglob("*") if path.is_file()}
+        assert on_disk == expected
+        for item in response["files"]:
+            exported = destination / item["path"]
+            assert exported.read_bytes() == (bundle / item["path"]).read_bytes()
+            assert ArtifactStore.digest_file(exported) == item["digest"]
+            assert exported.stat().st_mode & 0o777 == 0o444
+        assert (destination / "sources/main.tex").read_bytes() == (repo / "main.tex").read_bytes()
+        events = [e for e in service.database.list_events(run_id) if e.event_type == "tool.export"]
+        assert len(events) == 1 and events[0].entity_id == attempt_id
+        assert events[0].payload["files"] == sorted(response["files"], key=lambda item: item["path"])
+        # A used directory is never overwritten, and a refused export records nothing.
+        with pytest.raises(ConfigurationError, match="empty directory"):
+            service.export_task(attempt_id, destination)
+        empty = tmp_path / "empty"
+        empty.mkdir()
+        service.export_task(attempt_id, empty)
+        assert len([e for e in service.database.list_events(run_id) if e.event_type == "tool.export"]) == 2
+        # Reading one source through the CLI moves it from exported to read; the other stays exported.
+        service.read_task(attempt_id, "main.tex", 1, 100, 0, 8000)
+        scope = _scoped_review_json([{"source_path": "main.tex"}, {"source_path": "supplement.tex"}])
+        asyncio.run(service.submit_task(attempt_id, claim["input_digest"], scope))
+        report = service.render_report(run_id, "json")
+        audit = report["review_coverage_audit"][0]
+        assert [item["source_path"] for item in audit["read_lines"]] == ["main.tex"]
+        assert audit["exported"] == [{"source_path": "supplement.tex", "start_line": 1, "end_line": 1}]
+        assert audit["declared_without_access"] == []
+        assert audit["declared_without_task_read"] == audit["exported"]
+        assert audit["exports"] == 2 and audit["exported_sources"] == ["main.tex", "supplement.tex"]
+        assert report["review_tool_access"][0]["exports"] == 2
+        markdown = service.render_report(run_id, "markdown")
+        assert "exported but not returned by task read: `supplement.tex:1-1`" in markdown
+        assert "export 2" in markdown
+        with pytest.raises(StateError, match="active attempt"):
+            service.export_task(attempt_id, tmp_path / "after")
+        assert not (tmp_path / "after").exists()
+
+
+def test_json_cli_export_command(tmp_path: Path) -> None:
+    repo = _repo(tmp_path / "paper")
+    _, task_id = _start(repo)
+    destination = tmp_path / "cli-export"
+
+    def command(*args: str):
+        result = subprocess.run(
+            [sys.executable, "-m", "scriptorium", "--json", *args], cwd=repo, capture_output=True, text=True
+        )
+        return result.returncode, json.loads(result.stdout)
+
+    claim_args = ["task", "claim", task_id, "--client", "codex", "--model", "m", "--effort", "max"]
+    claim_args += ["--session-id", "s", "--session-source", "host"]
+    attempt_id = command(*claim_args)[1]["data"]["attempt"]["id"]
+    code, exported = command("task", "export", attempt_id, "--dir", str(destination))
+    assert code == 0 and exported["data"]["file_count"] == 6
+    assert len(json.dumps(exported, ensure_ascii=False).encode()) <= 7000
+    assert (destination / "manuscript.pdf").stat().st_mode & 0o777 == 0o444
+    code, refused = command("task", "export", attempt_id, "--dir", str(destination))
+    assert code == 2 and refused["error"]["code"] == "configuration_error"
