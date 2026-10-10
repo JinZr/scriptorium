@@ -621,7 +621,7 @@ class ManuscriptManager:
         return tuple(sources)
 
     def _scan_closure(self, root: Path, main: str) -> tuple[set[Path], set[Path]]:
-        """Return the source closure and the files reached only as verbatim text, which are frozen but never parsed."""
+        """Return the source closure and every file some verbatim-style command shows literally."""
         # Pause each parent at an input so child graphicspath declarations take effect in order.
         pending = [iter([(Path(main), False)])]
         graphics_paths: list[Path] = []
@@ -647,7 +647,7 @@ class ManuscriptManager:
             traversed.add(relative)
             if (root / relative).suffix.lower() == ".tex":
                 pending.append(self._source_dependencies(root, relative, graphics_paths, bibliography_fallback))
-        return included, verbatim - traversed
+        return included, verbatim
 
     def scan_project_sources(self, snapshot: Path, manuscript: ManuscriptConfig) -> tuple[SourceFile, ...]:
         roots = [self._normalized_relative(snapshot.resolve(), Path(entry)) for entry in manuscript.entrypoints]
@@ -1006,6 +1006,11 @@ class ManuscriptManager:
         engine_output = self._normalized_relative(workspace, main.with_suffix(output_suffix))
         if main_input not in inputs or engine_output not in outputs:
             raise InfrastructureError("LaTeX recorder does not identify the main input and engine output")
+        for literal in sorted(literal_inputs & outputs):
+            raise InfrastructureError(
+                f"A verbatim input must not be a file the compiler writes: {literal.as_posix()}. "
+                "Show a committed file that the build does not regenerate."
+            )
         helper_inputs, derivations = self._helper_evidence(workspace, main, texmf_roots, inputs, originals)
         inputs.update(helper_inputs)
         compiler_inputs = self._compiler_inputs(
