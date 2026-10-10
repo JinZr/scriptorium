@@ -252,3 +252,32 @@ def test_affected_claim_is_stored_reported_and_carried_into_a_continuation(tmp_p
         asyncio.run(service.continue_review(run.id, first["task"].id))
         second = claim(service, run.id, AgentRole.COPYEDIT)
         assert second["prompt"].count('"affected_claim":') == 1
+
+
+def test_a_duplicate_finding_fills_a_missing_affected_claim_once(tmp_path):
+    repo = make_repository(tmp_path, roles=("copyedit",))
+    with ScriptoriumService(repo, manuscript_manager=PdfBuildingManuscriptManager(repo)) as service:
+        run = asyncio.run(service.start_run("HEAD", "quick"))["run"]
+        first = claim(service, run.id, AgentRole.COPYEDIT)
+        minor = {**review_finding(first), "severity": "minor", "title": "Minor wording"}
+        del minor["affected_claim"]
+        submit(service, first, {"summary": "Checked the text.", "findings": [minor], "scope": _PARTIAL})
+        (original,) = service.database.list_findings(run.id)
+        assert original.affected_claim is None
+        asyncio.run(service.continue_review(run.id, first["task"].id))
+        second = claim(service, run.id, AgentRole.COPYEDIT)
+        named = {**minor, "affected_claim": "The headline accuracy claim."}
+        complete = {"completion": "complete", "checked": [_PAGE], "outstanding": [], "limitations": []}
+        submit(service, second, {"summary": "Checked the page.", "findings": [named], "scope": complete})
+
+        (filled,) = service.database.list_findings(run.id)
+        assert (filled.id, filled.fingerprint) == (original.id, original.fingerprint)
+        assert filled.affected_claim == "The headline accuracy claim."
+        events = [event.event_type for event in service.database.list_events(run.id)]
+        assert events.count("finding.created") == 1
+        assert events.count("finding.duplicate") == 1
+
+        assert (
+            service.database.fill_finding_affected_claim(filled.id, "A later claim.").affected_claim
+            == "The headline accuracy claim."
+        )

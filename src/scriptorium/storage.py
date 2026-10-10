@@ -1088,6 +1088,15 @@ class Database:
             ).fetchone()
             return self._finding_from_row(row)
 
+    def fill_finding_affected_claim(self, finding_id: str, affected_claim: str) -> Finding:
+        """Set a finding's affected claim only while it is still null; the first non-null value is kept."""
+        with self.transaction() as connection:
+            connection.execute(
+                "UPDATE findings SET affected_claim = ? WHERE id = ? AND affected_claim IS NULL",
+                (affected_claim, finding_id),
+            )
+        return self.get_finding(finding_id)
+
     def get_finding(self, finding_id: str) -> Finding:
         row = self.connection.execute("SELECT * FROM findings WHERE id = ?", (finding_id,)).fetchone()
         if row is None:

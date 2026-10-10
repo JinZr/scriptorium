@@ -522,6 +522,9 @@ class Armarius:
                 all_findings.append(stored)
                 if has_prior_review and stored.attempt_id == outcome.attempt.id:
                     previous_findings.append(stored)
+            if stored.affected_claim is None and finding.affected_claim is not None:
+                # A duplicate that names the affected claim completes the stored row; the fingerprint is unchanged.
+                stored = self.database.fill_finding_affected_claim(stored.id, finding.affected_claim)
             if (
                 stored.id != finding.id
                 and (stored.task_id != outcome.task.id or stored.attempt_id != outcome.attempt.id)
