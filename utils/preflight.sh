@@ -277,19 +277,22 @@ except OSError:
 words = first[2:].split() if first.startswith("#!") else []
 interpreter = words[0] if words else ""
 if interpreter and os.path.basename(interpreter) not in ("sh", "bash", "env"):
-    # Compare environments, not binaries: two venvs made from one base Python
-    # share a realpath but have different sys.prefix values.
+    # Same installation means same environment prefix and same interpreter
+    # binary: venvs from one base Python differ in prefix, system Python
+    # versions under one prefix differ in executable.
     import subprocess
+    def identity(prefix, executable):
+        return (os.path.realpath(prefix), os.path.realpath(executable))
     try:
         probe = subprocess.run(
-            [interpreter, "-c", "import sys; print(sys.prefix)"],
+            [interpreter, "-c", "import sys; print(sys.prefix); print(sys.executable)"],
             capture_output=True, text=True, timeout=30, check=False,
         )
-        other_prefix = probe.stdout.strip() if probe.returncode == 0 else None
+        lines = probe.stdout.splitlines() if probe.returncode == 0 else []
+        other = identity(lines[0], lines[1]) if len(lines) >= 2 else None
     except (OSError, subprocess.SubprocessError):
-        other_prefix = None
-    same = other_prefix is not None and os.path.realpath(other_prefix) == os.path.realpath(sys.prefix)
-    print("selected" if same else "other")
+        other = None
+    print("selected" if other == identity(sys.prefix, sys.executable) else "other")
     raise SystemExit
 # Fallback for wrapper shebangs: the entry point must live in a scripts directory of this interpreter.
 dirs = [sysconfig.get_path("scripts")]
