@@ -27,6 +27,13 @@ UTF-8 bytes, including the envelope. Requested line, character, and match counts
 - `task search` pages with `--cursor`; follow `next_command` to see every match.
 - `task page --text` pages its text layer with `--offset` and the returned `--text-digest`.
 
+## Submission diagnostics
+
+- `task submit` and `task submit --check` responses are not bounded. A long `data.validation_report.issues` list
+  can exceed what the host displays.
+- If the host might truncate it, redirect the response to a file (`... --check > check.json`) and read every issue
+  from that file before editing the answer.
+
 ## Commands
 
 - Run every `next_command` unchanged. If you use a wrapper, replace only the executable.

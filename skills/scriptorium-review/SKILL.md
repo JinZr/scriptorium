@@ -25,12 +25,13 @@ scriptorium --json run continue RUN_ID --task TASK_ID
 scriptorium --json run retry RUN_ID --task TASK_ID
 ```
 
-Task responses are at most 7,000 UTF-8 bytes. Run each `next_command` unchanged until it is null and concatenate the
-`text` fragments in offset order without separators. Edge cases such as long lines: `reference/fragments.md`.
+Claim, show, read, search, nav, page, and export responses are at most 7,000 UTF-8 bytes; submission diagnostics are
+not. Run each `next_command` unchanged until null and concatenate `text` fragments in offset order without
+separators. Edge cases: `reference/fragments.md`.
 
 ## Claim
 
-Claim a task that `run status` offers, with the model and effort the host actually selected. `--session-source host`
+Claim an offered task with the model and effort the host actually selected. `--session-source host`
 means the ID came from the host's own conversation state. A subagent, or any session without a host session ID,
 claims with `declared` and says provenance is unconfirmed; never invent a host ID. Verification still needs a
 conversation distinct from review and revision; a declared or reused ID cannot pass it.
@@ -39,7 +40,7 @@ conversation distinct from review and revision; a declared or reused ID cannot p
 
 Claim and plain `task show` return `input_digest` and a command per input. Read the prompt, the schema (parse it as
 JSON), and the source map (`sources` with paths and digests). When `data.inputs.example` is present, run its
-command: a placeholder output frozen with the task and checked against its schema. Copy its shape and replace all of its content.
+command: a placeholder output frozen with the task and checked against its schema. Copy its shape; replace all its content.
 `--part brief` returns the author's brief, if any. The frozen prompt defines the role's method, including claim
 tracing, counterchecks, recomputation, and verdict rules; follow it.
 
