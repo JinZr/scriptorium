@@ -71,6 +71,7 @@ BENCHMARK_SOURCE_FILES = (
     "egs/peerreviewbench/requirements.txt",
     "pyproject.toml",
     "skills/scriptorium/SKILL.md",
+    "skills/scriptorium-review/SKILL.md",
 )
 
 

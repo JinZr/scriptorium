@@ -109,7 +109,7 @@ An export is for reading convenience. It does not change what counts as evidence
 
 `task submit --check` validates the same input against the attempt's frozen schema, evidence map, task context and verifier-session rule without storing it. It requires an active attempt and the attempt's input digest, records no output or validation-report artifact, findings or attempt status, and leaves the attempt claimable for submission. It appends one `tool.submit_check` event with the input and output digests, the outcome and the issue codes. `data.valid` reports that this file would currently be accepted, not that a later submission was made; workflow state can still change before the real submission, which validates again. Coverage audits and tool-return counts do not count checks.
 
-For a new review task, include `scope` alongside `summary` and `findings`. This minimal partial output illustrates `scope` only; a new `substantive_review` also requires `claim_checks`. See the [shared skill's full JSON example](../skills/scriptorium/SKILL.md#example-substantive-review-output) for a finding, its exact text anchor, and its zero-based claim-check link. The task's reconstructed frozen schema takes precedence over either example:
+For a new review task, include `scope` alongside `summary` and `findings`. This minimal partial output illustrates `scope` only; a new `substantive_review` also requires `claim_checks`. For a complete output with a finding, its exact text anchor, and its zero-based claim-check link, read the attempt's `task show ATTEMPT_ID --part example`. The task's reconstructed frozen schema takes precedence over either example:
 
 ```json
 {
@@ -133,8 +133,8 @@ For a new `substantive_review` task, also include `claim_checks`. Each entry has
 Before submitting a substantive review, follow its frozen prompt's conclusion-consistency instructions. A
 `supported` assessment needs evidence for the stated claim and critical question at the same scope; resolving one
 candidate criticism does not establish a broader conclusion. Carry material counterexamples and uncertainty into
-the assessment and summary, and anchor the evidence that determines the judgment. The shared skill routes the
-current model through this step; it does not start another model or add a submission field. The CLI validates the
+the assessment and summary, and anchor the evidence that determines the judgment. The current model performs
+this step from its frozen prompt; it does not start another model or add a submission field. The CLI validates the
 schema, anchors and finding links, not the scientific meaning of this comparison.
 
 Keep work completion separate from scientific certainty. Available relevant sources that remain unexamined belong

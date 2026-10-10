@@ -359,10 +359,11 @@ if [ "$host_found" = 0 ]; then
     warn "host_cli" "no codex, claude, or agy CLI in PATH; Scriptorium needs one of Codex, Claude Code, or Antigravity (agy) to run reviews"
 fi
 
-skill_file="$REPO_ROOT/skills/scriptorium/SKILL.md"
-if [ -f "$skill_file" ]; then
-    info "skill" "load $skill_file in the model client"
-fi
+for skill in scriptorium scriptorium-review; do
+    if [ -f "$REPO_ROOT/skills/$skill/SKILL.md" ]; then
+        info "skill" "link $REPO_ROOT/skills/$skill into the model client's skills directory"
+    fi
+done
 
 # --- Summary ----------------------------------------------------------------
 echo

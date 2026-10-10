@@ -5,7 +5,7 @@ Tests live beside the behavior they own. Keep builders and fakes inside their ow
 - `manuscript/` tests Git snapshots, dependency discovery, bundle containment, navigation, exact edits, and real LaTeX helper inputs.
 - `storage/` tests numbered migrations, append-only records, attempts, findings, decisions, and patches. Historical SDK rows remain decodable.
 - `external/` tests the shared Codex, Claude Code, and Antigravity task contract with a real small Git and LaTeX project. It covers cross-process claims, bounded retrieval, invalid results, retry, cancellation, human gates, independent verification, and stale patch rejection. These tests require `latexmk` and `pdflatex`; the LaTeX CI job runs them.
-- `contracts/` tests packaging, provider SDK absence, output schemas, and the complexity debt ratchet.
+- `contracts/` tests packaging, provider SDK absence, output schemas, the complexity debt ratchet, and the skill files' front matter, word budgets, and quick-reference commands.
 - `peerreviewbench/` tests the isolated research adapter and its evaluator without adding benchmark-specific core APIs.
 - `external_review/` tests sealed CLI report collection, fixed-input provenance, anonymous candidate packaging and external judge validation. Synthetic judgments are contract fixtures, not paid model or scientific-quality evidence.
 
