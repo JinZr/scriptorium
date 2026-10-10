@@ -54,7 +54,6 @@ from .manuscript import (
     render_page_view,
 )
 from .schemas import (
-    UNIVERSAL_LINE_TERMINATORS,
     EvidenceAnchorContract,
     InventoriedScientificReviewOutput,
     LinkedScientificReviewOutput,
@@ -1649,17 +1648,21 @@ class ScriptoriumService:
             raise InfrastructureError(f"patched snapshot does not match immutable diff {patch.diff_digest}")
 
     @staticmethod
-    def _markdown_findings(items: list[dict[str, Any]]) -> list[str]:
+    def _markdown_findings(items: list[dict[str, Any]], terminators: tuple[str, ...] | None) -> list[str]:
         lines = ["", "## Findings", ""]
         if not items:
             return [*lines, "- None"]
+
+        def text(value: str) -> str:
+            return ScriptoriumService._markdown_text(value, terminators)
+
         for item in items:
             finding = item["finding"]
             lines.append(f"- `{finding['id']}` — {finding['severity']} / {finding['status']}: {finding['title']}")
             lines.append(
-                f"  - category: {finding['category']}; role: {finding['role']}; confidence: {finding['confidence']}"
+                f"  - category: {text(finding['category'])}; role: {finding['role']}; "
+                f"confidence: {finding['confidence']}"
             )
-            text = ScriptoriumService._markdown_text
             lines.append(f"  - claim: {text(finding['claim'])}")
             if finding.get("affected_claim"):
                 lines.append(f"  - affected claim: {text(finding['affected_claim'])}")
@@ -1667,27 +1670,34 @@ class ScriptoriumService:
                 lines.append(f"  - consequence: {text(finding['consequence'])}")
             lines.append(f"  - explanation: {text(finding['explanation'])}")
             lines.append(f"  - suggested action: {text(finding['suggested_action'])}")
-            lines.extend(ScriptoriumService._markdown_finding_evidence(finding["evidence"]))
+            for anchor in finding["evidence"]:
+                line = f"  - evidence: `{ScriptoriumService._markdown_location(anchor)}`"
+                if quoted_text := anchor.get("quoted_text"):
+                    line += ": " + text(quoted_text)
+                lines.append(line)
         return lines
 
     @staticmethod
-    def _markdown_finding_evidence(evidence: list[dict[str, Any]]) -> list[str]:
-        lines = []
-        for anchor in evidence:
-            line = f"  - evidence: `{ScriptoriumService._markdown_location(anchor)}`"
-            if quoted_text := anchor.get("quoted_text"):
-                line += ": " + ScriptoriumService._markdown_text(quoted_text)
-            lines.append(line)
-        return lines
+    def _frozen_line_terminators(run: dict[str, Any]) -> tuple[str, ...] | None:
+        """Line terminators of the run's frozen evidence anchor contract; None when it split like str.splitlines()."""
+        record = run["frozen_config"].get("evidence_anchor_contract") or {}
+        terminators = record.get("content", {}).get("line_terminators")
+        return tuple(terminators) if terminators else None
 
     @staticmethod
-    def _markdown_text(text: str) -> str:
-        """Keep free text on one list item: each line terminator of the evidence contract becomes a visible ⏎.
+    def _markdown_text(text: str, terminators: tuple[str, ...] | None) -> str:
+        """Keep a field on one list item: each line break of the run's frozen line definition becomes a visible ⏎.
 
-        Only CRLF, CR, and LF end a numbered source line, so other separators such as form feed or U+2028
-        stay verbatim, and a terminal line break keeps its mark instead of vanishing.
+        A terminal line break keeps its mark. Contracts without terminators split like str.splitlines(), so their
+        form feeds and Unicode separators are line breaks too; later contracts end lines only at CRLF, CR, and LF
+        and keep other separators verbatim.
         """
-        return _LINE_TERMINATOR.sub(" ⏎ ", text).rstrip(" ")
+        if terminators is None:
+            bodies = text.splitlines() or [""]
+            ended = (text.splitlines(keepends=True) or [""])[-1] != bodies[-1]
+            return " ⏎ ".join(bodies) + (" ⏎" if ended else "")
+        rendered = re.sub("|".join(re.escape(terminator) for terminator in terminators), " ⏎ ", text)
+        return rendered[:-1] if rendered.endswith(" ⏎ ") else rendered
 
     @staticmethod
     def _claim_check_report(task_id: str, attempt_id: str, output: ScientificReviewOutput) -> dict[str, Any]:
@@ -1751,9 +1761,10 @@ class ScriptoriumService:
 
     @staticmethod
     def _markdown_location(anchor: dict[str, Any]) -> str:
-        if "page" in anchor:
-            return f"{anchor['source_path']}:page {anchor['page']}"
-        return f"{anchor['source_path']}:{anchor['start_line']}-{anchor['end_line']}"
+        # Validation anchors any record with a line range to the source; a page beside it was only bounds-checked.
+        if "start_line" in anchor:
+            return f"{anchor['source_path']}:{anchor['start_line']}-{anchor['end_line']}"
+        return f"{anchor['source_path']}:page {anchor['page']}"
 
     @staticmethod
     def _markdown_claim_judgment(check: dict[str, Any], claim_anchor: dict[str, Any] | None) -> list[str]:
@@ -1900,7 +1911,9 @@ class ScriptoriumService:
         else:
             lines.append("- None")
         lines.extend(markdown_finding_groups(plain["findings_grouped"]))
-        lines.extend(ScriptoriumService._markdown_findings(plain["findings"]))
+        lines.extend(
+            ScriptoriumService._markdown_findings(plain["findings"], ScriptoriumService._frozen_line_terminators(run))
+        )
         lines.extend(markdown_decision_stats(plain["decision_stats"]))
         lines.extend(["", "## Patches", ""])
         if plain["patches"]:
@@ -2099,9 +2112,6 @@ def _read_text_window(path: Path, start_line: int, max_lines: int, offset: int, 
                     next_line, next_offset = number + 1, 0
                 break
     return pieces, next_line, next_offset
-
-
-_LINE_TERMINATOR = re.compile("|".join(re.escape(terminator) for terminator in UNIVERSAL_LINE_TERMINATORS))
 
 
 def _plain(value: Any) -> Any:

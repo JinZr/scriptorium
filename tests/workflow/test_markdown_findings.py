@@ -74,7 +74,7 @@ def test_markdown_report_without_findings_lists_none(tmp_path):
     assert markdown.split("\n## Findings\n")[1].startswith("\n- None\n")
 
 
-def test_markdown_findings_keep_only_contract_line_terminators_visible():
+def _finding_record(**overrides):
     finding = {
         "id": "finding-1",
         "severity": "minor",
@@ -84,7 +84,7 @@ def test_markdown_findings_keep_only_contract_line_terminators_visible():
         "role": "copyedit",
         "confidence": 0.5,
         "claim": "Line one.\r\nLine two.\rLine three.",
-        "explanation": "Form feed\x0cand U+2028\u2028stay inside one line.",
+        "explanation": "Form feed\x0cand U+2028\u2028inside a line.",
         "suggested_action": "Trailing break keeps its mark.\n",
         "evidence": [
             {
@@ -96,14 +96,41 @@ def test_markdown_findings_keep_only_contract_line_terminators_visible():
             }
         ],
     }
+    return {"finding": {**finding, **overrides}, "decisions": []}
 
-    lines = ScriptoriumService._markdown_findings([{"finding": finding, "decisions": []}])
+
+def test_markdown_findings_mark_only_the_frozen_contract_line_terminators():
+    lines = ScriptoriumService._markdown_findings([_finding_record()], ("\r\n", "\r", "\n"))
 
     assert lines[3:] == [
         "- `finding-1` — minor / pending: Quote",
         "  - category: style; role: copyedit; confidence: 0.5",
         "  - claim: Line one. ⏎ Line two. ⏎ Line three.",
-        "  - explanation: Form feed\x0cand U+2028\u2028stay inside one line.",
+        "  - explanation: Form feed\x0cand U+2028\u2028inside a line.",
         "  - suggested action: Trailing break keeps its mark. ⏎",
         "  - evidence: `main.tex:3-3`: The result\x0cis\u2028clear. ⏎",
     ]
+
+
+def test_markdown_findings_mark_every_line_break_of_a_legacy_contract():
+    # Contracts frozen without line terminators numbered lines with str.splitlines().
+    lines = ScriptoriumService._markdown_findings([_finding_record()], None)
+
+    assert lines[5:] == [
+        "  - claim: Line one. ⏎ Line two. ⏎ Line three.",
+        "  - explanation: Form feed ⏎ and U+2028 ⏎ inside a line.",
+        "  - suggested action: Trailing break keeps its mark. ⏎",
+        "  - evidence: `main.tex:3-3`: The result ⏎ is ⏎ clear. ⏎",
+    ]
+
+
+def test_markdown_findings_keep_a_multiline_category_and_a_mixed_anchor_on_their_items():
+    # A historical schema could accept a page beside a validated line range; the range is the anchor.
+    record = _finding_record(
+        category="style\n\n## Patches",
+        evidence=[{"source_path": "main.tex", "start_line": 3, "end_line": 4, "page": 1, "quoted_text": "x"}],
+    )
+    lines = ScriptoriumService._markdown_findings([record], ("\r\n", "\r", "\n"))
+
+    assert lines[4] == "  - category: style ⏎  ⏎ ## Patches; role: copyedit; confidence: 0.5"
+    assert lines[-1] == "  - evidence: `main.tex:3-4`: x"
