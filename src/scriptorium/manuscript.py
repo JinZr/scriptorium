@@ -31,7 +31,10 @@ from .schemas import (
     evidence_anchor_contract_digest,
 )
 
-INPUT_PATTERN = re.compile(r"\\(?:input(?![A-Za-z@])\s*(?:\{([^{}]+)\}|([^\\\s{}%]+))|include\s*\{([^{}]+)\})")
+INPUT_PATTERN = re.compile(
+    r"\\(?:input(?![A-Za-z@])\s*(?:\{([^{}]+)\}|([^\\\s{}%]+))|include\s*\{([^{}]+)\}"
+    r"|(?:(?:[BL]?VerbatimInput|verbatiminput)\*?|lstinputlisting)(?![A-Za-z@])\s*(?:\[[^\]]*\])?\s*\{([^{}]+)\})"
+)
 BIB_PATTERN = re.compile(r"\\bibliography\s*\{([^}]+)\}")
 ADDBIB_PATTERN = re.compile(r"\\addbibresource(?:\[[^\]]*\])?\s*\{([^}]+)\}")
 GRAPHICS_PATTERN = re.compile(r"\\includegraphics\*?(?:\s*\[[^\]]*\])?\s*\{([^}]+)\}")
@@ -701,27 +704,7 @@ class ManuscriptManager:
 
     def scan_sources(self, snapshot: Path, main: str) -> tuple[SourceFile, ...]:
         root = snapshot.resolve()
-        # Pause each parent at an input so child graphicspath declarations take effect in order.
-        pending = [iter([Path(main)])]
-        graphics_paths: list[Path] = []
-        bibliography_fallback = Path(main).with_suffix(".bbl")
-        included: set[Path] = set()
-        while pending:
-            try:
-                relative = next(pending[-1])
-            except StopIteration:
-                pending.pop()
-                continue
-            relative = self._normalized_relative(root, relative)
-            if relative in included:
-                continue
-            path = root / relative
-            if not path.is_file():
-                raise InfrastructureError(f"Referenced manuscript file is missing: {relative}")
-            included.add(relative)
-            if path.suffix.lower() != ".tex":
-                continue
-            pending.append(self._source_dependencies(root, relative, graphics_paths, bibliography_fallback))
+        included, _ = self._scan_closure(root, main)
         sources = []
         for relative in sorted(included):
             data = (root / relative).read_bytes()
@@ -744,6 +727,38 @@ class ManuscriptManager:
                         return {"template": name, "venue_family": family}
         return {"template": None, "venue_family": "unknown"}
 
+    def _scan_closure(self, root: Path, main: str) -> tuple[set[Path], set[Path]]:
+        """Return the source closure and every file some verbatim-style command shows literally."""
+        # Pause each parent at an input so child graphicspath declarations take effect in order.
+        pending = [iter([(Path(main), False)])]
+        graphics_paths: list[Path] = []
+        bibliography_fallback = Path(main).with_suffix(".bbl")
+        included: set[Path] = set()
+        traversed: set[Path] = set()
+        verbatim: set[Path] = set()
+        while pending:
+            try:
+                dependency, literal = next(pending[-1])
+            except StopIteration:
+                pending.pop()
+                continue
+            relative = self._normalized_relative(root, dependency)
+            if literal and relative in included:
+                verbatim.add(relative)
+                continue
+            if relative in traversed:
+                continue
+            if not (root / relative).is_file():
+                raise InfrastructureError(f"Referenced manuscript file is missing: {relative}")
+            included.add(relative)
+            if literal:
+                verbatim.add(relative)
+                continue
+            traversed.add(relative)
+            if (root / relative).suffix.lower() == ".tex":
+                pending.append(self._source_dependencies(root, relative, graphics_paths, bibliography_fallback))
+        return included, verbatim
+
     def scan_project_sources(self, snapshot: Path, manuscript: ManuscriptConfig) -> tuple[SourceFile, ...]:
         roots = [self._normalized_relative(snapshot.resolve(), Path(entry)) for entry in manuscript.entrypoints]
         if len(set(roots)) != len(roots):
@@ -757,7 +772,7 @@ class ManuscriptManager:
 
     def _source_dependencies(
         self, root: Path, relative: Path, graphics_paths: list[Path], bibliography_fallback: Path
-    ) -> Iterator[Path]:
+    ) -> Iterator[tuple[Path, bool]]:
         text = self._dependency_text((root / relative).read_text(encoding="utf-8"))
         commands = sorted(
             (match.start(), kind, match)
@@ -782,15 +797,20 @@ class ManuscriptManager:
                 continue
             for name in raw.split(",") if kind == "bibliography" else [raw]:
                 dependency = Path(name.strip())
-                if not dependency.suffix and kind in {"input", "bibliography"}:
+                # Verbatim-style includes name a file exactly; only \input and \include default to .tex.
+                verbatim = kind == "input" and match.lastindex == 4
+                if not dependency.suffix and kind in {"input", "bibliography"} and not verbatim:
                     dependency = dependency.with_suffix(".tex" if kind == "input" else ".bib")
-                yield self._resolve_dependency(
-                    root,
-                    relative.parent,
-                    dependency,
-                    GRAPHICS_EXTENSIONS if kind == "graphics" else ("",),
-                    search_paths=tuple(graphics_paths) if kind == "graphics" else (),
-                    fallback=bibliography_fallback if kind in {"bibliography", "addbibresource"} else None,
+                yield (
+                    self._resolve_dependency(
+                        root,
+                        relative.parent,
+                        dependency,
+                        GRAPHICS_EXTENSIONS if kind == "graphics" else ("",),
+                        search_paths=tuple(graphics_paths) if kind == "graphics" else (),
+                        fallback=bibliography_fallback if kind in {"bibliography", "addbibresource"} else None,
+                    ),
+                    verbatim,
                 )
 
     def create_navigation(
@@ -804,8 +824,10 @@ class ManuscriptManager:
         }
         masks = {path: self._dependency_text(text, preserve_positions=True) for path, text in texts.items()}
         bodies = self._document_bodies(snapshot, masks, entrypoints)
-        for path, text in texts.items():
-            spans = self._navigation_spans(text, masks[path], bodies[path])
+        # Files shown only verbatim are literal text, not manuscript structure, and have no body entry.
+        for path, body in bodies.items():
+            text = texts[path]
+            spans = self._navigation_spans(text, masks[path], body)
             breaks = [match.start() for match in re.finditer("\n", text)]
             for command, start, end, value_start, value_end in spans:
                 value = text[value_start:value_end].strip()
@@ -841,24 +863,35 @@ class ManuscriptManager:
     def _document_bodies(
         self, snapshot: Path, masks: dict[str, str], entrypoints: tuple[str, ...] = ()
     ) -> dict[str, tuple[int, int] | None]:
-        """Follow inputs in processing order and bound each source by the document body it reaches, if any."""
+        """Follow inputs in processing order and bound each source by the document body it reaches, if any.
+
+        Sources shown only by verbatim-style commands are omitted.
+        """
         root = snapshot.resolve()
         events: dict[str, list[tuple[int, str, str]]] = {}
+        literal: set[str] = set()
         for path, masked in masks.items():
             items = [
                 (match.end() if match[1] == "begin" else match.start(), match[1], "")
                 for match in re.finditer(r"\\(begin|end)\s*\{document\}", masked)
             ]
             for match in INPUT_PATTERN.finditer(masked):
+                verbatim = match.lastindex == 4
                 dependency = Path(next(group for group in match.groups() if group is not None).strip())
                 try:
                     child = self._resolve_dependency(
-                        root, Path(path).parent, dependency.with_suffix(dependency.suffix or ".tex")
+                        root,
+                        Path(path).parent,
+                        dependency if verbatim else dependency.with_suffix(dependency.suffix or ".tex"),
                     ).as_posix()
                 except InfrastructureError:
                     continue
                 if child in masks:
-                    items.append((match.start(), "input", child))
+                    # Verbatim-style includes typeset a file literally; they do not continue the document.
+                    if verbatim:
+                        literal.add(child)
+                    else:
+                        items.append((match.start(), "input", child))
             events[path] = sorted(items)
         included = {child for items in events.values() for _, kind, child in items if kind == "input"}
         lengths = {path: len(masked) for path, masked in masks.items()}
@@ -866,13 +899,18 @@ class ManuscriptManager:
         reached: set[str] = set()
         # A configured entrypoint is typeset on its own even when another source also inputs it.
         configured = {self._normalized_relative(root, Path(entry)).as_posix() for entry in entrypoints}
-        for path in sorted((set(masks) - included) | (configured & set(masks))):
+        literal -= included | configured
+        for path in sorted((set(masks) - included - literal) | (configured & set(masks))):
             tree = _input_closure(path, events)
             reached |= tree
             # A source tree without \begin{document} is a fragment that is typeset as a whole.
             opens = any(kind == "begin" for member in tree for _, kind, _ in events[member])
             _walk_document(path, "before" if opens else "body", events, lengths, bounds, {})
-        return {path: bounds.get(path) if path in reached else _document_body(masked) for path, masked in masks.items()}
+        return {
+            path: bounds.get(path) if path in reached else _document_body(masked)
+            for path, masked in masks.items()
+            if path not in literal
+        }
 
     @classmethod
     def _navigation_spans(
@@ -1041,8 +1079,13 @@ class ManuscriptManager:
             for path in workspace.rglob("*")
             if path.is_file() and not path.is_symlink()
         }
+        literal_inputs = self._literal_inputs(workspace, manuscript.main)
         for relative in originals:
-            if Path(relative).suffix.lower() in GENERATED_INPUT_EXTENSIONS or relative.lower().endswith(".run.xml"):
+            generated = Path(relative).suffix.lower() in GENERATED_INPUT_EXTENSIONS or relative.lower().endswith(
+                ".run.xml"
+            )
+            # A committed file shown verbatim is content, not a stale build product.
+            if generated and Path(relative) not in literal_inputs:
                 (workspace / relative).unlink()
         # A successful no-op must never certify copied recorder/PDF evidence.
         for suffix in (".fls", ".fdb_latexmk", ".pdf", ".xdv", ".log"):
@@ -1079,10 +1122,15 @@ class ManuscriptManager:
         engine_output = self._normalized_relative(workspace, main.with_suffix(output_suffix))
         if main_input not in inputs or engine_output not in outputs:
             raise InfrastructureError("LaTeX recorder does not identify the main input and engine output")
+        for literal in sorted(literal_inputs & outputs):
+            raise InfrastructureError(
+                f"A verbatim input must not be a file the compiler writes: {literal.as_posix()}. "
+                "Show a committed file that the build does not regenerate."
+            )
         helper_inputs, derivations = self._helper_evidence(workspace, main, texmf_roots, inputs, originals)
         inputs.update(helper_inputs)
         compiler_inputs = self._compiler_inputs(
-            workspace, originals, inputs, outputs, tuple(Path(item.path) for item in derivations)
+            workspace, originals, inputs, outputs, tuple(Path(item.path) for item in derivations), literal_inputs
         )
         evidence = {
             "compiler_inputs": [asdict(item) for item in compiler_inputs],
@@ -1297,6 +1345,13 @@ class ManuscriptManager:
                 raise InfrastructureError("Invalid EPS conversion file types")
             yield source_path, target_path
 
+    def _literal_inputs(self, workspace: Path, main: str) -> frozenset[Path]:
+        """Files the document shows verbatim, whatever their suffix; an unscannable closure names none."""
+        try:
+            return frozenset(self._scan_closure(workspace, main)[1])
+        except (InfrastructureError, OSError, UnicodeDecodeError):
+            return frozenset()
+
     @staticmethod
     def _compiler_inputs(
         workspace: Path,
@@ -1304,6 +1359,7 @@ class ManuscriptManager:
         inputs: set[Path],
         outputs: set[Path],
         derived_outputs: tuple[Path, ...] = (),
+        literal_inputs: frozenset[Path] = frozenset(),
     ) -> tuple[CompilerInput, ...]:
         evidence = []
         for relative in sorted(inputs):
@@ -1315,7 +1371,7 @@ class ManuscriptManager:
                 continue
             if name not in originals:
                 raise InfrastructureError(f"Compiler input has no snapshot source: {name}")
-            if suffix not in BUILD_INPUT_EXTENSIONS | REVIEW_INPUT_EXTENSIONS:
+            if suffix not in BUILD_INPUT_EXTENSIONS | REVIEW_INPUT_EXTENSIONS and relative not in literal_inputs:
                 raise InfrastructureError(f"Unclassified repository-local compiler input: {name}")
             if not (workspace / relative).is_file():
                 raise InfrastructureError(f"Compiler input is no longer readable: {name}")
