@@ -11,7 +11,7 @@ import pytest
 
 from scriptorium.artifacts import ArtifactStore
 from scriptorium.domain import AttemptStatus, RunStatus, TaskStatus
-from scriptorium.errors import ConfigurationError, InfrastructureError, StateError
+from scriptorium.errors import ConfigurationError, DuplicateRunError, InfrastructureError, StateError
 from scriptorium.service import ScriptoriumService
 
 pytestmark = pytest.mark.skipif(
@@ -687,3 +687,14 @@ def test_historical_sdk_run_stays_readable_but_cannot_resume(tmp_path: Path) -> 
         assert not service.evaluate_gate(run_id)["passed"]
         with pytest.raises(StateError, match="retired SDK execution contract"):
             asyncio.run(service.resume_run(run_id))
+
+
+def test_duplicate_start_on_a_real_project_is_refused_until_the_first_run_ends(tmp_path):
+    repo = _repo(tmp_path / "paper")
+    run_id, _task_id = _start(repo)
+    with ScriptoriumService(repo) as service:
+        with pytest.raises(DuplicateRunError, match=run_id):
+            asyncio.run(service.start_run("HEAD", "full"))
+        service.cancel_run(run_id, "Superseded")
+        restarted = asyncio.run(service.start_run("HEAD", "full"))["run"]
+        assert restarted.id != run_id

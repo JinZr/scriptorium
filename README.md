@@ -42,7 +42,7 @@ scriptorium --json run start --revision COMMIT --profile full
 scriptorium --json run status RUN_ID
 ```
 
-`run start` compiles and freezes the selected commit, then returns a compact acknowledgement. Read `run status RUN_ID` for task counts, current `next_actions`, and commands for report sections. It makes no model call. For each pending task offered by `next_actions`, the current Codex, Claude Code, or Antigravity session uses its selected model:
+`run start` compiles and freezes the selected commit, then returns a compact acknowledgement. It refuses a second non-terminal run on the same commit unless `--allow-duplicate` is passed. Read `run status RUN_ID` for task counts, current `next_actions`, and commands for report sections. It makes no model call. For each pending task offered by `next_actions`, the current Codex, Claude Code, or Antigravity session uses its selected model:
 
 ```bash
 scriptorium --json task claim TASK_ID --client codex --model MODEL --effort EFFORT \

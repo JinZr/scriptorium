@@ -3,6 +3,7 @@ import json
 import pytest
 
 from scriptorium import cli
+from scriptorium.errors import DuplicateRunError
 
 from ._fake_service import FakeService, install_fake_service
 
@@ -24,11 +25,32 @@ def test_start_emits_json_and_passes_frozen_inputs(monkeypatch, capsys) -> None:
     )
 
     assert exit_code == 0
-    assert service.calls == [("start_run", "abc123", "quick")]
+    assert service.calls == [("start_run", "abc123", "quick", False)]
     output = json.loads(capsys.readouterr().out)
     assert output["ok"] is True
     assert output["data"]["run"] == {"id": "run_1", "status": "preparing", "commit_sha": "abc123"}
     assert output["data"]["next_actions"] == [{"command": "run status", "run_id": "run_1"}]
+
+
+def test_start_passes_allow_duplicate(monkeypatch, capsys) -> None:
+    service = FakeService()
+    install_fake_service(monkeypatch, service)
+
+    assert cli.main(["run", "start", "--revision", "abc123", "--profile", "quick", "--allow-duplicate"]) == 0
+    assert service.calls == [("start_run", "abc123", "quick", True)]
+    capsys.readouterr()
+
+
+def test_duplicate_run_error_is_structured_json(monkeypatch, capsys) -> None:
+    service = FakeService()
+    service.error = DuplicateRunError("run run_9 is already reviewing")
+    install_fake_service(monkeypatch, service)
+
+    assert cli.main(["run", "start", "--json"]) == 1
+    output = json.loads(capsys.readouterr().out)
+    assert output["ok"] is False
+    assert output["error"]["code"] == "duplicate_run"
+    assert "run_9" in output["error"]["message"]
 
 
 def test_doctor_passes_default_and_explicit_revision(monkeypatch, capsys) -> None:
