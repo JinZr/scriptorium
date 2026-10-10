@@ -965,7 +965,11 @@ class ManuscriptManager:
         }
         literal_inputs = self._literal_inputs(workspace, manuscript.main)
         for relative in originals:
-            if Path(relative).suffix.lower() in GENERATED_INPUT_EXTENSIONS or relative.lower().endswith(".run.xml"):
+            generated = Path(relative).suffix.lower() in GENERATED_INPUT_EXTENSIONS or relative.lower().endswith(
+                ".run.xml"
+            )
+            # A committed file shown verbatim is content, not a stale build product.
+            if generated and Path(relative) not in literal_inputs:
                 (workspace / relative).unlink()
         # A successful no-op must never certify copied recorder/PDF evidence.
         for suffix in (".fls", ".fdb_latexmk", ".pdf", ".xdv", ".log"):

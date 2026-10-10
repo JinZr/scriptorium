@@ -292,6 +292,7 @@ def test_native_build_rejects_hidden_content_in_user_texmf(tmp_path, monkeypatch
     [
         (r"\usepackage{listings}", "algorithm.py"),
         (r"\usepackage{fancyvrb}", "notes"),
+        (r"\usepackage{fancyvrb}", "notes.vrb"),
     ],
 )
 def test_verbatim_files_of_any_suffix_are_frozen_review_inputs(tmp_path, command, name):
