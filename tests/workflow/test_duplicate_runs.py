@@ -1,5 +1,6 @@
 import asyncio
 import subprocess
+import threading
 
 import pytest
 
@@ -55,3 +56,47 @@ def test_a_run_on_a_different_commit_does_not_block_start(tmp_path):
         subprocess.run(["git", "-C", str(repo), "commit", "-qam", "Later revision"], check=True)
         later = asyncio.run(service.start_run("HEAD", "quick"))["run"]
         assert later.status == RunStatus.REVIEWING
+
+
+class _BlockingSnapshotManager(PdfBuildingManuscriptManager):
+    def __init__(self, repo, entered, release):
+        super().__init__(repo)
+        self.entered = entered
+        self.release = release
+
+    def create_snapshot(self, revision, destination):
+        self.entered.set()
+        assert self.release.wait(timeout=30)
+        super().create_snapshot(revision, destination)
+
+
+def test_overlapping_starts_on_one_commit_cannot_both_create_a_run(tmp_path):
+    repo = make_repository(tmp_path, roles=("substantive_review",))
+    entered, release = threading.Event(), threading.Event()
+    outcomes = {}
+
+    def first():
+        with ScriptoriumService(repo, manuscript_manager=_BlockingSnapshotManager(repo, entered, release)) as service:
+            outcomes["first"] = asyncio.run(service.start_run("HEAD", "quick"))["run"]
+
+    def second():
+        with _service(repo) as service:
+            try:
+                asyncio.run(service.start_run("HEAD", "quick"))
+            except DuplicateRunError as exc:
+                outcomes["second"] = exc
+
+    starter = threading.Thread(target=first)
+    starter.start()
+    assert entered.wait(timeout=30)
+    contender = threading.Thread(target=second)
+    contender.start()
+    contender.join(timeout=1)
+    assert contender.is_alive(), "the second start must wait for the first to finish freezing"
+    release.set()
+    starter.join(timeout=60)
+    contender.join(timeout=60)
+    assert isinstance(outcomes["second"], DuplicateRunError)
+    assert outcomes["first"].id in str(outcomes["second"])
+    with _service(repo) as service:
+        assert [run.id for run in service.database.list_runs()] == [outcomes["first"].id]

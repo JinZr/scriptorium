@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections import Counter, deque
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from dataclasses import asdict, is_dataclass
 from datetime import datetime, timezone
 import difflib
@@ -319,8 +319,7 @@ class ScriptoriumService:
             "checks": checks,
         }
 
-    def _refuse_duplicate_run(self, revision: str) -> None:
-        commit_sha = self.manuscript.resolve_revision(revision).commit_sha
+    def _refuse_duplicate_run(self, commit_sha: str) -> None:
         active = self._storage(self.database.list_active_runs, commit_sha)
         if active:
             existing = active[0]
@@ -332,8 +331,13 @@ class ScriptoriumService:
     async def start_run(self, revision: str, profile: str, allow_duplicate: bool = False) -> dict[str, Any]:
         reject_legacy_local_config(self.repo)
         run_id = new_id("run")
-        with self._run_operation(run_id, "run start"):
-            self._storage(self.database.ensure_external_schema)
+        self._storage(self.database.ensure_external_schema)
+        with ExitStack() as locks:
+            if not allow_duplicate:
+                # Serialize check-and-create across processes: a concurrent starter waits here, then sees this run.
+                revision = self.manuscript.resolve_revision(revision).commit_sha
+                locks.enter_context(self._run_operation(f"start-{revision}", "run start", wait=True))
+            locks.enter_context(self._run_operation(run_id, "run start"))
             if not allow_duplicate:
                 self._refuse_duplicate_run(revision)
             await self.armarius.start_run(revision, profile, run_id=run_id)
