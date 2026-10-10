@@ -155,7 +155,7 @@ def report_fragment(run_id, report, part, offset, expected_digest):
     return response
 
 
-def task_view(context, part, offset, example_digest=None):
+def task_view(context, part, offset):
     attempt, task = context["attempt"], context["task"]
     brief = context.get("brief")
     digests = {
@@ -197,15 +197,11 @@ def task_view(context, part, offset, example_digest=None):
         )
     if part == "brief" and brief is None:
         raise ConfigurationError("this run was started without a review brief")
-    if example_digest is not None and part != "example":
-        raise ConfigurationError("--example-digest requires --part example")
     if part == "example" and context.get("example") is None:
-        raise ExampleUnavailableError(context.get("example_error") or "no example is available for this attempt")
-    # The example is built by the installed code rather than frozen, so its fragments are bound to its digest.
-    if part == "example" and example_digest not in {None, digests["example"]}:
-        raise ConfigurationError("example changed; restart at offset 0 without --example-digest")
-    if part == "example" and offset != 0 and example_digest is None:
-        raise ConfigurationError("a nonzero example offset requires --example-digest from the previous fragment")
+        raise ExampleUnavailableError(
+            "no example was frozen with this attempt's task: revision and verification tasks, tasks prepared before "
+            "examples existed, and frozen schema shapes the example builder cannot fill have none"
+        )
     if part not in digests:
         raise ConfigurationError("part must be prompt, schema, source-map, brief, or example")
     content = {
@@ -230,17 +226,7 @@ def task_view(context, part, offset, example_digest=None):
             "text": content[offset:end],
             "next_offset": end if end < len(content) else None,
             "next_command": (
-                tool_command(
-                    "show",
-                    attempt.id,
-                    "--part",
-                    part,
-                    "--offset",
-                    end,
-                    *(("--example-digest", digests[part]) if part == "example" else ()),
-                )
-                if end < len(content)
-                else None
+                tool_command("show", attempt.id, "--part", part, "--offset", end) if end < len(content) else None
             ),
         }
 

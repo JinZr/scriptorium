@@ -5,7 +5,7 @@ import subprocess
 import pytest
 
 from scriptorium.domain import AgentRole, AttemptStatus
-from scriptorium.errors import ConfigurationError, ExampleUnavailableError
+from scriptorium.errors import ExampleUnavailableError, InfrastructureError
 import scriptorium.schemas
 from scriptorium.schemas import (
     InventoriedScientificReviewOutput,
@@ -21,20 +21,19 @@ import scriptorium.workflow
 
 from ._support import MANUSCRIPT, PdfBuildingManuscriptManager, claim, make_repository, prepare_patch
 
+_COMPLETE = {"completion": "complete", "checked": [], "outstanding": [], "limitations": []}
 _REVIEW_ROLES = ("substantive_review", "copyedit", "consistency", "figure_review")
 
 
 def _example(service, attempt_id):
     """Follow the example fragments to the end, checking each response stays within the tool limit."""
-    pieces, offset, fragments, digest = [], 0, 0, None
+    pieces, offset, fragments = [], 0, 0
     while offset is not None:
-        fragment = service.task_view(service.show_task(attempt_id), "example", offset, digest)
+        fragment = service.task_view(service.show_task(attempt_id), "example", offset)
         assert len(success_json(fragment).encode("utf-8")) <= MAX_TOOL_RESPONSE_BYTES
         assert fragment["offset"] == offset
         pieces.append(fragment["text"])
-        offset, fragments, digest = fragment["next_offset"], fragments + 1, fragment["digest"]
-        if offset is not None:
-            assert fragment["next_command"].endswith(f"--offset {offset} --example-digest {digest}")
+        offset, fragments = fragment["next_offset"], fragments + 1
     return "".join(pieces), fragment["digest"], fragments
 
 
@@ -65,6 +64,8 @@ def test_each_review_role_serves_a_checked_example_with_real_frozen_anchors(tmp_
         text, digest, fragments = _example(service, context["attempt"].id)
         check = service.check_submission(context["attempt"].id, context["input_digest"], text)
         model = _frozen_model(service, context)
+        frozen = service.database.get_external_task(context["task"].id)["example_digest"]
+        stored = service.armarius.artifacts.get_bytes(frozen).decode("utf-8")
 
     attempt_id = context["attempt"].id
     assert overview["inputs"]["example"] == {
@@ -72,6 +73,7 @@ def test_each_review_role_serves_a_checked_example_with_real_frozen_anchors(tmp_
         "command": f"scriptorium --json task show {attempt_id} --part example",
     }
     assert fragments == 1
+    assert (stored, frozen) == (text, digest)
     assert check["valid"] is True and check["validation_report"] is None
     example = json.loads(text)
     model.model_validate_json(text)
@@ -155,18 +157,41 @@ def test_runs_frozen_with_an_older_schema_shape_get_an_example_of_that_shape(tmp
             assert set(json.loads(text)) == published
 
 
-def test_a_shape_the_builder_cannot_fill_gets_a_structured_error(tmp_path, monkeypatch):
+def test_a_shape_the_builder_cannot_fill_freezes_no_example(tmp_path, monkeypatch):
+    repo = make_repository(tmp_path, roles=("copyedit",))
+    monkeypatch.setattr(scriptorium.workflow, "build_review_example", lambda *args: {"summary": "", "findings": []})
+    with ScriptoriumService(repo, manuscript_manager=PdfBuildingManuscriptManager(repo)) as service:
+        run = asyncio.run(service.start_run("HEAD", "quick"))["run"]
+        context = claim(service, run.id, "copyedit")
+        overview = service.task_view(context)
+        with pytest.raises(ExampleUnavailableError, match="no example was frozen with this attempt's task"):
+            service.task_view(context, "example")
+        assert service.database.get_external_task(context["task"].id)["example_digest"] is None
+
+    assert "example" not in overview["inputs"]
+    assert ExampleUnavailableError.code == "example_unavailable"
+
+
+def test_a_task_prepared_without_a_stored_example_reports_none(tmp_path):
     repo = make_repository(tmp_path, roles=("copyedit",))
     with ScriptoriumService(repo, manuscript_manager=PdfBuildingManuscriptManager(repo)) as service:
         run = asyncio.run(service.start_run("HEAD", "quick"))["run"]
         context = claim(service, run.id, "copyedit")
-        monkeypatch.setattr(scriptorium.workflow, "build_review_example", lambda *args: {"summary": "", "findings": []})
+        # A task recorded before examples existed reads a null example digest after the migration.
+        service.database.connection.execute(
+            "UPDATE external_tasks SET example_digest = NULL WHERE task_id = ?", (context["task"].id,)
+        )
         overview = service.task_view(service.show_task(context["attempt"].id))
-        with pytest.raises(ExampleUnavailableError, match="no example is available .* review output schema shape"):
+        with pytest.raises(ExampleUnavailableError, match="tasks prepared before examples existed"):
             service.task_view(service.show_task(context["attempt"].id), "example")
+        check = service.check_submission(
+            context["attempt"].id,
+            context["input_digest"],
+            json.dumps({"summary": "Checked.", "findings": [], "scope": _COMPLETE}),
+        )
 
     assert "example" not in overview["inputs"]
-    assert ExampleUnavailableError.code == "example_unavailable"
+    assert check["valid"] is True
 
 
 def test_revision_attempts_report_that_no_example_is_available(tmp_path):
@@ -177,41 +202,26 @@ def test_revision_attempts_report_that_no_example_is_available(tmp_path):
         revision = next(task for task in service.database.list_tasks(run.id) if task.role == AgentRole.REVISION)
         attempt_id = service.database.list_attempts(revision.id)[-1].id
         overview = service.task_view(service.show_task(attempt_id))
-        with pytest.raises(ExampleUnavailableError, match="frozen revision output schema shape"):
+        with pytest.raises(ExampleUnavailableError, match="revision and verification tasks"):
             service.task_view(service.show_task(attempt_id), "example")
+        assert service.database.get_external_task(revision.id)["example_digest"] is None
 
     assert "example" not in overview["inputs"]
 
 
-def test_example_fragments_are_bound_to_the_example_digest(tmp_path):
-    repo = make_repository(tmp_path, roles=("substantive_review",))
-    (repo / "main.tex").write_text(f"% {'x' * 3000}\n{MANUSCRIPT}", encoding="utf-8")
-    subprocess.run(["git", "-C", str(repo), "commit", "-q", "-am", "Long first line"], check=True)
-    with ScriptoriumService(repo, manuscript_manager=PdfBuildingManuscriptManager(repo)) as service:
-        run = asyncio.run(service.start_run("HEAD", "quick"))["run"]
-        attempt_id = claim(service, run.id, "substantive_review")["attempt"].id
-        first = service.task_view(service.show_task(attempt_id), "example")
-        offset = first["next_offset"]
-
-        with pytest.raises(ConfigurationError, match="example changed; restart at offset 0"):
-            service.task_view(service.show_task(attempt_id), "example", offset, "0" * 64)
-        with pytest.raises(ConfigurationError, match="nonzero example offset requires --example-digest"):
-            service.task_view(service.show_task(attempt_id), "example", offset)
-        with pytest.raises(ConfigurationError, match="--example-digest requires --part example"):
-            service.task_view(service.show_task(attempt_id), "prompt", 0, first["digest"])
-        following = service.task_view(service.show_task(attempt_id), "example", offset, first["digest"])
-
-    assert following["offset"] == offset and following["digest"] == first["digest"]
-
-
-def test_a_snapshot_that_disagrees_with_the_bundle_yields_no_example(tmp_path):
+def test_a_tampered_snapshot_fails_example_preparation_as_infrastructure(tmp_path):
     repo = make_repository(tmp_path, roles=("copyedit",))
     with ScriptoriumService(repo, manuscript_manager=PdfBuildingManuscriptManager(repo)) as service:
         run = asyncio.run(service.start_run("HEAD", "quick"))["run"]
-        attempt_id = claim(service, run.id, "copyedit")["attempt"].id
-        snapshot_source = service.armarius._run_dir(run.id) / "snapshot" / "main.tex"
+        armarius = service.armarius
+        schema = dict(run.frozen_config["schemas"]["review"]["content"])
+        model = armarius._output_model_for_schema(run, "review", schema)
+        bundle = armarius._bundle_for_run(run)
+        assert armarius._output_example(run, AgentRole.COPYEDIT, "review", schema, model, bundle) is not None
+        snapshot_source = armarius._run_dir(run.id) / "snapshot" / "main.tex"
         snapshot_source.chmod(0o644)
         snapshot_source.write_text(MANUSCRIPT.replace("article", "report"), encoding="utf-8")
 
-        with pytest.raises(ExampleUnavailableError):
-            service.task_view(service.show_task(attempt_id), "example")
+        # Preparing a task, as resume does for a run interrupted before its review tasks, rereads the snapshot.
+        with pytest.raises(InfrastructureError, match="frozen source does not match its source digest: main.tex"):
+            armarius._output_example(run, AgentRole.COPYEDIT, "review", schema, model, bundle)

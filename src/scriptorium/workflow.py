@@ -34,7 +34,7 @@ from .domain import (
     canonical_json,
     digest_json,
 )
-from .errors import ExampleUnavailableError, InfrastructureError, StateError
+from .errors import InfrastructureError, StateError
 from .examples import EXAMPLE_ROLES, build_review_example
 from .manuscript import (
     NON_TEXT_ANCHOR_EXTENSIONS,
@@ -1077,41 +1077,39 @@ class Armarius:
             return ReviewOutput
         raise InfrastructureError(f"run {run.id} has an unsupported frozen review output schema")
 
-    def output_example(
-        self, run: Run, task: Task, metadata: dict[str, str], schema: dict[str, Any], bundle: ManuscriptBundle
-    ) -> str:
-        """Return an illustrative output that parses under the attempt's frozen model and cites frozen anchors."""
-        kind = metadata["schema_kind"]
-        unavailable = f"no example is available for this attempt's frozen {kind} output schema shape"
-        if kind not in {"review", "scientific_review"} or task.role.value not in EXAMPLE_ROLES:
-            raise ExampleUnavailableError(unavailable)
-        try:
-            model = self._output_model_for_schema(run, kind, schema)
-        except InfrastructureError as exc:
-            raise ExampleUnavailableError(unavailable) from exc
+    def _output_example(
+        self,
+        run: Run,
+        role: AgentRole,
+        schema_kind: str,
+        schema: dict[str, Any],
+        output_model: type[StrictModel],
+        bundle: ManuscriptBundle,
+    ) -> str | None:
+        """Build an output that parses under the task's frozen model and cites frozen anchors, when one fits."""
         # Runs frozen before the evidence-anchor contract have no anchors an example could demonstrate.
         contract = self._evidence_anchor_contract_for_run(run, allow_missing=True)
-        if contract is None:
-            raise ExampleUnavailableError(unavailable)
+        if schema_kind not in {"review", "scientific_review"} or role.value not in EXAMPLE_ROLES or contract is None:
+            return None
         snapshot = self._run_dir(run.id) / "snapshot"
-        source_anchor, source_area = self._example_source(bundle, contract)
+        source_anchor, source_area = self._example_source(bundle, snapshot, contract)
         text = json.dumps(
-            build_review_example(schema, task.role.value, source_anchor, source_area), ensure_ascii=False, indent=2
+            build_review_example(schema, role.value, source_anchor, source_area), ensure_ascii=False, indent=2
         )
-        # The example is served only when it passes the same parse and anchor checks a submission would.
+        # An example is frozen only when it passes the same parse and anchor checks a submission would.
         parsed, issues = self._parse_and_validate_output(
-            model, text, lambda output: self._validate_review_output(output, bundle.anchor_map, snapshot, contract)
+            output_model,
+            text,
+            lambda output: self._validate_review_output(output, bundle.anchor_map, snapshot, contract),
         )
-        if parsed is None or issues:
-            raise ExampleUnavailableError(unavailable)
-        return text
+        return text if parsed is not None and not issues else None
 
     @staticmethod
-    def _example_source(bundle: ManuscriptBundle, contract: EvidenceAnchorContract):
+    def _example_source(bundle: ManuscriptBundle, snapshot: Path, contract: EvidenceAnchorContract):
         """Return a one-line anchor and its source's scope area, preferring a compiled entrypoint.
 
-        The line is read from the verified task bundle; the anchor check that follows reads the run snapshot, as a
-        submission's would, so a snapshot that disagrees with the bundle yields no example.
+        The line comes from the verified task bundle, and both it and the snapshot copy that submissions are checked
+        against must match the source digest the anchor carries.
         """
         entrypoints = {document.entrypoint for document in bundle.anchor_map.compiled_pdf.documents}
         candidates = sorted(
@@ -1120,11 +1118,18 @@ class Armarius:
         )
         for source in candidates:
             try:
-                lines = contract.split_lines((bundle.workspace / source.read_path).read_text(encoding="utf-8"))
-            except UnicodeDecodeError:
-                continue
+                copies = [
+                    (bundle.workspace / source.read_path).read_bytes(),
+                    (snapshot / source.source_path).read_bytes(),
+                ]
             except OSError as exc:
                 raise InfrastructureError(f"failed to read frozen source: {source.source_path}") from exc
+            if any(hashlib.sha256(copy).hexdigest() != source.source_digest for copy in copies):
+                raise InfrastructureError(f"frozen source does not match its source digest: {source.source_path}")
+            try:
+                lines = contract.split_lines(copies[0].decode("utf-8"))
+            except UnicodeDecodeError:
+                continue
             number, line = next(((number, line) for number, line in enumerate(lines, 1) if line.strip()), (0, ""))
             if number:
                 anchor = {
@@ -1136,6 +1141,16 @@ class Armarius:
                 }
                 return anchor, {"source_path": source.source_path, "start_line": 1, "end_line": source.line_count}
         return None, None
+
+    def frozen_output_example(self, metadata: dict[str, Any]) -> str | None:
+        """Return the example frozen with a task; tasks prepared before examples, or without one, have none."""
+        digest = metadata.get("example_digest")
+        if digest is None:
+            return None
+        try:
+            return self.artifacts.get_bytes(digest).decode("utf-8")
+        except (ArtifactError, UnicodeDecodeError) as exc:
+            raise InfrastructureError(f"frozen output example is unreadable: {digest}") from exc
 
     @staticmethod
     def _finding_definition(schema: dict[str, Any]) -> dict[str, Any]:
@@ -1225,6 +1240,11 @@ class Armarius:
         task = self.database.find_task(run.id, stage, role, "", input_digest)
         if task is None:
             task = self.database.create_task(Task(run_id=run.id, stage=stage, role=role, input_digest=input_digest))
+        example_digest = None
+        if not self.database.has_external_task(task.id):
+            # The example is frozen once with the task, outside its input digest, so earlier tasks keep theirs.
+            example = self._output_example(run, role, schema_kind, schema, output_model, base_bundle)
+            example_digest = None if example is None else self._record_text(example, "application/json").digest
         self.database.record_external_task(
             task.id,
             prompt_artifact.digest,
@@ -1232,6 +1252,7 @@ class Armarius:
             bundle_digest,
             base_bundle.workspace.relative_to(self._run_dir(run.id)).as_posix(),
             schema_kind,
+            example_digest,
         )
         if task.status != TaskStatus.COMPLETED:
             return None

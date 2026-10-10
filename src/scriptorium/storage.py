@@ -31,7 +31,7 @@ from scriptorium.domain import (
     validate_task_transition,
 )
 
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 
 
 _MIGRATION_1 = """
@@ -279,6 +279,14 @@ INSERT INTO schema_migrations (version, applied_at) VALUES (7, CURRENT_TIMESTAMP
 COMMIT;
 """
 
+# Tasks prepared before output examples, and tasks without one, keep a null example digest.
+_MIGRATION_8 = """
+BEGIN IMMEDIATE;
+ALTER TABLE external_tasks ADD COLUMN example_digest TEXT REFERENCES artifacts(digest) ON DELETE RESTRICT;
+INSERT INTO schema_migrations (version, applied_at) VALUES (8, CURRENT_TIMESTAMP);
+COMMIT;
+"""
+
 
 class StorageError(RuntimeError):
     pass
@@ -357,7 +365,13 @@ class Database:
         # executescript commits an open transaction, so run each fixed migration statement inside the caller's
         # write transaction, after rechecking a version that another process may already have advanced.
         version = connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0]
-        for target, migration in ((4, _MIGRATION_4), (5, _MIGRATION_5), (6, _MIGRATION_6), (7, _MIGRATION_7)):
+        for target, migration in (
+            (4, _MIGRATION_4),
+            (5, _MIGRATION_5),
+            (6, _MIGRATION_6),
+            (7, _MIGRATION_7),
+            (8, _MIGRATION_8),
+        ):
             if version >= target:
                 continue
             for statement in migration.split(";"):
@@ -553,13 +567,15 @@ class Database:
         bundle_digest: str,
         bundle_path: str,
         schema_kind: str,
+        example_digest: str | None = None,
     ) -> None:
+        # The example digest is written only with the first record; it is not part of the frozen-input identity.
         with self.transaction() as connection:
             connection.execute(
                 """INSERT OR IGNORE INTO external_tasks
-                (task_id, prompt_digest, schema_digest, bundle_digest, bundle_path, schema_kind)
-                VALUES (?, ?, ?, ?, ?, ?)""",
-                (task_id, prompt_digest, schema_digest, bundle_digest, bundle_path, schema_kind),
+                (task_id, prompt_digest, schema_digest, bundle_digest, bundle_path, schema_kind, example_digest)
+                VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                (task_id, prompt_digest, schema_digest, bundle_digest, bundle_path, schema_kind, example_digest),
             )
             row = connection.execute("SELECT * FROM external_tasks WHERE task_id = ?", (task_id,)).fetchone()
             expected = (prompt_digest, schema_digest, bundle_digest, bundle_path, schema_kind)
@@ -571,6 +587,11 @@ class Database:
                 != expected
             ):
                 raise ConflictError(f"external task material changed: {task_id}")
+
+    def has_external_task(self, task_id: str) -> bool:
+        return (
+            self.connection.execute("SELECT 1 FROM external_tasks WHERE task_id = ?", (task_id,)).fetchone() is not None
+        )
 
     def get_external_task(self, task_id: str) -> dict[str, str]:
         row = self.connection.execute("SELECT * FROM external_tasks WHERE task_id = ?", (task_id,)).fetchone()
