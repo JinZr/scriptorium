@@ -2,7 +2,7 @@ import asyncio
 
 from scriptorium.domain import AgentRole, AttemptStatus, canonical_json, digest_json
 import scriptorium.schemas
-from scriptorium.schemas import SEVERITY_RUBRIC, InventoriedScientificReviewOutput, ScopedReviewOutput
+from scriptorium.schemas import SEVERITY_RUBRIC, SEVERITY_RULES, InventoriedScientificReviewOutput, ScopedReviewOutput
 from scriptorium.service import ScriptoriumService
 import scriptorium.workflow
 
@@ -41,6 +41,20 @@ def test_every_review_role_freezes_the_rubric_once_into_its_task_input(tmp_path,
     for role in _REVIEW_ROLES:
         assert changed[role][1] != current[role][1]
         assert changed[role][0] != current[role][0]
+
+
+def test_consistency_roles_freeze_the_value_versus_label_severity_rule(tmp_path):
+    repo = make_repository(tmp_path, roles=("consistency", "figure_review"))
+    with ScriptoriumService(repo, manuscript_manager=PdfBuildingManuscriptManager(repo)) as service:
+        run = asyncio.run(service.start_run("HEAD", "quick"))["run"]
+        prompts = {role: claim(service, run.id, role)["prompt"] for role in ("consistency", "figure_review")}
+    rule = SEVERITY_RULES[3]
+    assert "moderate only when a claim rests on that value" in rule and "minor or suggestion" in rule
+    for role, prompt in prompts.items():
+        assert prompt.count(rule) == 1, role
+        assert prompt.count(SEVERITY_RUBRIC) == 1, role
+    assert "serious only when a claim rests on it" in prompts["consistency"]
+    assert "label, caption, or wording" in prompts["figure_review"]
 
 
 def test_new_findings_require_a_recorded_consequence(tmp_path):
