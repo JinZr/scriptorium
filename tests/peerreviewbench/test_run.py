@@ -451,7 +451,12 @@ def test_completed_benchmark_paper_is_not_repeated_on_resume(
     source_paths = {item["path"] for item in initial["frozen_inputs"]["source_manifest"]}
     assert "egs/peerreviewbench/run.py" in source_paths
     assert "src/scriptorium/service.py" in source_paths
-    assert "skills/scriptorium/SKILL.md" in source_paths
+    reviewer_skill = benchmark_run.REPOSITORY_ROOT / "skills" / "scriptorium-review"
+    reviewer_files = {
+        path.relative_to(benchmark_run.REPOSITORY_ROOT).as_posix()
+        for path in [reviewer_skill / "SKILL.md", *sorted((reviewer_skill / "reference").glob("*.md"))]
+    }
+    assert {"skills/scriptorium/SKILL.md", *reviewer_files} <= source_paths
 
     entry = initial["papers"]["9"]
     project = run_dir / entry["project_dir"]
@@ -479,8 +484,16 @@ def test_completed_benchmark_paper_is_not_repeated_on_resume(
     assert json.loads((run_dir / "run_manifest.json").read_text(encoding="utf-8"))["status"] == "complete"
 
 
-def test_shared_skill_change_invalidates_frozen_benchmark_sources(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize(
+    "skill_path",
+    [
+        "skills/scriptorium/SKILL.md",
+        "skills/scriptorium-review/SKILL.md",
+        "skills/scriptorium-review/reference/scope.md",
+    ],
+)
+def test_skill_change_invalidates_frozen_benchmark_sources(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, skill_path: str
 ) -> None:
     for relative in benchmark_run.BENCHMARK_SOURCE_FILES:
         source = benchmark_run.REPOSITORY_ROOT / relative
@@ -494,7 +507,7 @@ def test_shared_skill_change_invalidates_frozen_benchmark_sources(
         "scriptorium_commit": "unchanged-commit",
         "source_manifest": manifest(tmp_path),
     }
-    skill = tmp_path / "skills/scriptorium/SKILL.md"
+    skill = tmp_path / skill_path
     skill.write_text(skill.read_text(encoding="utf-8") + "\nChanged reviewer instructions.\n", encoding="utf-8")
     with pytest.raises(BenchmarkError, match="Benchmark source files changed"):
         benchmark_run._validate_frozen_benchmark_sources(frozen)

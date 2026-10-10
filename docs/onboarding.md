@@ -40,14 +40,18 @@ bash /path/to/scriptorium/utils/preflight.sh
 
 ## 第三步：让模型客户端加载 skill
 
-模型按 [skills/scriptorium/SKILL.md](../skills/scriptorium/SKILL.md) 里的说明操作 CLI。
-把整个 `skills/scriptorium/` 目录复制或软链接到客户端的 skills 目录：
+模型按两份 skill 操作 CLI：
 
-- Claude Code：`~/.claude/skills/scriptorium/`
-- Codex：`~/.codex/skills/scriptorium/`
-- Antigravity（命令行工具名为 `agy`）：按其文档的 skills 位置放置同一目录
+- [skills/scriptorium/SKILL.md](../skills/scriptorium/SKILL.md)：操作者，负责开始运行、和你商定审稿 brief、读报告、按你的指示记录决定；
+- [skills/scriptorium-review/SKILL.md](../skills/scriptorium-review/SKILL.md)：审稿者，负责 claim 任务、检索证据、提交结果。
 
-重启客户端后，在对话里提到 Scriptorium 时它应能引用这份 skill。
+把 `skills/scriptorium/` 和 `skills/scriptorium-review/` 两个目录都复制或软链接到客户端的 skills 目录：
+
+- Claude Code：`~/.claude/skills/scriptorium/` 和 `~/.claude/skills/scriptorium-review/`
+- Codex：`~/.codex/skills/scriptorium/` 和 `~/.codex/skills/scriptorium-review/`
+- Antigravity（命令行工具名为 `agy`）：按其文档的 skills 位置放置这两个目录
+
+重启客户端后，在对话里提到 Scriptorium 时它应能引用这两份 skill。
 
 ## 第四步：准备稿件仓库
 

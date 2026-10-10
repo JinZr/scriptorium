@@ -28,7 +28,7 @@ For development:
 python -m pip install -e '.[dev]'
 ```
 
-The model client supplies its own authentication and model selection. Scriptorium has no provider SDK or credentials. The canonical client instructions are in [the shared skill](skills/scriptorium/SKILL.md); each client should load that file or a thin link to it.
+The model client supplies its own authentication and model selection. Scriptorium has no provider SDK or credentials. Client instructions come as two skills, split by audience. [`skills/scriptorium`](skills/scriptorium/SKILL.md) is for the operator, who starts runs, agrees the review brief, reads reports, and records the author's decisions. [`skills/scriptorium-review`](skills/scriptorium-review/SKILL.md) is for the reviewer, who claims a task, retrieves evidence, and submits. Link both directories into the client's skills directory, for example `~/.claude/skills/` for Claude Code or `~/.codex/skills/` for Codex.
 
 ## Start and review
 
