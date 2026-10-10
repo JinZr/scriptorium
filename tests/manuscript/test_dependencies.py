@@ -127,6 +127,8 @@ def test_input_command_boundary(tmp_path: Path) -> None:
         r"\BVerbatimInput{protocols/prompt.txt}",
         r"\LVerbatimInput{protocols/prompt.txt}",
         r"\verbatiminput{protocols/prompt.txt}",
+        r"\verbatiminput*{protocols/prompt.txt}",
+        r"\VerbatimInput*[breaklines=true]{protocols/prompt.txt}",
         r"\lstinputlisting[language=Python]{protocols/prompt.txt}",
     ],
 )
@@ -152,6 +154,21 @@ def test_verbatim_input_does_not_default_to_tex(tmp_path: Path) -> None:
     (tmp_path / "notes.tex").write_text("Other.")
     sources = ManuscriptManager(tmp_path).scan_sources(tmp_path, "main.tex")
     assert {source.path for source in sources} == {"main.tex", "notes"}
+
+
+def test_verbatim_tex_target_is_frozen_but_not_scanned(tmp_path: Path) -> None:
+    (tmp_path / "main.tex").write_text(r"\verbatiminput{example.tex}")
+    (tmp_path / "example.tex").write_text(r"\input{missing}")
+    sources = ManuscriptManager(tmp_path).scan_sources(tmp_path, "main.tex")
+    assert {source.path for source in sources} == {"main.tex", "example.tex"}
+
+
+def test_verbatim_tex_target_is_still_scanned_when_also_input(tmp_path: Path) -> None:
+    (tmp_path / "main.tex").write_text("\\verbatiminput{example.tex}\n\\input{example}")
+    (tmp_path / "example.tex").write_text(r"\input{part}")
+    (tmp_path / "part.tex").write_text("Part.")
+    sources = ManuscriptManager(tmp_path).scan_sources(tmp_path, "main.tex")
+    assert {source.path for source in sources} == {"main.tex", "example.tex", "part.tex"}
 
 
 def test_candidates_longer_than_the_path_limit_are_not_matches(tmp_path: Path) -> None:

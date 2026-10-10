@@ -456,3 +456,12 @@ def test_prose_words_are_not_units_and_crlf_separates_arguments(tmp_path):
         ("tabular", "0.75"),
         ("quantity", "0.75"),
     ]
+
+
+def test_navigation_does_not_treat_a_verbatim_tex_target_as_typeset_text(tmp_path):
+    (tmp_path / "main.tex").write_text("\\begin{document}\\verbatiminput{example.tex}\\end{document}\n")
+    (tmp_path / "example.tex").write_text("\\section{Shown}\\SI{3}{ms}\n")
+    manager = ManuscriptManager(tmp_path)
+    sources = manager.scan_sources(tmp_path, "main.tex")
+    entries = json.loads(manager.create_navigation(tmp_path, sources, ("main.tex",)))["entries"]
+    assert not [entry for entry in entries if entry["source_path"] == "example.tex" and entry["command"] != "section"]

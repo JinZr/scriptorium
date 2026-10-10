@@ -284,3 +284,28 @@ def test_native_build_rejects_hidden_content_in_user_texmf(tmp_path, monkeypatch
     with pytest.raises(InfrastructureError, match="outside the snapshot.*scriptorium-hidden.tex"):
         manager.build(workspace, ManuscriptConfig("main.tex", "pdflatex"))
     assert (workspace / "main.pdf").is_file()
+
+
+@pytest.mark.skipif(shutil.which("latexmk") is None, reason="latexmk required; exercised in LaTeX CI")
+@pytest.mark.parametrize(
+    "command, name",
+    [
+        (r"\usepackage{listings}", "algorithm.py"),
+        (r"\usepackage{fancyvrb}", "notes"),
+    ],
+)
+def test_verbatim_files_of_any_suffix_are_frozen_review_inputs(tmp_path, command, name):
+    macro = r"\lstinputlisting" if "listings" in command else r"\VerbatimInput"
+    (tmp_path / "main.tex").write_text(
+        "\\documentclass{article}" + command + "\n\\begin{document}\n" + macro + "{" + name + "}\n\\end{document}\n"
+    )
+    (tmp_path / name).write_text("print('shown')\n")
+    manager = ManuscriptManager(tmp_path)
+    sources = manager.scan_sources(tmp_path, "main.tex")
+    assert {source.path for source in sources} == {"main.tex", name}
+    workspace = tmp_path / "build"
+    shutil.copytree(tmp_path, workspace)
+    build = manager.build(workspace, ManuscriptConfig(main="main.tex", engine="pdflatex"))
+    assert build.compiler_inputs is not None
+    assert next(item for item in build.compiler_inputs if item.path == name).kind == "review"
+    manager.validate_build_sources(build, sources)
