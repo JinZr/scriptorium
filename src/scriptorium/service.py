@@ -1673,7 +1673,7 @@ class ScriptoriumService:
             for anchor in finding["evidence"]:
                 line = f"  - evidence: `{ScriptoriumService._markdown_location(anchor)}`"
                 if quoted_text := anchor.get("quoted_text"):
-                    line += ": " + text(quoted_text)
+                    line += ": " + ScriptoriumService._markdown_code_span(text(quoted_text))
                 lines.append(line)
         return lines
 
@@ -1697,7 +1697,15 @@ class ScriptoriumService:
             ended = (text.splitlines(keepends=True) or [""])[-1] != bodies[-1]
             return " ⏎ ".join(bodies) + (" ⏎" if ended else "")
         rendered = re.sub("|".join(re.escape(terminator) for terminator in terminators), " ⏎ ", text)
-        return rendered[:-1] if rendered.endswith(" ⏎ ") else rendered
+        return rendered[:-1] if text.endswith(terminators) else rendered
+
+    @staticmethod
+    def _markdown_code_span(text: str) -> str:
+        """Show evidence verbatim: LaTeX escapes, math, and comments must not be consumed by a Markdown renderer."""
+        longest = max((len(run) for run in re.findall("`+", text)), default=0)
+        fence = "`" * (longest + 1)
+        pad = " " if text.startswith("`") or text.endswith("`") else ""
+        return f"{fence}{pad}{text}{pad}{fence}"
 
     @staticmethod
     def _claim_check_report(task_id: str, attempt_id: str, output: ScientificReviewOutput) -> dict[str, Any]:
@@ -1762,7 +1770,8 @@ class ScriptoriumService:
     @staticmethod
     def _markdown_location(anchor: dict[str, Any]) -> str:
         # Validation anchors any record with a line range to the source; a page beside it was only bounds-checked.
-        if "start_line" in anchor:
+        # Historical page anchors may carry null line keys, so test the value rather than the key.
+        if anchor.get("start_line") is not None:
             return f"{anchor['source_path']}:{anchor['start_line']}-{anchor['end_line']}"
         return f"{anchor['source_path']}:page {anchor['page']}"
 
