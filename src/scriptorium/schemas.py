@@ -9,7 +9,7 @@ from typing import Annotated, Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from pydantic_core import PydanticCustomError
 
-from .domain import digest_json
+from .domain import ReviewStage, VenueFamily, digest_json
 
 
 class StrictModel(BaseModel):
@@ -305,6 +305,76 @@ SEVERITY_RUBRIC = "\n".join(
         _COMPLIANCE_RULE,
     )
 )
+
+
+_BriefItem = Annotated[str, Field(min_length=1, max_length=500)]
+_BriefItems = Annotated[list[_BriefItem], Field(max_length=10)]
+
+
+class ReviewBrief(StrictModel):
+    """Author context captured by the host before a run and frozen into every review prompt."""
+
+    venue_family: VenueFamily
+    venue: str | None = Field(default=None, min_length=1, max_length=200)
+    stage: ReviewStage
+    priority_claims: _BriefItems = []
+    known_weaknesses: _BriefItems = []
+    prior_reviews: str | None = Field(default=None, min_length=1, max_length=4000)
+    ignore: _BriefItems = []
+    severity_notes: str | None = Field(default=None, min_length=1, max_length=2000)
+    recorded_by: str | None = Field(default=None, min_length=1, max_length=200)
+
+    @field_validator("venue", "prior_reviews", "severity_notes", "recorded_by")
+    @classmethod
+    def _optional_text_is_not_blank(cls, value: str | None) -> str | None:
+        if value is not None and not value.strip():
+            raise ValueError("must not be blank; omit the field or use null instead")
+        return value
+
+    @field_validator("priority_claims", "known_weaknesses", "ignore")
+    @classmethod
+    def _items_are_not_blank(cls, value: list[str]) -> list[str]:
+        if any(not item.strip() for item in value):
+            raise ValueError("items must not be blank")
+        return value
+
+
+_VENUE_FAMILY_LABELS = {
+    VenueFamily.ML_CONFERENCE: "a machine-learning conference",
+    VenueFamily.NATURE_FAMILY: "a Nature-family journal",
+    VenueFamily.OTHER: "another venue",
+}
+_STAGE_LABELS = {
+    ReviewStage.INTERNAL_DRAFT: "an internal draft, not yet ready to submit",
+    ReviewStage.PRESUBMISSION: "a manuscript about to be submitted",
+    ReviewStage.REBUTTAL_REVISION: "a revision responding to earlier reviewers",
+    ReviewStage.CAMERA_READY: "an accepted paper being finalized",
+}
+
+
+def render_review_brief(brief: ReviewBrief) -> str:
+    """Render the frozen prompt section for a brief; equal briefs always render identical text."""
+    lines = [
+        "Review brief, recorded with the authors before this run and frozen with it. Use it to prioritize and "
+        "calibrate the review, not as evidence; it does not change the evidence, scope, or severity rules. The "
+        "target venue named in the severity rubric is this venue family at this stage.",
+        f"- Venue family: {brief.venue_family.value} ({_VENUE_FAMILY_LABELS[brief.venue_family]})",
+        *([f"- Venue: {brief.venue}"] if brief.venue is not None else []),
+        f"- Stage: {brief.stage.value} ({_STAGE_LABELS[brief.stage]})",
+    ]
+    for heading, items in (
+        ("Claims the authors most want checked", brief.priority_claims),
+        ("Weaknesses the authors already know", brief.known_weaknesses),
+        ("Out of scope this round; report an item here only if it meets the blocker definition", brief.ignore),
+    ):
+        if items:
+            lines.append(f"- {heading}:")
+            lines.extend(f"  - {item}" for item in items)
+    if brief.prior_reviews is not None:
+        lines.append(f"- Earlier reviewer comments, as summarized by the authors: {brief.prior_reviews}")
+    if brief.severity_notes is not None:
+        lines.append(f"- Severity calibration notes from the authors: {brief.severity_notes}")
+    return "\n".join(lines)
 
 
 class RatedFinding(FindingCandidate):

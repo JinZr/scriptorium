@@ -11,6 +11,27 @@ scriptorium --json task claim TASK_ID --client codex --model MODEL --effort EFFO
 scriptorium --json task show ATTEMPT_ID
 ```
 
+## Review brief
+
+Before starting a run, the host agent drafts a review brief with the author. It reads `detected_template` from
+`doctor`, infers the venue family, and asks only for what it cannot infer: the stage, the two or three claims to
+check first, what earlier reviewers said, and what to ignore this round. The author confirms the draft, edits it,
+or accepts the defaults; the agent writes `brief.json` (format in [configuration](configuration.md#review-brief)) and
+starts the run with it:
+
+```bash
+scriptorium --json run start --revision COMMIT --profile full --brief brief.json
+```
+
+The brief is validated, published as a content-addressed artifact, and recorded on the run by digest. Its rendered
+text (venue family, stage, and the author's lists) precedes the severity rubric in every review role's frozen prompt.
+Revision and verification prompts do not include it. Any attempt of the run can read the exact frozen brief with
+`task show ATTEMPT_ID --part brief`, which uses the same bounded fragment protocol as `--part prompt`; the attempt
+overview lists it under `inputs.brief` only when the run has one. `run start` and `run status` show a compact summary
+(`review_brief`: digest, venue family, venue, stage, and list counts), and the `run` report section includes the
+brief itself. The brief cannot be changed after the run starts, including by `run continue`; to review under a
+different brief, start a new run. A run without a brief behaves as before, and `--part brief` reports that it has none.
+
 ## Task command reference
 
 Every command accepts the global `--json` flag before the command name. `scriptorium task COMMAND -h` lists each
@@ -20,7 +41,7 @@ option. Bounded responses stay within 7,000 UTF-8 bytes; run `next_command` unch
 | --- | --- | --- | --- |
 | `task claim TASK_ID ...` | Start or reconnect to this session's attempt | `attempt`, `input_digest`, `inputs.*.command`, `source_map_command` | none |
 | `task show ATTEMPT_ID` | Attempt overview | same as claim | none |
-| `task show ATTEMPT_ID --part P` | Frozen prompt, schema, or source map text | `text`, `offset`, `total_chars`, `digest` | `next_command` |
+| `task show ATTEMPT_ID --part P` | Frozen prompt, schema, source map, or review brief text | `text`, `offset`, `total_chars`, `digest` | `next_command` |
 | `task nav ATTEMPT_ID` | Filter navigation entries | `entries`, `total_entries`, `command_counts` | `next_cursor`, `next_command` |
 | `task search ATTEMPT_ID --query Q` | Literal case-insensitive search | `matches[]` with `path`, `line`, `column`, `excerpt`, `source_digest` | `next_cursor`, `next_command` |
 | `task read ATTEMPT_ID --path P` | Bounded source or metadata lines | `lines[]` with `line`, `offset`, `text`; `source_path`, `source_digest`, optional `anchor` | `next_line`, `next_offset`, `next_command` |

@@ -19,6 +19,8 @@ import subprocess
 import tempfile
 from typing import Any, Iterator
 
+from pydantic import ValidationError
+
 from .artifacts import ArtifactError, ArtifactStore
 from .config import find_repo, load_project_config, reject_legacy_local_config, validate_ready
 from .decision_stats import current_status, decision_stats, markdown_lines as markdown_decision_stats
@@ -35,7 +37,6 @@ from .domain import (
     Task,
     TaskStatus,
     VerificationResult,
-    digest_json,
     new_id,
     utc_now,
 )
@@ -54,6 +55,7 @@ from .schemas import (
     EvidenceAnchorContract,
     InventoriedScientificReviewOutput,
     LinkedScientificReviewOutput,
+    ReviewBrief,
     ScientificReviewOutput,
     ScopedReviewOutput,
 )
@@ -70,7 +72,7 @@ from .tool_output import (
     run_overview,
     task_view,
 )
-from .workflow import Armarius
+from .workflow import Armarius, task_input_digest
 
 
 class _RunBusyError(StateError):
@@ -301,6 +303,7 @@ class ScriptoriumService:
                             or "none"
                         ),
                     )
+            detected_template = self._detected_template(snapshot, project)
 
         if project is None:
             check("review_profile", False, "not run because tracked_project_config failed")
@@ -322,7 +325,16 @@ class ScriptoriumService:
             "repository": str(self.repo),
             "profile": selected_profile,
             "checks": checks,
+            "detected_template": detected_template,
         }
+
+    def _detected_template(self, snapshot: Path, project) -> dict[str, str | None] | None:
+        if project is None:
+            return None
+        try:
+            return self.manuscript.detect_template(snapshot, project.manuscript)
+        except (InfrastructureError, OSError):
+            return None
 
     def _refuse_duplicate_run(self, commit_sha: str) -> None:
         active = self._storage(self.database.list_active_runs, commit_sha)
@@ -334,7 +346,10 @@ class ScriptoriumService:
                 f"inspect it with `run status {existing.id}`, {remedy} it, or pass --allow-duplicate to start another"
             )
 
-    async def start_run(self, revision: str, profile: str, allow_duplicate: bool = False) -> dict[str, Any]:
+    async def start_run(
+        self, revision: str, profile: str, allow_duplicate: bool = False, brief: str | None = None
+    ) -> dict[str, Any]:
+        review_brief = self._parse_brief(brief)
         reject_legacy_local_config(self.repo)
         run_id = new_id("run")
         self._storage(self.database.ensure_external_schema)
@@ -346,8 +361,24 @@ class ScriptoriumService:
             locks.enter_context(self._run_operation(run_id, "run start"))
             if not allow_duplicate:
                 self._refuse_duplicate_run(revision)
-            await self.armarius.start_run(revision, profile, run_id=run_id)
-            return self.get_run(run_id)
+            run = await self.armarius.start_run(revision, profile, run_id=run_id, brief=review_brief)
+            return {**self._with_brief(self.get_run(run_id)), "detected_template": self.armarius.detected_template(run)}
+
+    @staticmethod
+    def _parse_brief(text: str | None) -> ReviewBrief | None:
+        if text is None:
+            return None
+        try:
+            return ReviewBrief.model_validate_json(text)
+        except ValidationError as exc:
+            problems = "; ".join(
+                f"{'.'.join(map(str, error['loc'])) or 'brief'}: {error['msg']}" for error in exc.errors()
+            )
+            raise ConfigurationError(f"invalid review brief: {problems}") from exc
+
+    def _with_brief(self, view: dict[str, Any]) -> dict[str, Any]:
+        brief = self.armarius.review_brief(view["run"])
+        return view if brief is None else {**view, "review_brief": brief}
 
     def get_run(self, run_id: str) -> dict[str, Any]:
         run = self._storage(self.database.get_run, run_id)
@@ -369,7 +400,7 @@ class ScriptoriumService:
             view = self.get_run(run_id)
             external = view["run"].frozen_config.get("execution") == "external"
             next_actions = self.list_tasks(run_id)["next_actions"] if external else []
-            return run_overview(view, next_actions)
+            return run_overview(self._with_brief(view), next_actions)
 
     async def resume_run(self, run_id: str) -> dict[str, Any]:
         run = self._storage(self.database.get_run, run_id)
@@ -502,19 +533,14 @@ class ScriptoriumService:
             "attempt": attempt,
             "prompt": prompt,
             "schema": schema,
-            "input_digest": digest_json(
-                {
-                    "prompt_digest": attempt.prompt_digest,
-                    "schema_digest": attempt.schema_digest,
-                    "bundle_digest": attempt.bundle_digest,
-                }
-            ),
+            "input_digest": task_input_digest(run, attempt.prompt_digest, attempt.schema_digest, attempt.bundle_digest),
             "bundle_digest": metadata["bundle_digest"],
             "bundle_path": str(bundle.workspace),
             "navigation_digest": ArtifactStore.digest_file(bundle.workspace / "navigation.json"),
             "source_map": bundle.anchor_map.model_dump(mode="json"),
             "source_map_text": source_map_bytes.decode("utf-8"),
             "source_map_digest": ArtifactStore.digest_bytes(source_map_bytes),
+            "brief": self.armarius.review_brief(run),
         }
 
     def task_view(self, context: dict[str, Any], part: str | None = None, offset: int = 0):
@@ -1343,6 +1369,7 @@ class ScriptoriumService:
             )
         payload = {
             **run_view,
+            "run": self._report_run(run_view["run"]),
             "findings": finding_records,
             "decision_stats": decision_stats((item["finding"], item["decisions"]) for item in finding_records),
             "patches": [
@@ -1364,6 +1391,10 @@ class ScriptoriumService:
         if format == "json":
             return _plain(payload)
         return self._markdown_report(payload)
+
+    def _report_run(self, run: Run) -> Run | dict[str, Any]:
+        brief = self.armarius.review_brief(run)
+        return run if brief is None else {**_plain(run), "review_brief": brief["content"]}
 
     def evaluate_gate(self, run_id: str) -> dict[str, Any]:
         run = self._storage(self.database.get_run, run_id)
@@ -1704,6 +1735,17 @@ class ScriptoriumService:
         return lines
 
     @staticmethod
+    def _markdown_brief(brief: dict[str, Any] | None) -> list[str]:
+        if brief is None:
+            return []
+        venue = f" ({brief['venue']})" if brief["venue"] else ""
+        return [
+            f"- Review brief: `{brief['venue_family']}`{venue}, stage `{brief['stage']}`; "
+            f"{len(brief['priority_claims'])} priority claims, {len(brief['known_weaknesses'])} known weaknesses, "
+            f"{len(brief['ignore'])} out-of-scope items"
+        ]
+
+    @staticmethod
     def _markdown_report(payload: dict[str, Any]) -> str:
         plain = _plain(payload)
         run = plain["run"]
@@ -1714,6 +1756,7 @@ class ScriptoriumService:
             f"- Status: `{run['status']}`",
             f"- Commit: `{run['commit_sha']}`",
             f"- Profile: `{run['profile']}`",
+            *ScriptoriumService._markdown_brief(run.get("review_brief")),
             f"- Estimated cost: {cost}",
             f"- Gate: `{'pass' if plain['gate']['passed'] else 'not passed'}`",
             "",

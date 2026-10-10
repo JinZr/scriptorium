@@ -84,6 +84,19 @@ class VerificationResult(str, Enum):
     FAIL = "fail"
 
 
+class VenueFamily(str, Enum):
+    ML_CONFERENCE = "ml_conference"
+    NATURE_FAMILY = "nature_family"
+    OTHER = "other"
+
+
+class ReviewStage(str, Enum):
+    INTERNAL_DRAFT = "internal_draft"
+    PRESUBMISSION = "presubmission"
+    REBUTTAL_REVISION = "rebuttal_revision"
+    CAMERA_READY = "camera_ready"
+
+
 class AgentRole(str, Enum):
     WORKFLOW = "workflow"
     VISUAL_TRANSCRIPTION = "visual_transcription"
@@ -225,6 +238,8 @@ class Run:
     created_at: str = field(default_factory=utc_now)
     updated_at: str = field(default_factory=utc_now)
     error: str | None = None
+    # Digest of the frozen review brief artifact; runs started without a brief keep None.
+    brief_digest: str | None = None
 
 
 @dataclass(frozen=True)

@@ -58,6 +58,7 @@ from .schemas import (
     RatedFinding,
     RatedReviewOutput,
     RatedScientificReviewOutput,
+    ReviewBrief,
     ReviewOutput,
     RevisionOutput,
     ScientificReviewOutput,
@@ -71,10 +72,12 @@ from .schemas import (
     evidence_anchor_contract_content,
     evidence_anchor_contract_digest,
     output_schema,
+    render_review_brief,
 )
 from .storage import Database, StorageError
 
 VALIDATION_REPORT_MEDIA_TYPE = "application/vnd.scriptorium.validation-report+json"
+REVIEW_BRIEF_MEDIA_TYPE = "application/vnd.scriptorium.review-brief+json"
 _DIAGNOSTIC_TEXT_LIMIT = 2_000
 _DIAGNOSTIC_DIFF_LIMIT = 4_000
 _CORRECTION_PROJECTION_LIMIT = 64 * 1024
@@ -88,6 +91,14 @@ class TaskOutcome:
     task: Task
     attempt: Attempt
     output: ReviewOutput | VisualTranscriptionOutput | RevisionOutput | VerificationOutput
+
+
+def task_input_digest(run: Run, prompt_digest: str, schema_digest: str, bundle_digest: str) -> str:
+    """Return a task's frozen input identity; a run's review brief joins it only when the run has one."""
+    inputs = {"prompt_digest": prompt_digest, "schema_digest": schema_digest, "bundle_digest": bundle_digest}
+    if run.brief_digest is not None:
+        inputs["brief_digest"] = run.brief_digest
+    return digest_json(inputs)
 
 
 class Armarius:
@@ -112,6 +123,7 @@ class Armarius:
         profile: str,
         *,
         run_id: str,
+        brief: ReviewBrief | None = None,
     ) -> Run:
         revision = self.manuscript.resolve_revision(revision_name)
         run_dir = self._run_dir(run_id)
@@ -126,6 +138,7 @@ class Armarius:
             sources,
             (snapshot / "scriptorium.toml").read_text(encoding="utf-8"),
             self.manuscript.create_navigation(snapshot, sources, project.manuscript.entrypoints),
+            brief,
         )
         run = Run(
             id=run_id,
@@ -135,6 +148,7 @@ class Armarius:
             profile=profile,
             config_digest=digest_json(frozen_config),
             frozen_config=frozen_config,
+            brief_digest=self._publish_brief(brief),
         )
         self.database.create_run(run)
         try:
@@ -143,6 +157,25 @@ class Armarius:
             self._fail_active_run(run.id, exc)
             raise
         return self.database.get_run(run.id)
+
+    def _publish_brief(self, brief: ReviewBrief | None) -> str | None:
+        if brief is None:
+            return None
+        return self._record_text(canonical_json(brief.model_dump(mode="json")), REVIEW_BRIEF_MEDIA_TYPE).digest
+
+    def review_brief(self, run: Run) -> dict[str, Any] | None:
+        """Return the run's frozen brief text, digest and content, or None for a run started without one."""
+        if run.brief_digest is None:
+            return None
+        try:
+            text = self.artifacts.get_bytes(run.brief_digest).decode("utf-8")
+            content = ReviewBrief.model_validate_json(text).model_dump(mode="json")
+        except (ArtifactError, UnicodeDecodeError, ValidationError) as exc:
+            raise InfrastructureError(f"run {run.id} has a missing or corrupt review brief") from exc
+        return {"digest": run.brief_digest, "text": text, "content": content}
+
+    def detected_template(self, run: Run) -> dict[str, str | None]:
+        return self.manuscript.detect_template(self._run_dir(run.id) / "snapshot", self._manuscript_config(run))
 
     async def resume_run(self, run_id: str) -> Run:
         run = self.database.get_run(run_id)
@@ -1121,13 +1154,7 @@ class Armarius:
         files = self._directory_records(base_bundle.workspace)
         bundle_digest = digest_json(files)
         self._record_text(canonical_json(files), "application/vnd.scriptorium.bundle-index+json")
-        input_digest = digest_json(
-            {
-                "prompt_digest": prompt_artifact.digest,
-                "schema_digest": schema_artifact.digest,
-                "bundle_digest": bundle_digest,
-            }
-        )
+        input_digest = task_input_digest(run, prompt_artifact.digest, schema_artifact.digest, bundle_digest)
         task = self.database.find_task(run.id, stage, role, "", input_digest)
         if task is None:
             task = self.database.create_task(Task(run_id=run.id, stage=stage, role=role, input_digest=input_digest))
@@ -1463,15 +1490,10 @@ class Armarius:
         task = self.database.get_task(attempt.task_id)
         run = self.database.get_run(task.run_id)
         self.require_external_run(run)
-        if input_digest != digest_json(
-            {
-                "prompt_digest": attempt.prompt_digest,
-                "schema_digest": attempt.schema_digest,
-                "bundle_digest": attempt.bundle_digest,
-            }
-        ):
+        if input_digest != task_input_digest(run, attempt.prompt_digest, attempt.schema_digest, attempt.bundle_digest):
             raise StateError("submitted input digest does not match frozen attempt")
         self._load_prompt_artifact(attempt.prompt_digest)
+        self.review_brief(run)
         metadata = self.database.get_external_task(task.id)
         if attempt.bundle_digest != metadata["bundle_digest"] or attempt.schema_digest != metadata["schema_digest"]:
             raise InfrastructureError("attempt is not bound to its frozen task")
@@ -2084,8 +2106,10 @@ class Armarius:
         sources: tuple[SourceFile, ...],
         project_config_text: str,
         navigation: str,
+        brief: ReviewBrief | None = None,
     ) -> dict[str, Any]:
         anchor_contract = DEFAULT_EVIDENCE_ANCHOR_CONTRACT
+        brief_section = None if brief is None else render_review_brief(brief)
         anchor_content = evidence_anchor_contract_content(anchor_contract)
         anchor_digest = evidence_anchor_contract_digest(anchor_contract)
         roles = (
@@ -2095,7 +2119,9 @@ class Armarius:
         )
         prompts = {role: self._prompt_record(AgentRole(role)) for role in roles}
         prompt_templates = {
-            role: self._content_record(self._review_prompt_template(prompts[role]["content"], anchor_contract))
+            role: self._content_record(
+                self._review_prompt_template(prompts[role]["content"], anchor_contract, brief_section)
+            )
             for role in project.profiles[profile]
         }
         prompt_templates[AgentRole.REVISION.value] = self._content_record(
@@ -2173,8 +2199,13 @@ class Armarius:
         )
 
     @staticmethod
-    def _review_prompt_template(role_prompt: str, contract: EvidenceAnchorContract) -> str:
+    def _review_prompt_template(
+        role_prompt: str, contract: EvidenceAnchorContract, brief_section: str | None = None
+    ) -> str:
         contract_digest = evidence_anchor_contract_digest(contract)
+        # A brief precedes the rubric so its venue gives the rubric's "target venue" a referent; without one the
+        # template keeps its earlier bytes.
+        rubric = SEVERITY_RUBRIC if brief_section is None else f"{brief_section}\n\n{SEVERITY_RUBRIC}"
         return (
             f"{role_prompt}\n\n"
             "Review the frozen manuscript in the workspace. Read source files and rendered pages "
@@ -2196,7 +2227,7 @@ class Armarius:
             "scope.outstanding. Missing external material and unresolved scientific conclusions belong "
             "in scope.limitations and do not alone prevent complete after the available relevant material "
             "has been assessed. This declaration does not prove inspection; findings may be empty.\n\n"
-            f"{SEVERITY_RUBRIC}\n\n"
+            f"{rubric}\n\n"
             "Return only the ReviewOutput JSON object with no prose before or after it."
         )
 

@@ -80,12 +80,33 @@ def report_command(run_id, part, *arguments):
     return shlex.join(["scriptorium", "--json", "run", "report", run_id, "--part", part, *map(str, arguments)])
 
 
+def brief_summary(brief):
+    content = brief["content"]
+    return {
+        "digest": brief["digest"],
+        "venue_family": content["venue_family"],
+        "venue": content["venue"],
+        "stage": content["stage"],
+        "priority_claims": len(content["priority_claims"]),
+        "known_weaknesses": len(content["known_weaknesses"]),
+        "ignore": len(content["ignore"]),
+        "has_prior_reviews": content["prior_reviews"] is not None,
+        "has_severity_notes": content["severity_notes"] is not None,
+    }
+
+
 def run_overview(view, next_actions=None):
     run = view["run"]
     external = run.frozen_config.get("execution") == "external"
+    optional = {}
+    if "review_brief" in view:
+        optional["review_brief"] = brief_summary(view["review_brief"])
+    if "detected_template" in view:
+        optional["detected_template"] = view["detected_template"]
     return require_bounded(
         {
             "run": {"id": run.id, "status": run.status.value, "commit_sha": run.commit_sha},
+            **optional,
             "execution": "external" if external else "legacy_read_only",
             "task_counts": dict(Counter(item["task"].status.value for item in view["tasks"])),
             "finding_count": len(view["finding_ids"]),
@@ -135,10 +156,12 @@ def report_fragment(run_id, report, part, offset, expected_digest):
 
 def task_view(context, part, offset):
     attempt, task = context["attempt"], context["task"]
+    brief = context.get("brief")
     digests = {
         "prompt": attempt.prompt_digest,
         "schema": attempt.schema_digest,
         "source-map": context["source_map_digest"],
+        **({} if brief is None else {"brief": brief["digest"]}),
     }
     if part is None:
         if offset != 0:
@@ -170,12 +193,15 @@ def task_view(context, part, offset):
                 "source_map_command": tool_command("show", attempt.id, "--part", "source-map"),
             }
         )
+    if part == "brief" and brief is None:
+        raise ConfigurationError("this run was started without a review brief")
     if part not in digests:
-        raise ConfigurationError("part must be prompt, schema, or source-map")
+        raise ConfigurationError("part must be prompt, schema, source-map, or brief")
     content = {
         "prompt": context["prompt"],
         "schema": canonical_json(context["schema"]),
         "source-map": context["source_map_text"],
+        "brief": None if brief is None else brief["text"],
     }[part]
     if not 0 <= offset <= len(content):
         raise ConfigurationError("offset is outside the frozen input")

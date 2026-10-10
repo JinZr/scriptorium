@@ -39,4 +39,37 @@ without a document index remain readable with their original global page numbers
 
 The selected Codex, Claude Code, or Antigravity CLI session owns model choice, effort, authentication, and spending. Supply its actual selection when claiming a task. Scriptorium stores this as external provenance; it cannot verify provider billing. `--budget-usd`, `--route`, and `.scriptorium/config.toml` belonged to the removed internal runner. Remove the old local config before starting a new run. The CLI rejects those old options or configuration with a migration error.
 
-`doctor` checks the frozen project configuration, Git revision, dependency closure, local LaTeX tools, and compilation. It does not call a model. New runs freeze the project config, source identities, navigation, prompts, output schemas, and evidence contract. A frozen task's `input_digest` binds its prompt, schema, and bundle.
+## Review brief
+
+`run start --brief brief.json` freezes a short review brief agreed with the authors. The file is one UTF-8 JSON
+object of at most 256 KB; it is not a manuscript source, so it does not need to be committed.
+
+```json
+{
+  "venue_family": "ml_conference",
+  "venue": "NeurIPS 2026",
+  "stage": "presubmission",
+  "priority_claims": ["The method improves accuracy on all three benchmarks."],
+  "known_weaknesses": ["The ablation uses a single seed."],
+  "prior_reviews": "An internal reviewer asked for a stronger baseline.",
+  "ignore": ["Checklist answers"],
+  "severity_notes": "Checklist items were waived last time.",
+  "recorded_by": "claude_code SESSION_ID"
+}
+```
+
+Only `venue_family` (`ml_conference`, `nature_family`, or `other`) and `stage` (`internal_draft`, `presubmission`,
+`rebuttal_revision`, or `camera_ready`) are required. The lists default to empty and hold at most 10 non-blank items
+of up to 500 characters; `venue` and `recorded_by` take up to 200 characters, `prior_reviews` 4,000, and
+`severity_notes` 2,000. Omit a text field or use `null` rather than a blank string. Unknown keys are rejected.
+`recorded_by` is the host session identity as declared; it is stored with the brief but not rendered into prompts.
+
+`doctor` reports `detected_template`, the first known class or package declared by the main entrypoint or a
+supplement (for example `neurips_2026`, `iclr2026_conference`, `icml2026`, `IEEEtran`, or `sn-jnl`) and the venue
+family it suggests, or `unknown`. It is a default for the brief, not a venue policy.
+
+## Doctor and frozen inputs
+
+`doctor` checks the frozen project configuration, Git revision, dependency closure, local LaTeX tools, and compilation. It does not call a model. New runs freeze the project config, source identities, navigation, prompts, output schemas, and evidence contract. A frozen task's `input_digest` binds its prompt, schema, and bundle. A
+review brief is rendered into every review role's frozen prompt, and its artifact digest joins every task's
+`input_digest` in that run; a run started without one keeps the same prompts and input digests as before briefs existed.
