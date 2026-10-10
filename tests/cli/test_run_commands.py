@@ -239,6 +239,14 @@ def test_decision_stats_part_dispatches_through_the_bounded_report_reader(monkey
     assert json.loads(capsys.readouterr().out)["data"]["part"] == "decision_stats"
 
 
+def test_findings_grouped_part_dispatches_through_the_bounded_report_reader(monkeypatch, capsys):
+    service = FakeService()
+    install_fake_service(monkeypatch, service)
+    assert cli.main(["--json", "run", "report", "run_1", "--part", "findings_grouped"]) == 0
+    assert service.calls[-1] == ("read_report", "run_1", "findings_grouped", 0, None)
+    assert json.loads(capsys.readouterr().out)["data"]["part"] == "findings_grouped"
+
+
 @pytest.mark.parametrize(
     "options",
     [

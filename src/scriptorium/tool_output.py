@@ -14,6 +14,7 @@ REPORT_PARTS = (
     "finding_ids",
     "patch_ids",
     "findings",
+    "findings_grouped",
     "decision_stats",
     "patches",
     "events",
