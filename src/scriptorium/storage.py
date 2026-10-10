@@ -398,9 +398,10 @@ class Database:
         return [self._run_from_row(row) for row in rows]
 
     def list_active_runs(self, commit_sha: str) -> list[Run]:
-        inactive = (RunStatus.COMPLETED.value, RunStatus.FAILED.value, RunStatus.CANCELLED.value)
+        # A failed run can still be resumed, so only completed and cancelled runs are inactive.
+        inactive = (RunStatus.COMPLETED.value, RunStatus.CANCELLED.value)
         rows = self.connection.execute(
-            "SELECT * FROM runs WHERE commit_sha = ? AND status NOT IN (?, ?, ?) ORDER BY created_at, id",
+            "SELECT * FROM runs WHERE commit_sha = ? AND status NOT IN (?, ?) ORDER BY created_at, id",
             (commit_sha, *inactive),
         ).fetchall()
         return [self._run_from_row(row) for row in rows]

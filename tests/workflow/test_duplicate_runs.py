@@ -100,3 +100,12 @@ def test_overlapping_starts_on_one_commit_cannot_both_create_a_run(tmp_path):
     assert outcomes["first"].id in str(outcomes["second"])
     with _service(repo) as service:
         assert [run.id for run in service.database.list_runs()] == [outcomes["first"].id]
+
+
+def test_a_resumable_failed_run_still_blocks_a_replacement(tmp_path):
+    repo = make_repository(tmp_path, roles=("substantive_review",))
+    with _service(repo) as service:
+        first = asyncio.run(service.start_run("HEAD", "quick"))["run"]
+        service.database.update_run(first.id, RunStatus.FAILED, "host crashed")
+        with pytest.raises(DuplicateRunError, match=first.id):
+            asyncio.run(service.start_run("HEAD", "quick"))
