@@ -61,6 +61,10 @@ def test_review_scope_is_reported_separately_from_tool_returns(tmp_path):
                 "search_matches": [],
                 "pages_returned": [],
                 "declared_without_task_read": [{"source_path": "main.tex", "start_line": 3, "end_line": 4}],
+                "exports": 0,
+                "exported_sources": [],
+                "exported": [],
+                "declared_without_access": [{"source_path": "main.tex", "start_line": 3, "end_line": 4}],
                 "declared_without_task_page": [],
                 "not_comparable": [],
             }
@@ -72,6 +76,7 @@ def test_review_scope_is_reported_separately_from_tool_returns(tmp_path):
                 "role": "substantive_review",
                 "status": "completed",
                 "returns": {"read": 1, "search": 0, "page": 0, "nav": 0, "page_text": 0},
+                "exports": 0,
             }
         ]
         markdown = service.render_report(run.id, "markdown")

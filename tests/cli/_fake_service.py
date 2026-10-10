@@ -89,6 +89,12 @@ class FakeService:
         self.calls.append(("get_finding", finding_id))
         return {"id": finding_id}
 
+    def export_task(self, attempt_id: str, directory: str) -> dict:
+        if self.error:
+            raise self.error
+        self.calls.append(("export_task", attempt_id, directory))
+        return {"attempt_id": attempt_id, "directory": directory, "files": []}
+
     def decide_findings(self, finding_ids: list[str], decision: str, reason: str) -> Result:
         return self._record("decide_findings", finding_ids, decision, reason)
 

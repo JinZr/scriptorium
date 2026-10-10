@@ -25,6 +25,15 @@ REPORT_PARTS = (
 )
 
 
+EXPORT_NOTE = (
+    "This command wrote read-only copies of the frozen bundle files into the directory; it is the only task "
+    "command whose output is a side effect on disk. An export is for reading convenience: findings still need "
+    "frozen anchors (source_path, source_digest, lines), and task read --anchor remains the way to obtain a "
+    "verified anchor. Rendered pages are not exported; inspect them with task page. If listing_truncated is "
+    "true, source-map.json and manifest.json in the directory list every path and digest."
+)
+
+
 def success_json(payload):
     return json.dumps({"ok": True, "data": payload}, ensure_ascii=False, separators=(",", ":"))
 
@@ -426,3 +435,19 @@ def page_text_fragment(location, content, offset, attempt_id, number, document, 
     if length == 0 and offset < len(content):
         raise ConfigurationError("response metadata leaves no room for page text")
     return response
+
+
+def bound_export(attempt_id, directory, listing, total_bytes):
+    def build(count):
+        return {
+            "attempt_id": attempt_id,
+            "directory": directory,
+            "file_count": len(listing),
+            "total_bytes": total_bytes,
+            "files_digest": digest_json(listing),
+            "files": listing[:count],
+            "listing_truncated": count < len(listing),
+            "note": EXPORT_NOTE,
+        }
+
+    return _fit_prefix(len(listing), build)[1]

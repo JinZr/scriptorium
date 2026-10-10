@@ -30,8 +30,10 @@ _BRIEF_LIMIT_BYTES = 256_000
 _TASK_DESCRIPTION = """Use a frozen task from the current host model session.
 
 Typical order: claim, show (overview), show --part prompt|schema|source-map|brief, nav, search, read, page,
-then submit. Successful JSON responses for claim, show, read, search, nav, and page stay within 7,000
-UTF-8 bytes. Follow each next_command unchanged until it is null to finish a traversal."""
+then submit. Successful JSON responses for claim, show, read, search, nav, page, and export stay within
+7,000 UTF-8 bytes. Follow each next_command unchanged until it is null to finish a traversal. For long
+sources, export writes the frozen bundle files to a directory (a recorded side effect on disk) for reading
+convenience; evidence anchors still come from frozen paths, digests, and lines."""
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -212,6 +214,12 @@ def build_parser() -> argparse.ArgumentParser:
     page_parser.add_argument(
         "--text-digest", help="text_digest from the previous --text fragment; required with --offset"
     )
+
+    export_parser = task_commands.add_parser(
+        "export", help="write the frozen bundle files (no page images) to a new or empty directory"
+    )
+    export_parser.add_argument("attempt_id", help="active attempt ID")
+    export_parser.add_argument("--dir", required=True, help="directory that must not exist or must be empty")
 
     finding_parser = commands.add_parser("finding", help="inspect and decide findings")
     finding_commands = finding_parser.add_subparsers(dest="finding_command", required=True)
@@ -446,6 +454,8 @@ def _dispatch_task(service: Any, arguments: argparse.Namespace) -> tuple[Any, in
             0,
             None,
         )
+    if arguments.task_command == "export":
+        return service.export_task(arguments.attempt_id, arguments.dir), 0, None
     if arguments.task_command == "page":
         return (
             service.page_task(

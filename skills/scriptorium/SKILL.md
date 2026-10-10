@@ -17,6 +17,7 @@ task nav ATTEMPT_ID --command heading|reference|citation|label|caption|graphics|
 task search ATTEMPT_ID --query Q [--path P] [--context 2] [--include-metadata]
 task read ATTEMPT_ID --path P --start-line A [--end-line B] [--anchor]
 task page ATTEMPT_ID --number N [--document ENTRYPOINT] [--scale 3 --crop x0,y0,x1,y1 | --text]
+task export ATTEMPT_ID --dir DIR          -> frozen sources and metadata as read-only files (new or empty DIR)
 task submit ATTEMPT_ID --input-digest D --file answer.json [--check]
 run continue|retry RUN_ID --task TASK_ID  -> then claim again
 ```
@@ -55,7 +56,10 @@ scriptorium --json task search ATTEMPT_ID --query TERM
 scriptorium --json task read ATTEMPT_ID --path manifest.json --start-line 1
 scriptorium --json task read ATTEMPT_ID --path SOURCE_PATH --start-line LINE
 scriptorium --json task page ATTEMPT_ID --number PAGE
+scriptorium --json task export ATTEMPT_ID --dir DIR
 ```
+
+For long sources that would take many bounded reads, `task export` writes the frozen sources (at their `read_path`), `manifest.json`, `navigation.json`, `source-map.json` and `manuscript.pdf` into an empty directory you choose, so you can read them with ordinary file tools. The export is recorded and audited separately from reads, and it does not replace `task read --anchor`, which gives the verified anchor each finding still needs, or `task page`, which is how rendered pages are inspected.
 
 If `source-map.json` has `compiled_pdf.documents`, inventory each entrypoint, `start_page` and `page_count`.
 This includes explicitly configured independent supplements, compiled separately and assembled after the main
