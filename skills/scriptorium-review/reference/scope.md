@@ -33,6 +33,38 @@ returns.
   compares declared checked areas with what the task tools returned. Read any listed gaps, or narrow the next
   `checked` to areas actually checked. Direct host reads are invisible to the audit, so describe them separately.
 
+## What the audit sees
+
+The audit counts `task read`, `task page`, and `task export` returns recorded for the task's own attempts up to the
+latest accepted one. An export belongs to the attempt that made it; a different task of the run (copyedit,
+consistency, figure) does not inherit it.
+
+- Scope is your declaration: put in `checked` what you actually assessed. The audit corroborates only what this task
+  read through `task read`, `task page`, or its own `task export`.
+- Reading another task's export, or any file outside the task tools, is invisible to the audit, so the range shows as
+  `declared_without_access` and `complete` looks unsupported. Prefer re-reading the range through `task read` in this
+  task. Otherwise state in `limitations` which areas were read outside the task tools and keep only assessed ones in
+  `checked`.
+- `declared_without_task_read` lists exported ranges too. An exported-only range is accessed but not read; the audit
+  also lists it under `exported`.
+- `task page --text` is a reading aid and is not a page render: the page stays in `declared_without_task_page`.
+  Open the image from `task page` without `--text`.
+
+## Graphics sources
+
+A frozen source that is not text, such as `figures/fig1.pdf` or `fig2.png`, cannot be returned by `task read` or
+`task page`, and takes no line fields.
+
+- Inspect it as rendered where the manuscript places it. `task nav --command graphics` gives only the TeX location
+  and candidate paths, not the page. Locate the page from the nearby caption (`task nav --command caption`, then step
+  through `task page`, using `--text` only to find it), open the image, and use `--scale 3 --crop` for detail.
+- Declare those global pages in `checked` as `manuscript.pdf` page areas.
+- A not-yet-inspected graphics file may stay in `outstanding` with `partial`. Do not leave it there as unreadable:
+  `task read` and `task page` cannot return it, so inspect the rendered pages, and drop it from `outstanding` once
+  you have. Validation accepts a graphics path as a whole-file area (the audit reports it under `not_comparable`), but
+  a line range on it fails `scope.line_out_of_range`.
+- State in `limitations` that the standalone file was inspected only as rendered on the manuscript pages.
+
 ## Continuations
 
 After `run continue`, the new attempt includes the prior scope, summary, output digest, and recorded findings.
