@@ -5,7 +5,7 @@ import json
 import shlex
 
 from .domain import canonical_json, digest_json
-from .errors import ConfigurationError
+from .errors import ConfigurationError, ExampleUnavailableError
 
 MAX_TOOL_RESPONSE_BYTES = 7000
 REPORT_PARTS = (
@@ -163,6 +163,7 @@ def task_view(context, part, offset):
         "schema": attempt.schema_digest,
         "source-map": context["source_map_digest"],
         **({} if brief is None else {"brief": brief["digest"]}),
+        **({} if context.get("example") is None else {"example": context["example_digest"]}),
     }
     if part is None:
         if offset != 0:
@@ -196,13 +197,19 @@ def task_view(context, part, offset):
         )
     if part == "brief" and brief is None:
         raise ConfigurationError("this run was started without a review brief")
+    if part == "example" and context.get("example") is None:
+        raise ExampleUnavailableError(
+            "no example was frozen with this attempt's task: revision and verification tasks, tasks prepared before "
+            "examples existed, and frozen schema shapes the example builder cannot fill have none"
+        )
     if part not in digests:
-        raise ConfigurationError("part must be prompt, schema, source-map, or brief")
+        raise ConfigurationError("part must be prompt, schema, source-map, brief, or example")
     content = {
         "prompt": context["prompt"],
         "schema": canonical_json(context["schema"]),
         "source-map": context["source_map_text"],
         "brief": None if brief is None else brief["text"],
+        "example": context.get("example"),
     }[part]
     if not 0 <= offset <= len(content):
         raise ConfigurationError("offset is outside the frozen input")
