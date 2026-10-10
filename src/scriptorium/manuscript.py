@@ -716,7 +716,10 @@ class ManuscriptManager:
                 pending.pop()
                 continue
             relative = self._normalized_relative(root, dependency)
-            if relative in traversed or (literal and relative in included):
+            if literal and relative in included:
+                verbatim.add(relative)
+                continue
+            if relative in traversed:
                 continue
             if not (root / relative).is_file():
                 raise InfrastructureError(f"Referenced manuscript file is missing: {relative}")
@@ -794,8 +797,10 @@ class ManuscriptManager:
         }
         masks = {path: self._dependency_text(text, preserve_positions=True) for path, text in texts.items()}
         bodies = self._document_bodies(snapshot, masks, entrypoints)
-        for path, text in texts.items():
-            spans = self._navigation_spans(text, masks[path], bodies[path])
+        # Files shown only verbatim are literal text, not manuscript structure, and have no body entry.
+        for path, body in bodies.items():
+            text = texts[path]
+            spans = self._navigation_spans(text, masks[path], body)
             breaks = [match.start() for match in re.finditer("\n", text)]
             for command, start, end, value_start, value_end in spans:
                 value = text[value_start:value_end].strip()
@@ -831,7 +836,10 @@ class ManuscriptManager:
     def _document_bodies(
         self, snapshot: Path, masks: dict[str, str], entrypoints: tuple[str, ...] = ()
     ) -> dict[str, tuple[int, int] | None]:
-        """Follow inputs in processing order and bound each source by the document body it reaches, if any."""
+        """Follow inputs in processing order and bound each source by the document body it reaches, if any.
+
+        Sources shown only by verbatim-style commands are omitted.
+        """
         root = snapshot.resolve()
         events: dict[str, list[tuple[int, str, str]]] = {}
         literal: set[str] = set()
@@ -872,8 +880,9 @@ class ManuscriptManager:
             opens = any(kind == "begin" for member in tree for _, kind, _ in events[member])
             _walk_document(path, "before" if opens else "body", events, lengths, bounds, {})
         return {
-            path: None if path in literal else bounds.get(path) if path in reached else _document_body(masked)
+            path: bounds.get(path) if path in reached else _document_body(masked)
             for path, masked in masks.items()
+            if path not in literal
         }
 
     @classmethod

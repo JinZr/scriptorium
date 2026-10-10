@@ -313,10 +313,12 @@ def test_verbatim_files_of_any_suffix_are_frozen_review_inputs(tmp_path, command
 
 
 @pytest.mark.skipif(shutil.which("latexmk") is None, reason="latexmk required; exercised in LaTeX CI")
-def test_verbatim_input_may_also_be_an_ordinary_input(tmp_path):
+@pytest.mark.parametrize(
+    "uses", [r"\lstinputlisting{sample.py}\input{sample.py}", r"\input{sample.py}\lstinputlisting{sample.py}"]
+)
+def test_verbatim_input_may_also_be_an_ordinary_input(tmp_path, uses):
     (tmp_path / "main.tex").write_text(
-        "\\documentclass{article}\\usepackage{listings}\n\\begin{document}\n"
-        "\\lstinputlisting{sample.py}\n\\input{sample.py}\n\\end{document}\n"
+        "\\documentclass{article}\\usepackage{listings}\n\\begin{document}\n" + uses + "\n\\end{document}\n"
     )
     (tmp_path / "sample.py").write_text("x = 1\n")
     manager = ManuscriptManager(tmp_path)
