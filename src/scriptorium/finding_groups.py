@@ -40,15 +40,26 @@ def _claim_checks(entry: Mapping[str, Any]) -> Iterable[tuple[Mapping[str, Any],
             yield check, next((claim for claim in inventory if index in claim.get("check_indices", ())), None)
 
 
-def linked_claims(findings: Sequence[Finding], claim_reports: Iterable[Mapping[str, Any]]) -> dict[str, dict[str, Any]]:
+def linked_claims(
+    findings: Sequence[Finding],
+    claim_reports: Iterable[Mapping[str, Any]],
+    duplicates: Iterable[Mapping[str, Any]] = (),
+) -> dict[str, dict[str, Any]]:
     """Return, by finding ID, the most prominent claim a stored finding is linked to.
 
     Substantive findings link through their claim check to an inventoried claim; detail-role findings through
-    their stored affected_claim. Findings and outputs recorded before either link yield none.
+    their stored affected_claim. Findings and outputs recorded before either link yield none. A submission that
+    repeated a finding stored under another task resolves to that row through its duplicate attribution.
     """
+    by_id = {item.id: item for item in findings}
+    reporters = [(item.task_id, item) for item in findings] + [
+        (duplicate["task_id"], by_id[duplicate["finding_id"]])
+        for duplicate in duplicates
+        if duplicate["finding_id"] in by_id and duplicate.get("task_id")
+    ]
     stored = {
-        _identity(item.task_id, item.category, item.severity.value, item.title, item.claim, item.evidence): item.id
-        for item in findings
+        _identity(task_id, item.category, item.severity.value, item.title, item.claim, item.evidence): item.id
+        for task_id, item in reporters
     }
     linked: dict[str, dict[str, Any]] = {}
 
@@ -150,12 +161,14 @@ def _tier(categories: Sequence[str], claims: Sequence[Mapping[str, Any]]) -> str
 
 
 def _decision_state(members: Sequence[Finding]) -> str:
-    """Return pending while any member is undecided, else the members' latest decision states joined by '+'."""
+    """Return the members' shared current status, or mixed when they differ."""
     states = {finding.status.value for finding in members}
-    return "pending" if "pending" in states else "+".join(sorted(states))
+    return states.pop() if len(states) == 1 else "mixed"
 
 
-def _group(members: Sequence[Finding], claims: Mapping[str, dict[str, Any]]) -> dict[str, Any]:
+def _group(
+    members: Sequence[Finding], claims: Mapping[str, dict[str, Any]], duplicate_roles: Mapping[str, set[str]]
+) -> dict[str, Any]:
     ordered = sorted(members, key=_primary_key)
     primary = ordered[0]
     # Members are in primary order and min keeps the first of equals, so the primary-most link wins ties.
@@ -163,12 +176,17 @@ def _group(members: Sequence[Finding], claims: Mapping[str, dict[str, Any]]) -> 
     claim = min(linked, key=lambda item: _PROMINENCE_ORDER[item["prominence"]], default=None)
     categories = sorted({finding.category for finding in members})
     finding_ids = sorted(finding.id for finding in members)
-    titles = {finding.id: finding.title for finding in members}
+    by_id = {finding.id: finding for finding in members}
     return {
         "group_id": f"group_{digest_json(finding_ids)[:16]}",
         "primary_finding_id": primary.id,
         "finding_ids": finding_ids,
-        "roles": sorted({finding.role.value for finding in members}),
+        # A role whose identical finding was stored under another role's row still reported it.
+        "roles": sorted(
+            {finding.role.value for finding in members}.union(
+                *(duplicate_roles.get(finding.id, set()) for finding in members)
+            )
+        ),
         "max_severity": primary.severity.value,
         "categories": categories,
         "evidence": _merged_evidence(members),
@@ -176,7 +194,17 @@ def _group(members: Sequence[Finding], claims: Mapping[str, dict[str, Any]]) -> 
         "consequence": primary.consequence,
         "tier": _tier(categories, linked),
         "decision_state": _decision_state(members),
-        "titles": [titles[finding_id] for finding_id in finding_ids],
+        "pending_finding_ids": sorted(finding.id for finding in members if finding.status.value == "pending"),
+        "members": [
+            {
+                "finding_id": finding_id,
+                "role": by_id[finding_id].role.value,
+                "severity": by_id[finding_id].severity.value,
+                "status": by_id[finding_id].status.value,
+            }
+            for finding_id in finding_ids
+        ],
+        "titles": [by_id[finding_id].title for finding_id in finding_ids],
     }
 
 
@@ -193,14 +221,23 @@ def _group_order(group: Mapping[str, Any]) -> tuple:
     return (TIERS.index(group["tier"]), _SEVERITY_ORDER[group["max_severity"]], group["primary_finding_id"])
 
 
-def finding_groups(findings: Sequence[Finding], claim_reports: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+def finding_groups(
+    findings: Sequence[Finding],
+    claim_reports: Sequence[Mapping[str, Any]],
+    duplicates: Sequence[Mapping[str, Any]] = (),
+) -> dict[str, Any]:
     """Group findings across roles and attempts by overlapping evidence and order the groups for triage.
 
     `findings` carry the status their latest decision implies; `claim_reports` are the report's substantive
-    claim-check entries.
+    claim-check entries; `duplicates` attribute a stored finding to each later task (`finding_id`, `task_id`,
+    `role`) that submitted it again.
     """
-    claims = linked_claims(findings, claim_reports)
-    groups = sorted((_group(members, claims) for members in _components(findings)), key=_group_order)
+    claims = linked_claims(findings, claim_reports, duplicates)
+    duplicate_roles: dict[str, set[str]] = {}
+    for duplicate in duplicates:
+        if duplicate.get("role"):
+            duplicate_roles.setdefault(duplicate["finding_id"], set()).add(duplicate["role"])
+    groups = sorted((_group(members, claims, duplicate_roles) for members in _components(findings)), key=_group_order)
     counts = {
         tier: {
             "groups": sum(1 for group in groups if group["tier"] == tier),
@@ -229,8 +266,11 @@ def markdown_lines(grouped: Mapping[str, Any]) -> list[str]:
         for group in members:
             ids = ", ".join(f"`{finding_id}`" for finding_id in group["finding_ids"])
             primary_title = group["titles"][group["finding_ids"].index(group["primary_finding_id"])]
+            state = group["decision_state"]
+            if state == "mixed" and group["pending_finding_ids"]:
+                state = f"mixed; {len(group['pending_finding_ids'])} of {len(group['finding_ids'])} pending"
             lines.append(
                 f"- {group['tier']} / {group['max_severity']} / {', '.join(group['roles'])} / {ids} — "
-                f"{_inline(primary_title)} ({group['decision_state']})"
+                f"{_inline(primary_title)} ({state})"
             )
     return lines

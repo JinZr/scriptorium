@@ -246,20 +246,60 @@ def test_a_claim_check_from_another_task_does_not_link():
     assert finding_groups([finding], [claim_report])["groups"][0]["claim"] is None
 
 
-def test_decision_state_is_pending_until_every_member_is_decided():
-    pending = [
-        _finding("a", _lines("main.tex", 3), status=FindingStatus.CONFIRMED),
-        _finding("b", _lines("main.tex", 3)),
+def test_members_expose_each_status_and_only_undecided_ids_are_pending():
+    partly = [
+        _finding("a", _lines("main.tex", 3), status=FindingStatus.CONFIRMED, severity=FindingSeverity.MAJOR),
+        _finding("b", _lines("main.tex", 3), role=AgentRole.CONSISTENCY),
     ]
-    assert finding_groups(pending, [])["groups"][0]["decision_state"] == "pending"
+    (group,) = finding_groups(partly, [])["groups"]
+    assert group["decision_state"] == "mixed"
+    assert group["pending_finding_ids"] == ["finding_b"]
+    assert group["members"] == [
+        {"finding_id": "finding_a", "role": "copyedit", "severity": "major", "status": "confirmed"},
+        {"finding_id": "finding_b", "role": "consistency", "severity": "minor", "status": "pending"},
+    ]
+    assert markdown_lines(finding_groups(partly, []))[-1].endswith("— Title a (mixed; 1 of 2 pending)")
+
     decided = [
         _finding("a", _lines("main.tex", 3), status=FindingStatus.WAIVED),
         _finding("b", _lines("main.tex", 3), status=FindingStatus.CONFIRMED),
-        _finding("c", _lines("main.tex", 3), status=FindingStatus.WAIVED),
     ]
-    assert finding_groups(decided, [])["groups"][0]["decision_state"] == "confirmed+waived"
-    same = [_finding("a", _lines("main.tex", 3), status=FindingStatus.REJECTED)]
+    (group,) = finding_groups(decided, [])["groups"]
+    assert (group["decision_state"], group["pending_finding_ids"]) == ("mixed", [])
+    assert markdown_lines(finding_groups(decided, []))[-1].endswith("(mixed)")
+    same = [_finding(name, _lines("main.tex", 3), status=FindingStatus.REJECTED) for name in "ab"]
     assert finding_groups(same, [])["groups"][0]["decision_state"] == "rejected"
+    undecided = [_finding(name, _lines("main.tex", 3)) for name in "ab"]
+    (group,) = finding_groups(undecided, [])["groups"]
+    assert (group["decision_state"], group["pending_finding_ids"]) == ("pending", ["finding_a", "finding_b"])
+
+
+def test_a_duplicate_report_adds_its_role_and_its_claim_link():
+    # A detail role stored the finding first; the substantive review later submitted the identical finding.
+    stored = _finding("d", _lines("main.tex", 3), severity=FindingSeverity.MAJOR, affected_claim="A detail claim.")
+    claim_report = _linked_claim_report("task_substantive_review", [_submitted(stored)], ["headline"])
+    duplicate = {
+        "finding_id": stored.id,
+        "task_id": "task_substantive_review",
+        "attempt_id": "attempt_substantive",
+        "role": "substantive_review",
+    }
+
+    (unattributed,) = finding_groups([stored], [claim_report])["groups"]
+    assert (unattributed["tier"], unattributed["roles"]) == ("supporting", ["copyedit"])
+    (group,) = finding_groups([stored], [claim_report], [duplicate])["groups"]
+    assert group["roles"] == ["copyedit", "substantive_review"]
+    assert group["tier"] == "headline"
+    assert group["claim"] == {"text": "Claim number 0.", "prominence": "headline", "finding_id": stored.id}
+    assert group["members"] == [{"finding_id": stored.id, "role": "copyedit", "severity": "major", "status": "pending"}]
+
+
+def test_duplicate_events_without_attribution_fields_are_ignored():
+    stored = _finding("d", _lines("main.tex", 3))
+    (group,) = finding_groups([stored], [], [{"finding_id": stored.id}, {"finding_id": "finding_gone", "role": "x"}])[
+        "groups"
+    ]
+    assert group["roles"] == ["copyedit"]
 
 
 def test_markdown_lists_the_verdict_first_and_compliance_last():

@@ -67,6 +67,7 @@ def test_findings_from_several_roles_on_shared_evidence_are_grouped_and_ordered(
     with _service(repo) as service:
         run, ids = _three_role_run(service)
         service.decide_findings([ids["Template class differs"]], "waive", "Template rules come later.")
+        service.decide_findings([ids["Misspelled word in the result"]], "reject", "Covered by the headline finding.")
         report = service.render_report(run.id, "json")
         markdown = service.render_report(run.id, "markdown")
         fragment = service.read_report(run.id, "findings_grouped")
@@ -86,14 +87,20 @@ def test_findings_from_several_roles_on_shared_evidence_are_grouped_and_ordered(
     assert headline["categories"] == ["clarity", "style"]
     assert headline["evidence"] == [{"source_path": "main.tex", "start_line": 3, "end_line": 3}]
     assert headline["claim"]["prominence"] == "headline" and headline["claim"]["finding_id"] == substantive
-    assert headline["decision_state"] == "pending"
+    assert headline["decision_state"] == "mixed"
+    assert headline["pending_finding_ids"] == [substantive]
+    assert {member["finding_id"]: (member["role"], member["status"]) for member in headline["members"]} == {
+        substantive: ("substantive_review", "pending"),
+        ids["Misspelled word in the result"]: ("copyedit", "rejected"),
+    }
     assert grouped["groups"][2]["decision_state"] == "waived"
     assert grouped["counts"]["headline"] == {"groups": 1, "findings": 2}
-    claim_report = report["review_claim_checks"][0]
-    if "verdict" in claim_report:
-        assert grouped["verdict"] == {"attempt_id": claim_report["attempt_id"], **claim_report["verdict"]}
-    else:
-        assert grouped["verdict"] is None
+    (claim_report,) = report["review_claim_checks"]
+    assert grouped["verdict"] == {
+        "attempt_id": claim_report["attempt_id"],
+        "recommendation": "major_revision",
+        "decisive_questions": ["Does the reported result support the conclusion?"],
+    }
 
     assert json.loads(fragment["text"]) == grouped and fragment["next_command"] is None
     section = markdown.index("## Findings by group")
@@ -102,8 +109,9 @@ def test_findings_from_several_roles_on_shared_evidence_are_grouped_and_ordered(
     assert [line for line in lines if line.startswith("### ")] == ["### Headline", "### Other", "### Compliance"]
     assert (
         f"- headline / major / copyedit, substantive_review / {', '.join(f'`{item}`' for item in shared)} — "
-        "Typo obscures the claim (pending)"
+        "Typo obscures the claim (mixed; 1 of 2 pending)"
     ) in lines
+    assert lines[1] == "- Verdict: major_revision; decisive questions: Does the reported result support the conclusion?"
     assert lines[-1] == (
         f"- compliance / minor / consistency / `{ids['Template class differs']}` — Template class differs (waived)"
     )
@@ -133,6 +141,26 @@ def test_a_detail_finding_with_an_affected_claim_forms_a_supporting_group(tmp_pa
         "prominence": None,
         "finding_id": supporting["primary_finding_id"],
     }
+
+
+def test_a_substantive_repeat_of_a_stored_detail_finding_lifts_it_to_the_headline_tier(tmp_path):
+    repo = make_repository(tmp_path, roles=("substantive_review", "copyedit"))
+    with _service(repo) as service:
+        run = asyncio.run(service.start_run("HEAD", "quick"))["run"]
+        # The copyedit row is stored first; the substantive review's identical finding becomes a duplicate event.
+        _submit(service, run.id, AgentRole.COPYEDIT, [review_finding])
+        _submit(service, run.id, AgentRole.SUBSTANTIVE_REVIEW, [review_finding])
+        (finding,) = service.list_findings(run.id)
+        grouped = service.render_report(run.id, "json")["findings_grouped"]
+
+    assert finding.role == AgentRole.COPYEDIT
+    (group,) = grouped["groups"]
+    assert group["roles"] == ["copyedit", "substantive_review"]
+    assert group["tier"] == "headline"
+    assert group["claim"]["prominence"] == "headline" and group["claim"]["finding_id"] == finding.id
+    assert group["members"] == [
+        {"finding_id": finding.id, "role": "copyedit", "severity": "major", "status": "pending"}
+    ]
 
 
 def test_a_long_grouped_findings_part_is_bounded_and_traversable(tmp_path, monkeypatch, capsys):

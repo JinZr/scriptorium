@@ -1372,7 +1372,15 @@ class ScriptoriumService:
             **run_view,
             "run": self._report_run(run_view["run"]),
             "findings": finding_records,
-            "findings_grouped": finding_groups([item["finding"] for item in finding_records], review_claim_checks),
+            "findings_grouped": finding_groups(
+                [item["finding"] for item in finding_records],
+                review_claim_checks,
+                [
+                    {"finding_id": event.entity_id, **event.payload}
+                    for event in events
+                    if event.event_type == "finding.duplicate"
+                ],
+            ),
             "decision_stats": decision_stats((item["finding"], item["decisions"]) for item in finding_records),
             "patches": [
                 {
