@@ -11,6 +11,7 @@ from hashlib import sha256
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import socket
 import sqlite3
@@ -1647,16 +1648,66 @@ class ScriptoriumService:
             raise InfrastructureError(f"patched snapshot does not match immutable diff {patch.diff_digest}")
 
     @staticmethod
-    def _markdown_findings(items: list[dict[str, Any]]) -> list[str]:
+    def _markdown_findings(items: list[dict[str, Any]], terminators: tuple[str, ...] | None) -> list[str]:
         lines = ["", "## Findings", ""]
         if not items:
             return [*lines, "- None"]
+
+        def text(value: str) -> str:
+            return ScriptoriumService._markdown_text(value, terminators)
+
         for item in items:
             finding = item["finding"]
             lines.append(f"- `{finding['id']}` — {finding['severity']} / {finding['status']}: {finding['title']}")
+            lines.append(
+                f"  - category: {text(finding['category'])}; role: {finding['role']}; "
+                f"confidence: {finding['confidence']}"
+            )
+            lines.append(f"  - claim: {text(finding['claim'])}")
             if finding.get("affected_claim"):
-                lines.append(f"  - affected claim: {finding['affected_claim']}")
+                lines.append(f"  - affected claim: {text(finding['affected_claim'])}")
+            if finding.get("consequence"):
+                lines.append(f"  - consequence: {text(finding['consequence'])}")
+            lines.append(f"  - explanation: {text(finding['explanation'])}")
+            lines.append(f"  - suggested action: {text(finding['suggested_action'])}")
+            for anchor in finding["evidence"]:
+                line = f"  - evidence: `{ScriptoriumService._markdown_location(anchor)}`"
+                if quoted_text := anchor.get("quoted_text"):
+                    line += ": " + ScriptoriumService._markdown_code_span(text(quoted_text))
+                lines.append(line)
         return lines
+
+    @staticmethod
+    def _frozen_line_terminators(run: dict[str, Any]) -> tuple[str, ...] | None:
+        """Line terminators of the run's frozen evidence anchor contract; None when it split like str.splitlines()."""
+        record = run["frozen_config"].get("evidence_anchor_contract") or {}
+        terminators = record.get("content", {}).get("line_terminators")
+        return tuple(terminators) if terminators else None
+
+    @staticmethod
+    def _markdown_text(text: str, terminators: tuple[str, ...] | None) -> str:
+        """Keep a field on one list item: each line break of the run's frozen line definition becomes a visible ⏎.
+
+        A terminal line break keeps its mark. Contracts without terminators split like str.splitlines(), so their
+        form feeds and Unicode separators are line breaks too; later contracts end lines only at CRLF, CR, and LF
+        and keep other separators verbatim.
+        """
+        if terminators is None:
+            bodies = text.splitlines() or [""]
+            ended = (text.splitlines(keepends=True) or [""])[-1] != bodies[-1]
+            return " ⏎ ".join(bodies) + (" ⏎" if ended else "")
+        rendered = re.sub("|".join(re.escape(terminator) for terminator in terminators), " ⏎ ", text)
+        return rendered[:-1] if text.endswith(terminators) else rendered
+
+    @staticmethod
+    def _markdown_code_span(text: str) -> str:
+        """Show evidence verbatim: LaTeX escapes, math, and comments must not be consumed by a Markdown renderer."""
+        longest = max((len(run) for run in re.findall("`+", text)), default=0)
+        fence = "`" * (longest + 1)
+        # A renderer strips one space from both ends of a span that has spaces on both and some other content.
+        spaced = text.startswith(" ") and text.endswith(" ") and text.strip(" ") != ""
+        pad = " " if spaced or text.startswith("`") or text.endswith("`") else ""
+        return f"{fence}{pad}{text}{pad}{fence}"
 
     @staticmethod
     def _claim_check_report(task_id: str, attempt_id: str, output: ScientificReviewOutput) -> dict[str, Any]:
@@ -1720,9 +1771,11 @@ class ScriptoriumService:
 
     @staticmethod
     def _markdown_location(anchor: dict[str, Any]) -> str:
-        if "page" in anchor:
-            return f"{anchor['source_path']}:page {anchor['page']}"
-        return f"{anchor['source_path']}:{anchor['start_line']}-{anchor['end_line']}"
+        # Validation anchors any record with a line range to the source; a page beside it was only bounds-checked.
+        # Historical page anchors may carry null line keys, so test the value rather than the key.
+        if anchor.get("start_line") is not None:
+            return f"{anchor['source_path']}:{anchor['start_line']}-{anchor['end_line']}"
+        return f"{anchor['source_path']}:page {anchor['page']}"
 
     @staticmethod
     def _markdown_claim_judgment(check: dict[str, Any], claim_anchor: dict[str, Any] | None) -> list[str]:
@@ -1869,7 +1922,9 @@ class ScriptoriumService:
         else:
             lines.append("- None")
         lines.extend(markdown_finding_groups(plain["findings_grouped"]))
-        lines.extend(ScriptoriumService._markdown_findings(plain["findings"]))
+        lines.extend(
+            ScriptoriumService._markdown_findings(plain["findings"], ScriptoriumService._frozen_line_terminators(run))
+        )
         lines.extend(markdown_decision_stats(plain["decision_stats"]))
         lines.extend(["", "## Patches", ""])
         if plain["patches"]:
