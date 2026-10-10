@@ -418,6 +418,15 @@ class Database:
         rows = self.connection.execute("SELECT * FROM runs ORDER BY created_at, id").fetchall()
         return [self._run_from_row(row) for row in rows]
 
+    def list_active_runs(self, commit_sha: str) -> list[Run]:
+        # A failed run can still be resumed, so only completed and cancelled runs are inactive.
+        inactive = (RunStatus.COMPLETED.value, RunStatus.CANCELLED.value)
+        rows = self.connection.execute(
+            "SELECT * FROM runs WHERE commit_sha = ? AND status NOT IN (?, ?) ORDER BY created_at, id",
+            (commit_sha, *inactive),
+        ).fetchall()
+        return [self._run_from_row(row) for row in rows]
+
     def update_run_status(self, run_id: str, status: RunStatus, error: str | None = None) -> Run:
         with self.transaction() as connection:
             row = connection.execute("SELECT * FROM runs WHERE id = ?", (run_id,)).fetchone()
@@ -1097,6 +1106,15 @@ class Database:
         reason: str,
         actor: str = "user",
     ) -> Decision:
+        return self.decide_findings([finding_id], decision, reason, actor)[0]
+
+    def decide_findings(
+        self,
+        finding_ids: list[str],
+        decision: str,
+        reason: str,
+        actor: str = "user",
+    ) -> list[Decision]:
         status_by_decision = {
             "confirm": FindingStatus.CONFIRMED,
             "reject": FindingStatus.REJECTED,
@@ -1106,33 +1124,36 @@ class Database:
             raise ValueError(f"invalid finding decision: {decision}")
         if not reason.strip():
             raise ValueError("decision reason is required")
-        record = Decision(
-            target_type="finding",
-            target_id=finding_id,
-            decision=decision,
-            reason=reason,
-            actor=actor,
-        )
+        records = []
         with self.transaction() as connection:
-            row = connection.execute("SELECT * FROM findings WHERE id = ?", (finding_id,)).fetchone()
-            if row is None:
-                raise NotFoundError(f"finding not found: {finding_id}")
-            connection.execute(
-                "UPDATE findings SET status = ?, updated_at = ? WHERE id = ?",
-                (status_by_decision[decision].value, record.created_at, finding_id),
-            )
-            self._append_decision_row(connection, record)
-            self._append_event_row(
-                connection,
-                Event(
-                    run_id=row["run_id"],
-                    event_type="finding.decided",
-                    entity_type="finding",
-                    entity_id=finding_id,
-                    payload={"decision": decision, "reason": reason, "actor": actor},
-                ),
-            )
-        return record
+            for finding_id in finding_ids:
+                record = Decision(
+                    target_type="finding",
+                    target_id=finding_id,
+                    decision=decision,
+                    reason=reason,
+                    actor=actor,
+                )
+                row = connection.execute("SELECT * FROM findings WHERE id = ?", (finding_id,)).fetchone()
+                if row is None:
+                    raise NotFoundError(f"finding not found: {finding_id}")
+                connection.execute(
+                    "UPDATE findings SET status = ?, updated_at = ? WHERE id = ?",
+                    (status_by_decision[decision].value, record.created_at, finding_id),
+                )
+                self._append_decision_row(connection, record)
+                self._append_event_row(
+                    connection,
+                    Event(
+                        run_id=row["run_id"],
+                        event_type="finding.decided",
+                        entity_type="finding",
+                        entity_id=finding_id,
+                        payload={"decision": decision, "reason": reason, "actor": actor},
+                    ),
+                )
+                records.append(record)
+        return records
 
     def list_decisions(self, target_type: str, target_id: str) -> list[Decision]:
         rows = self.connection.execute(

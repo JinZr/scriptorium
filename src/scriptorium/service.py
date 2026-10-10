@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections import Counter, deque
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from dataclasses import asdict, is_dataclass
 from datetime import datetime, timezone
 import difflib
@@ -38,7 +38,7 @@ from .domain import (
     new_id,
     utc_now,
 )
-from .errors import ConfigurationError, InfrastructureError, NotFoundError, StateError
+from .errors import ConfigurationError, DuplicateRunError, InfrastructureError, NotFoundError, StateError
 from .manuscript import (
     EQUATION_ENVIRONMENTS,
     QUANTITY_COMMANDS,
@@ -319,11 +319,28 @@ class ScriptoriumService:
             "checks": checks,
         }
 
-    async def start_run(self, revision: str, profile: str) -> dict[str, Any]:
+    def _refuse_duplicate_run(self, commit_sha: str) -> None:
+        active = self._storage(self.database.list_active_runs, commit_sha)
+        if active:
+            existing = active[0]
+            remedy = "resume" if existing.status == RunStatus.FAILED else "cancel"
+            raise DuplicateRunError(
+                f"run {existing.id} is already {existing.status.value} on commit {commit_sha[:12]}; "
+                f"inspect it with `run status {existing.id}`, {remedy} it, or pass --allow-duplicate to start another"
+            )
+
+    async def start_run(self, revision: str, profile: str, allow_duplicate: bool = False) -> dict[str, Any]:
         reject_legacy_local_config(self.repo)
         run_id = new_id("run")
-        with self._run_operation(run_id, "run start"):
-            self._storage(self.database.ensure_external_schema)
+        self._storage(self.database.ensure_external_schema)
+        with ExitStack() as locks:
+            if not allow_duplicate:
+                # Serialize check-and-create across processes: a concurrent starter waits here, then sees this run.
+                revision = self.manuscript.resolve_revision(revision).commit_sha
+                locks.enter_context(self._run_operation(f"start-{revision}", "run start", wait=True))
+            locks.enter_context(self._run_operation(run_id, "run start"))
+            if not allow_duplicate:
+                self._refuse_duplicate_run(revision)
             await self.armarius.start_run(revision, profile, run_id=run_id)
             return self.get_run(run_id)
 
@@ -936,20 +953,43 @@ class ScriptoriumService:
         decision: str,
         reason: str,
     ) -> dict[str, Any]:
-        initial = self._storage(self.database.get_finding, finding_id)
-        with self._run_operation(initial.run_id, "finding decide"):
-            finding = self._storage(self.database.get_finding, finding_id)
-            run = self._storage(self.database.get_run, finding.run_id)
+        return self.decide_findings([finding_id], decision, reason)
+
+    def decide_findings(
+        self,
+        finding_ids: list[str],
+        decision: str,
+        reason: str,
+    ) -> dict[str, Any]:
+        if not finding_ids:
+            raise StateError("at least one finding ID is required")
+        if len(set(finding_ids)) != len(finding_ids):
+            raise StateError("finding IDs must not repeat")
+        initial = [self._storage(self.database.get_finding, finding_id) for finding_id in finding_ids]
+        run_ids = {finding.run_id for finding in initial}
+        if len(run_ids) != 1:
+            raise StateError("findings must all belong to the same run")
+        with self._run_operation(initial[0].run_id, "finding decide"):
+            before = [self._storage(self.database.get_finding, finding_id) for finding_id in finding_ids]
+            run = self._storage(self.database.get_run, initial[0].run_id)
             self.armarius.require_external_run(run)
             if run.status in {RunStatus.COMPLETED, RunStatus.FAILED, RunStatus.CANCELLED}:
                 raise StateError(f"findings cannot be decided while run is {run.status.value}")
             if run.status != RunStatus.AWAITING_DECISION and decision != "waive":
                 raise StateError("only a later explicit waiver is allowed after the decision stage")
-            record = self._storage(self.database.decide_finding, finding_id, decision, reason)
-            updated = self._storage(self.database.get_finding, finding_id)
-            if finding.status == FindingStatus.CONFIRMED and updated.status == FindingStatus.WAIVED:
+            records = self._storage(self.database.decide_findings, finding_ids, decision, reason)
+            updated = [self._storage(self.database.get_finding, finding_id) for finding_id in finding_ids]
+            if any(
+                old.status == FindingStatus.CONFIRMED and new.status == FindingStatus.WAIVED
+                for old, new in zip(before, updated)
+            ):
                 self._storage(self.armarius.invalidate_stale_tasks, run.id)
-        return {"decision": record, "finding": updated}
+        result: dict[str, Any] = {"finding_ids": list(finding_ids)}
+        if len(finding_ids) == 1:
+            result.update({"decision": records[0], "finding": updated[0]})
+        else:
+            result.update({"decisions": records, "findings": updated})
+        return result
 
     def get_patch(self, patch_id: str) -> dict[str, Any]:
         patch = self._storage(self.database.get_patch, patch_id)

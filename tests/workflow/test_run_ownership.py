@@ -47,7 +47,7 @@ def test_cancel_is_durable_and_rejects_a_late_result(tmp_path):
 def test_retry_rejects_a_task_from_another_run(tmp_path):
     repo, first = _started(tmp_path)
     with ScriptoriumService(repo, manuscript_manager=PdfBuildingManuscriptManager(repo)) as service:
-        second = asyncio.run(service.start_run("HEAD", "quick"))["run"]
+        second = asyncio.run(service.start_run("HEAD", "quick", allow_duplicate=True))["run"]
         foreign_task = service.database.list_tasks(second.id)[0]
         with pytest.raises(StateError, match="does not belong"):
             asyncio.run(service.retry_task(first.id, foreign_task.id))
