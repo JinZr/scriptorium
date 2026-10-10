@@ -117,9 +117,23 @@ if require_tool kpsewhich "part of TeX Live; needed to identify TeX installation
             fail "texmf_roots" "kpsewhich --expand-path='$expression' exited with an error"
             continue
         fi
+        # Same acceptance as the build: every entry absolute, none the filesystem root.
         roots="${roots//!!/}"
-        if [ -z "$roots" ] || [ "$roots" = "/" ] || [ "${roots#/}" = "$roots" ]; then
-            fail "texmf_roots" "kpsewhich --expand-path='$expression' returned no absolute TeX roots"
+        bad_entry=""
+        entry_count=0
+        IFS=: read -r -a root_entries <<<"$roots"
+        for entry in "${root_entries[@]+"${root_entries[@]}"}"; do
+            [ -z "$entry" ] && continue
+            entry_count=$((entry_count + 1))
+            trimmed="$(printf '%s' "$entry" | sed 's#/*$##')"
+            if [ "${entry#/}" = "$entry" ] || [ -z "$trimmed" ]; then
+                bad_entry="$entry"
+            fi
+        done
+        if [ "$entry_count" -eq 0 ]; then
+            fail "texmf_roots" "kpsewhich --expand-path='$expression' returned no TeX roots"
+        elif [ -n "$bad_entry" ]; then
+            fail "texmf_roots" "kpsewhich --expand-path='$expression' contains an invalid root '$bad_entry'"
         else
             pass "texmf_roots" "$expression -> ${roots%%:*}"
         fi
@@ -231,11 +245,25 @@ if [ "$installed_in_python" = 1 ]; then
     fi
     if [ -n "$scriptorium_path" ]; then
         # The guide and the shared skill invoke the bare command, so the PATH
-        # entry point itself must run, not only the module in $PYTHON.
-        if "$scriptorium_path" --help >/dev/null 2>&1; then
+        # entry point must run and must belong to the checked interpreter's
+        # installation (its base or user scripts directory).
+        entry_owner="$("$PYTHON" - "$scriptorium_path" <<'PY' 2>/dev/null
+import os, sys, sysconfig
+target_dir = os.path.dirname(os.path.realpath(sys.argv[1]))
+dirs = [sysconfig.get_path("scripts")]
+try:
+    dirs.append(sysconfig.get_path("scripts", sysconfig.get_preferred_scheme("user")))
+except (AttributeError, KeyError):
+    pass
+print("selected" if any(d and os.path.realpath(d) == target_dir for d in dirs) else "other")
+PY
+)"
+        if [ "$entry_owner" != "selected" ]; then
+            fail "scriptorium_cli" "$scriptorium_path is not the entry point installed by $PYTHON; put that interpreter's scripts directory first in PATH or remove the other copy"
+        elif "$scriptorium_path" --help >/dev/null 2>&1; then
             pass "scriptorium_cli" "$scriptorium_path"
         else
-            fail "scriptorium_cli" "$scriptorium_path is in PATH but cannot run; remove the stale entry point or reinstall with $PYTHON -m pip install --force-reinstall"
+            fail "scriptorium_cli" "$scriptorium_path is in PATH but cannot run; reinstall with $PYTHON -m pip install --force-reinstall"
         fi
     else
         # Report the scripts directory of the installation scheme that holds the
