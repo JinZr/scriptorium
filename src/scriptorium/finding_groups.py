@@ -40,14 +40,14 @@ def _claim_checks(entry: Mapping[str, Any]) -> Iterable[tuple[Mapping[str, Any],
             yield check, next((claim for claim in inventory if index in claim.get("check_indices", ())), None)
 
 
-def linked_claims(
+def _claim_links(
     findings: Sequence[Finding],
     claim_reports: Iterable[Mapping[str, Any]],
     duplicates: Iterable[Mapping[str, Any]] = (),
-) -> dict[str, dict[str, Any]]:
-    """Return, by finding ID, the most prominent claim a stored finding is linked to.
+) -> dict[str, list[dict[str, Any]]]:
+    """Return, by finding ID, every claim a stored finding is linked to, in link order.
 
-    Substantive findings link through their claim check to an inventoried claim; detail-role findings through
+    Substantive findings link through their claim checks to inventoried claims; detail-role findings through
     their stored affected_claim. Findings and outputs recorded before either link yield none. A submission that
     repeated a finding stored under another task resolves to that row through its duplicate attribution.
     """
@@ -61,14 +61,11 @@ def linked_claims(
         _identity(task_id, item.category, item.severity.value, item.title, item.claim, item.evidence): item.id
         for task_id, item in reporters
     }
-    linked: dict[str, dict[str, Any]] = {}
+    linked: dict[str, list[dict[str, Any]]] = {}
 
     def link(finding_id: str | None, text: str, prominence: str | None) -> None:
-        if finding_id is None:
-            return
-        current = linked.get(finding_id)
-        if current is None or _PROMINENCE_ORDER[prominence] < _PROMINENCE_ORDER[current["prominence"]]:
-            linked[finding_id] = {"text": text, "prominence": prominence}
+        if finding_id is not None:
+            linked.setdefault(finding_id, []).append({"text": text, "prominence": prominence})
 
     for entry in claim_reports:
         for check, claim in _claim_checks(entry):
@@ -79,6 +76,23 @@ def linked_claims(
         if finding.affected_claim:
             link(finding.id, finding.affected_claim, None)
     return linked
+
+
+def _most_prominent(links: Mapping[str, Sequence[Mapping[str, Any]]]) -> dict[str, dict[str, Any]]:
+    """Return, by finding ID, the most prominent of its claim links; the first link wins ties."""
+    return {
+        finding_id: dict(min(items, key=lambda item: _PROMINENCE_ORDER[item["prominence"]]))
+        for finding_id, items in links.items()
+    }
+
+
+def linked_claims(
+    findings: Sequence[Finding],
+    claim_reports: Iterable[Mapping[str, Any]],
+    duplicates: Iterable[Mapping[str, Any]] = (),
+) -> dict[str, dict[str, Any]]:
+    """Return, by finding ID, the most prominent claim a stored finding is linked to."""
+    return _most_prominent(_claim_links(findings, claim_reports, duplicates))
 
 
 def _anchors(finding: Finding) -> Iterable[tuple[str, str, int, int]]:
@@ -105,21 +119,21 @@ def _mostly_covered(first: set[tuple[str, str, int, int]], second: set[tuple[str
     )
 
 
-def _shares_evidence(first: Finding, second: Finding, claims: Mapping[str, Mapping[str, Any]]) -> bool:
+def _shares_evidence(first: Finding, second: Finding, links: Mapping[str, Sequence[Mapping[str, Any]]]) -> bool:
     """Whether two findings cite mostly the same evidence, so they likely report one issue.
 
     Line anchors decide whenever either finding has one. A PDF page is too coarse to decide alone, so two
-    findings with only page anchors must also link to the same claim.
+    findings with only page anchors must also share a linked claim.
     """
     anchors = [set(_anchors(item)) for item in (first, second)]
     lines = [{anchor for anchor in found if anchor[0] == "lines"} for found in anchors]
     if any(lines):
         return all(lines) and _mostly_covered(*lines)
-    texts = [claims[item.id]["text"] if item.id in claims else None for item in (first, second)]
-    return texts[0] is not None and texts[0] == texts[1] and _mostly_covered(*anchors)
+    texts = [{link["text"] for link in links.get(item.id, ())} for item in (first, second)]
+    return not texts[0].isdisjoint(texts[1]) and _mostly_covered(*anchors)
 
 
-def _components(findings: Sequence[Finding], claims: Mapping[str, Mapping[str, Any]]) -> list[list[Finding]]:
+def _components(findings: Sequence[Finding], links: Mapping[str, Sequence[Mapping[str, Any]]]) -> list[list[Finding]]:
     """Gather each finding, in primary order, with the later ungrouped findings that share evidence with it.
 
     Groups never chain: every member shares evidence with its group's primary, the group's first finding.
@@ -128,7 +142,7 @@ def _components(findings: Sequence[Finding], claims: Mapping[str, Mapping[str, A
     components = []
     while remaining:
         primary, *rest = remaining
-        joined = {item.id for item in rest if _shares_evidence(primary, item, claims)}
+        joined = {item.id for item in rest if _shares_evidence(primary, item, links)}
         components.append([primary] + [item for item in rest if item.id in joined])
         remaining = [item for item in rest if item.id not in joined]
     return components
@@ -243,13 +257,14 @@ def finding_groups(
     claim-check entries; `duplicates` attribute a stored finding to each later task (`finding_id`, `task_id`,
     `role`) that submitted it again.
     """
-    claims = linked_claims(findings, claim_reports, duplicates)
+    links = _claim_links(findings, claim_reports, duplicates)
+    claims = _most_prominent(links)
     duplicate_roles: dict[str, set[str]] = {}
     for duplicate in duplicates:
         if duplicate.get("role"):
             duplicate_roles.setdefault(duplicate["finding_id"], set()).add(duplicate["role"])
     groups = sorted(
-        (_group(members, claims, duplicate_roles) for members in _components(findings, claims)), key=_group_order
+        (_group(members, claims, duplicate_roles) for members in _components(findings, links)), key=_group_order
     )
     counts = {
         tier: {

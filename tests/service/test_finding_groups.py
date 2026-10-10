@@ -196,6 +196,20 @@ def _tiered_findings():
     return headline, supporting, affected, other_major, other_minor, compliance
 
 
+def test_page_only_findings_group_on_any_shared_claim_link_not_only_the_most_prominent():
+    linked = _finding("a", _page(2), role=AgentRole.SUBSTANTIVE_REVIEW)
+    detail = _finding("b", _page(2), role=AgentRole.FIGURE_REVIEW, affected_claim="Claim number 1.")
+    claim_report = {
+        **_linked_claim_report(linked.task_id, [_submitted(linked)], ["headline", "supporting"]),
+        "claim_checks": [{"claim_index": index, "assessment": "finding", "finding_indices": [0]} for index in range(2)],
+    }
+    (group,) = finding_groups([linked, detail], [claim_report])["groups"]
+
+    # a's displayed link is its headline claim, but it shares the supporting claim with b.
+    assert group["finding_ids"] == ["finding_a", "finding_b"]
+    assert group["claim"] == {"text": "Claim number 0.", "prominence": "headline", "finding_id": "finding_a"}
+
+
 def test_tiers_follow_claim_links_and_order_groups_for_triage():
     headline, supporting, affected, other_major, other_minor, compliance = _tiered_findings()
     findings = [compliance, other_minor, other_major, affected, supporting, headline]
