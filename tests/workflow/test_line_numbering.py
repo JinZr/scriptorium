@@ -48,6 +48,7 @@ def _finding(source, line, quote):
         ],
         "explanation": "The text is hard to read.",
         "suggested_action": "Clarify it.",
+        "consequence": "A reader would misread the reported result.",
         "confidence": 0.5,
     }
 

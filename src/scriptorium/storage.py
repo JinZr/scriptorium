@@ -31,7 +31,7 @@ from scriptorium.domain import (
     validate_task_transition,
 )
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 
 _MIGRATION_1 = """
@@ -255,6 +255,14 @@ INSERT INTO schema_migrations (version, applied_at) VALUES (4, CURRENT_TIMESTAMP
 COMMIT;
 """
 
+# Findings recorded before the severity rubric keep a null consequence.
+_MIGRATION_5 = """
+BEGIN IMMEDIATE;
+ALTER TABLE findings ADD COLUMN consequence TEXT;
+INSERT INTO schema_migrations (version, applied_at) VALUES (5, CURRENT_TIMESTAMP);
+COMMIT;
+"""
+
 
 class StorageError(RuntimeError):
     pass
@@ -307,6 +315,10 @@ class Database:
                 version = 3
             if version == 3 and new_database:
                 self.connection.executescript(_MIGRATION_4)
+                version = 4
+            if version == 4:
+                with self.transaction() as connection:
+                    self._apply_external_migrations(connection)
 
     def ensure_external_schema(self) -> None:
         with self.transaction() as connection:
@@ -322,8 +334,17 @@ class Database:
                     f"historical SDK run {active['id']} must finish in its original version "
                     "before starting an external run"
                 )
-            # executescript commits an open transaction, so run each fixed migration statement under this lock.
-            for statement in _MIGRATION_4.split(";"):
+            self._apply_external_migrations(connection)
+
+    @staticmethod
+    def _apply_external_migrations(connection: sqlite3.Connection) -> None:
+        # executescript commits an open transaction, so run each fixed migration statement inside the caller's
+        # write transaction, after rechecking a version that another process may already have advanced.
+        version = connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0]
+        for target, migration in ((4, _MIGRATION_4), (5, _MIGRATION_5)):
+            if version >= target:
+                continue
+            for statement in migration.split(";"):
                 statement = statement.strip()
                 if statement and statement not in {"BEGIN IMMEDIATE", "COMMIT"}:
                     connection.execute(statement)
@@ -985,9 +1006,9 @@ class Database:
                     """
                     INSERT INTO findings (
                         id, run_id, task_id, attempt_id, fingerprint, role, category, severity, title,
-                        claim, evidence_json, explanation, suggested_action, confidence, status,
+                        claim, evidence_json, explanation, suggested_action, confidence, consequence, status,
                         created_at, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         finding.id,
@@ -1004,6 +1025,7 @@ class Database:
                         finding.explanation,
                         finding.suggested_action,
                         finding.confidence,
+                        finding.consequence,
                         finding.status.value,
                         finding.created_at,
                         finding.updated_at,
@@ -1629,6 +1651,8 @@ class Database:
             explanation=row["explanation"],
             suggested_action=row["suggested_action"],
             confidence=row["confidence"],
+            # Historical SDK databases stay at their original schema without this column.
+            consequence=row["consequence"] if "consequence" in row.keys() else None,
             status=FindingStatus(row["status"]),
             created_at=row["created_at"],
             updated_at=row["updated_at"],

@@ -46,12 +46,16 @@ from .manuscript import (
 from .schemas import (
     DEFAULT_EVIDENCE_ANCHOR_CONTRACT,
     SCHEMA_MODELS,
+    SEVERITY_RUBRIC,
     EvidenceAnchorContract,
     EvidenceAnchorMap,
     ExactEdit,
     InventoriedScientificReviewOutput,
     JudgedClaimCheck,
     JudgedScientificReviewOutput,
+    RatedFinding,
+    RatedReviewOutput,
+    RatedScientificReviewOutput,
     ReviewOutput,
     RevisionOutput,
     ScientificReviewOutput,
@@ -430,6 +434,8 @@ class Armarius:
         for candidate in output.findings:
             evidence = tuple(item.model_dump(mode="json", exclude_none=True) for item in candidate.evidence)
             canonical_evidence = sorted(canonical_json(anchor) for anchor in evidence)
+            # Outputs frozen before the consequence field keep their original fingerprint.
+            consequence = candidate.consequence if isinstance(candidate, RatedFinding) else None
             fingerprint = digest_json(
                 {
                     "category": candidate.category,
@@ -440,6 +446,7 @@ class Armarius:
                     "explanation": candidate.explanation,
                     "suggested_action": candidate.suggested_action,
                     "confidence": candidate.confidence,
+                    **({} if consequence is None else {"consequence": consequence}),
                 }
             )
             finding = Finding(
@@ -456,6 +463,7 @@ class Armarius:
                 explanation=candidate.explanation,
                 suggested_action=candidate.suggested_action,
                 confidence=candidate.confidence,
+                consequence=consequence,
             )
             stored = next((item for item in all_findings if item.fingerprint == fingerprint), None)
             if stored is None:
@@ -1003,7 +1011,11 @@ class Armarius:
             # Runs frozen before claim-check judgments or the claim inventory keep the shape they were given.
             definitions = schema.get("$defs", {})
             if "InventoriedClaim" in definitions:
-                return InventoriedScientificReviewOutput
+                return (
+                    RatedScientificReviewOutput
+                    if self._findings_require_consequence(schema)
+                    else InventoriedScientificReviewOutput
+                )
             return JudgedScientificReviewOutput if "JudgedClaimCheck" in definitions else ScientificReviewOutput
         if schema_kind != "review":
             return SCHEMA_MODELS[schema_kind]
@@ -1012,10 +1024,17 @@ class Armarius:
         if schema.get("type") != "object" or schema.get("additionalProperties") is not False:
             raise InfrastructureError(f"run {run.id} has an unsupported frozen review output schema")
         if set(properties) == set(required) == {"summary", "findings", "scope"}:
-            return ScopedReviewOutput
+            return RatedReviewOutput if self._findings_require_consequence(schema) else ScopedReviewOutput
         if set(properties) == set(required) == {"summary", "findings"}:
             return ReviewOutput
         raise InfrastructureError(f"run {run.id} has an unsupported frozen review output schema")
+
+    @staticmethod
+    def _findings_require_consequence(schema: dict[str, Any]) -> bool:
+        # Runs frozen before the severity rubric published findings without a consequence field.
+        reference = schema.get("properties", {}).get("findings", {}).get("items", {}).get("$ref", "")
+        definition = schema.get("$defs", {}).get(reference.rpartition("/")[2], {})
+        return "consequence" in definition.get("required", [])
 
     @staticmethod
     def _validation_error_summary(report: ValidationReport) -> str:
@@ -1223,6 +1242,7 @@ class Armarius:
                         "explanation": finding.explanation,
                         "suggested_action": finding.suggested_action,
                         "confidence": finding.confidence,
+                        **({} if finding.consequence is None else {"consequence": finding.consequence}),
                         "status": finding.status.value,
                     }
                     for finding in recorded_findings
@@ -2080,6 +2100,7 @@ class Armarius:
                 "evidence": list(finding.evidence),
                 "explanation": finding.explanation,
                 "suggested_action": finding.suggested_action,
+                **({} if finding.consequence is None else {"consequence": finding.consequence}),
             }
             for finding in findings
         ]
@@ -2128,8 +2149,9 @@ class Armarius:
             "available relevant frozen sources or pages remains unfinished; list that material in "
             "scope.outstanding. Missing external material and unresolved scientific conclusions belong "
             "in scope.limitations and do not alone prevent complete after the available relevant material "
-            "has been assessed. This declaration does not prove inspection; "
-            "findings may be empty. Return only the ReviewOutput JSON object with no prose before or after it."
+            "has been assessed. This declaration does not prove inspection; findings may be empty.\n\n"
+            f"{SEVERITY_RUBRIC}\n\n"
+            "Return only the ReviewOutput JSON object with no prose before or after it."
         )
 
     @staticmethod

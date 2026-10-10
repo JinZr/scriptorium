@@ -115,6 +115,7 @@ def _complete_reviews(service: ScriptoriumService, run_id: str, *, skip: AgentRo
                     ],
                     "explanation": "The finding is grounded in the frozen Markdown source.",
                     "suggested_action": "Inspect and clarify the reported result.",
+                    "consequence": "A reader would misread the reported result.",
                     "confidence": 0.9,
                 }
             ],

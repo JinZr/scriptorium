@@ -96,6 +96,7 @@ def test_anchor_covers_complete_lines_and_validates(reader):
         "evidence": [single["anchor"], multi["anchor"]],
         "explanation": "No unit is given.",
         "suggested_action": "State the unit.",
+        "consequence": "A reader would misread the reported result.",
         "confidence": 0.5,
     }
     receipt = submit(service, context, {"summary": "Checked.", "findings": [finding]})
@@ -176,6 +177,7 @@ def test_anchor_follows_the_runs_frozen_line_rule(tmp_path, monkeypatch, legacy,
             "evidence": [anchor],
             "explanation": "They are hard to read.",
             "suggested_action": "Clarify them.",
+            "consequence": "A reader would misread the reported result.",
             "confidence": 0.5,
         }
         receipt = submit(service, context, {"summary": "Checked.", "findings": [finding]})
