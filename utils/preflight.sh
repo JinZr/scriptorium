@@ -117,25 +117,26 @@ if require_tool kpsewhich "part of TeX Live; needed to identify TeX installation
             fail "texmf_roots" "kpsewhich --expand-path='$expression' exited with an error"
             continue
         fi
-        # Same acceptance as the build: every entry absolute, none the filesystem root.
+        # Same acceptance as the build: relative entries are ignored, at least
+        # one absolute root must remain, and none may be the filesystem root.
         roots="${roots//!!/}"
-        bad_entry=""
-        entry_count=0
+        root_entry=""
+        first_root=""
+        absolute_count=0
         IFS=: read -r -a root_entries <<<"$roots"
         for entry in "${root_entries[@]+"${root_entries[@]}"}"; do
-            [ -z "$entry" ] && continue
-            entry_count=$((entry_count + 1))
+            [ "${entry#/}" = "$entry" ] && continue
+            absolute_count=$((absolute_count + 1))
+            [ -z "$first_root" ] && first_root="$entry"
             trimmed="$(printf '%s' "$entry" | sed 's#/*$##')"
-            if [ "${entry#/}" = "$entry" ] || [ -z "$trimmed" ]; then
-                bad_entry="$entry"
-            fi
+            [ -z "$trimmed" ] && root_entry="$entry"
         done
-        if [ "$entry_count" -eq 0 ]; then
-            fail "texmf_roots" "kpsewhich --expand-path='$expression' returned no TeX roots"
-        elif [ -n "$bad_entry" ]; then
-            fail "texmf_roots" "kpsewhich --expand-path='$expression' contains an invalid root '$bad_entry'"
+        if [ "$absolute_count" -eq 0 ]; then
+            fail "texmf_roots" "kpsewhich --expand-path='$expression' returned no absolute TeX roots"
+        elif [ -n "$root_entry" ]; then
+            fail "texmf_roots" "kpsewhich --expand-path='$expression' contains the filesystem root '$root_entry'"
         else
-            pass "texmf_roots" "$expression -> ${roots%%:*}"
+            pass "texmf_roots" "$expression -> $first_root"
         fi
     done
 fi
