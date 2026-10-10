@@ -7,6 +7,7 @@ import sys
 from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic_core import PydanticCustomError
 
 from .domain import digest_json
 
@@ -269,9 +270,82 @@ class FindingCandidate(StrictModel):
     confidence: float = Field(ge=0, le=1)
 
 
+SUBMISSION_COMPLIANCE_CATEGORY = "submission_compliance"
+_COMPLIANCE_SEVERITIES = (Severity.MINOR, Severity.SUGGESTION)
+SEVERITY_DEFINITIONS = {
+    Severity.BLOCKER: "a headline claim is false as stated, or the manuscript cannot be evaluated (missing core "
+    "result, an argument that cannot be followed).",
+    Severity.MAJOR: "a headline claim needs substantive qualification, or a key result cannot be reproduced or "
+    "traced from the manuscript; a reviewer at the target venue would recommend rejection or return on this basis "
+    "alone.",
+    Severity.MODERATE: "a supporting claim is affected, or a reader would misread a specific result or comparison.",
+    Severity.MINOR: "a presentation, consistency, or compliance problem that does not change how any claim should "
+    "be read.",
+    Severity.SUGGESTION: "an optional improvement.",
+}
+SEVERITY_RULES = (
+    "Assign a level only when its definition is fully met; a problem that does not change how a reader should "
+    "interpret any claim is minor or suggestion no matter how many places it appears.",
+    "Do not assign moderate or above unless consequence states a concrete misreading or failure.",
+)
+_CONSEQUENCE = "what a reader would wrongly believe, or be unable to do, if this is not fixed"
+_COMPLIANCE_RULE = (
+    f"Checklist answers, page or figure limits, anonymity, and template rules use category "
+    f"{SUBMISSION_COMPLIANCE_CATEGORY}, at minor or suggestion."
+)
+SEVERITY_RUBRIC = "\n".join(
+    (
+        "Severity rubric, by consequence:",
+        *(f"- {level.value}: {definition}" for level, definition in SEVERITY_DEFINITIONS.items()),
+        SEVERITY_RULES[0],
+        f"A finding's consequence states {_CONSEQUENCE}. {SEVERITY_RULES[1]}",
+        _COMPLIANCE_RULE,
+    )
+)
+
+
+class RatedFinding(FindingCandidate):
+    category: str = Field(min_length=1, description=f"A short finding category. {_COMPLIANCE_RULE}")
+    severity: Severity = Field(
+        description=" ".join(
+            (
+                *(f"{level.value}: {definition}" for level, definition in SEVERITY_DEFINITIONS.items()),
+                *SEVERITY_RULES,
+            )
+        )
+    )
+    consequence: str = Field(min_length=1, description=f"One or two sentences: {_CONSEQUENCE}.")
+
+    @field_validator("consequence")
+    @classmethod
+    def require_consequence_text(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("consequence must state what a reader would wrongly believe or be unable to do")
+        return value
+
+    @model_validator(mode="after")
+    def validate_compliance_severity(self) -> "RatedFinding":
+        if self.category == SUBMISSION_COMPLIANCE_CATEGORY and self.severity not in _COMPLIANCE_SEVERITIES:
+            raise ValueError(
+                f"a {SUBMISSION_COMPLIANCE_CATEGORY} finding must be minor or suggestion: a checklist, limit, "
+                "anonymity, or template problem does not change how any claim should be read"
+            )
+        return self
+
+
 class ReviewOutput(StrictModel):
     summary: str = Field(min_length=1)
     findings: list[FindingCandidate]
+
+
+def _json_kind(value: Any) -> str:
+    if value is None:
+        return "null"
+    if isinstance(value, bool):
+        return "a boolean"
+    if isinstance(value, (int, float, Decimal)):
+        return "a number"
+    return {str: "a string", list: "an array"}.get(type(value), type(value).__name__)
 
 
 class ReviewScopeArea(StrictModel):
@@ -294,8 +368,15 @@ class ReviewScopeArea(StrictModel):
     @model_validator(mode="before")
     @classmethod
     def validate_field_presence(cls, value: Any) -> Any:
-        if not isinstance(value, dict):
+        if isinstance(value, cls):
             return value
+        if not isinstance(value, dict):
+            raise PydanticCustomError(
+                "scope_area_type",
+                "each scope.checked and scope.outstanding entry must be an object, not {kind}: give source_path "
+                "with optional start_line and end_line together, or source_path manuscript.pdf with page",
+                {"kind": _json_kind(value)},
+            )
         if value.get("source_path") == "manuscript.pdf":
             if {"start_line", "end_line"}.intersection(value):
                 raise ValueError("compiled PDF scope cannot include line fields")
@@ -336,6 +417,10 @@ class ScopedReviewOutput(ReviewOutput):
     model_config = ConfigDict(extra="forbid", title="ReviewOutput")
 
     scope: ReviewScope
+
+
+class RatedReviewOutput(ScopedReviewOutput):
+    findings: list[RatedFinding]
 
 
 def _integral_indices(value: Any) -> Any:
@@ -506,6 +591,10 @@ class InventoriedScientificReviewOutput(JudgedScientificReviewOutput):
         return self
 
 
+class RatedScientificReviewOutput(InventoriedScientificReviewOutput):
+    findings: list[RatedFinding]
+
+
 # Historical runs still deserialize these persisted outputs, but new runs never schedule this role.
 class VisualTranscriptionPage(StrictModel):
     page: int = Field(ge=1)
@@ -588,8 +677,8 @@ class ValidationReport(StrictModel):
 
 
 SCHEMA_MODELS: dict[str, type[StrictModel]] = {
-    "review": ScopedReviewOutput,
-    "scientific_review": InventoriedScientificReviewOutput,
+    "review": RatedReviewOutput,
+    "scientific_review": RatedScientificReviewOutput,
     "visual_transcription": VisualTranscriptionOutput,
     "revision": RevisionOutput,
     "verification": VerificationOutput,

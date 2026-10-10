@@ -98,9 +98,14 @@ def submit(service, claim_data, output):
     )
 
 
+def requires_consequence(schema):
+    reference = schema["properties"]["findings"]["items"]["$ref"].rpartition("/")[2]
+    return "consequence" in schema["$defs"][reference]["required"]
+
+
 def review_finding(claim_data):
     source = next(item for item in claim_data["source_map"]["sources"] if item["source_path"] == "main.tex")
-    return {
+    finding = {
         "category": "clarity",
         "severity": "major",
         "title": "Typo obscures the claim",
@@ -118,6 +123,9 @@ def review_finding(claim_data):
         "suggested_action": "Replace the sentence with the corrected wording.",
         "confidence": 0.99,
     }
+    if requires_consequence(claim_data["schema"]):
+        finding["consequence"] = "A reader cannot tell what the main result sentence states."
+    return finding
 
 
 def complete_reviews(service, run_id, *, with_finding=True):

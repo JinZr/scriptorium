@@ -94,7 +94,8 @@ For a `substantive_review` using the current `scientific_review` schema, the fol
       }],
       "explanation": "The checked main text and supplement do not define the measured outcome.",
       "suggested_action": "Define the outcome and report the supporting measurement.",
-      "confidence": 0.7
+      "confidence": 0.7,
+      "consequence": "A reader cannot tell what the headline result measures, so cannot judge whether it supports the claim."
     }
   ],
   "scope": {

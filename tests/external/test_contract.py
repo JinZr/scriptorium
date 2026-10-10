@@ -210,6 +210,7 @@ def test_revision_requires_human_gates_and_independent_verification(tmp_path: Pa
             ],
             "explanation": "The main text should state the scope.",
             "suggested_action": "Qualify the result.",
+            "consequence": "A reader would misread the reported result.",
             "confidence": 0.9,
         }
         asyncio.run(
@@ -613,6 +614,7 @@ def test_wrong_evidence_is_rejected_as_a_whole_output(tmp_path: Path) -> None:
             ],
             "explanation": "Explanation.",
             "suggested_action": "Recheck.",
+            "consequence": "A reader would misread the reported result.",
             "confidence": 0.5,
         }
         result = asyncio.run(
