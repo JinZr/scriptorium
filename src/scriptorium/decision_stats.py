@@ -23,6 +23,10 @@ def _counts() -> dict[str, int]:
     return dict.fromkeys(_STATES, 0)
 
 
+def _inline(value: object) -> str:
+    return " ".join(str(value).split())
+
+
 def _severity_key(severity: str) -> tuple[int, str]:
     return (_SEVERITY_ORDER.get(severity, len(_SEVERITY_ORDER)), severity)
 
@@ -93,14 +97,13 @@ def markdown_lines(stats: dict) -> list[str]:
         lines.extend(["", f"### {title}", "", "| " + " | ".join([*columns, *_STATES]) + " |"])
         lines.append("|" + "---|" * (len(columns) + len(_STATES)))
         for row in stats[key]:
-            cells = [str(row[column]).replace("|", "\\|") for column in columns]
+            cells = [_inline(row[column]).replace("|", "\\|") for column in columns]
             lines.append("| " + " | ".join([*cells, *(str(row[state]) for state in _STATES)]) + " |")
     if stats["reasons"]:
         lines.extend(["", "### Rejected and waived reasons", ""])
         for entry in stats["reasons"]:
-            reason = " ".join(entry["reason"].split())
             lines.append(
-                f"- `{entry['finding_id']}` — {entry['decision']} / {entry['role']} / {entry['category']} / "
-                f"{entry['severity']}: {reason}"
+                f"- `{entry['finding_id']}` — {entry['decision']} / {entry['role']} / {_inline(entry['category'])} / "
+                f"{entry['severity']}: {_inline(entry['reason'])}"
             )
     return lines

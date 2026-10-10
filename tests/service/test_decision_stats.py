@@ -61,3 +61,12 @@ def test_markdown_escapes_table_cells_and_flattens_reasons():
     text = "\n".join(markdown_lines(stats))
     assert "| a\\|b | 0 | 1 | 0 | 0 |" in text
     assert "Line one. Line two" in text
+
+
+def test_markdown_keeps_line_separators_in_one_table_row_and_bullet():
+    finding = _finding(1, category="line one\r\n## heading\u2028line two\rend")
+    stats = decision_stats([_decided(finding, ("reject", "Why\n## no\r\nsplit\x85here.", "2026-01-01"))])
+    lines = markdown_lines(stats)
+    assert "| line one ## heading line two end | 0 | 1 | 0 | 0 |" in lines
+    assert any(line.endswith("/ line one ## heading line two end / major: Why ## no split here.") for line in lines)
+    assert not any(line.startswith("## heading") or line.startswith("## no") for line in lines)
