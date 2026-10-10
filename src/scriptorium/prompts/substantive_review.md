@@ -38,7 +38,8 @@ prior inventory left unchecked, one entry per claim with the same claim, claim_a
 in an earlier accepted attempt need not be repeated.
 
 Decide the verdict before listing findings. Set verdict.recommendation to accept, minor_revision, major_revision, or
-reject, and make verdict.decisive_questions the one to three questions that the major findings answer. Reject or
+reject, and make verdict.decisive_questions the one to three questions whose answers would change the recommendation;
+when the review has major or blocker findings, they are the questions those findings answer. Reject or
 major_revision rests on at least one major or blocker finding of this review, and accept allows none. A blocker
 finding must be linked from a check of a headline claim.
 
