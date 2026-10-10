@@ -118,6 +118,7 @@ def test_terminal_attempt_keeps_bounded_source_map_inspection(review_cli, status
             "findings": [],
             "claim_checks": [],
             "claim_inventory": [],
+            "verdict": {"recommendation": "accept", "decisive_questions": ["Is the reported result supported?"]},
             "scope": {"completion": "partial", "checked": [], "outstanding": [], "limitations": []},
         }
         asyncio.run(

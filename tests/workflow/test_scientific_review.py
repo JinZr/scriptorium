@@ -4,7 +4,7 @@ import pytest
 
 from scriptorium.domain import AgentRole, AttemptStatus, RunStatus
 import scriptorium.schemas
-from scriptorium.schemas import JudgedScientificReviewOutput, ScientificReviewOutput
+from scriptorium.schemas import JudgedScientificReviewOutput, RatedScientificReviewOutput, ScientificReviewOutput
 from scriptorium.service import ScriptoriumService
 
 from ._support import PdfBuildingManuscriptManager, claim, make_repository, review_finding, submit
@@ -179,10 +179,13 @@ def test_scientific_review_rejects_missing_or_invalid_checks_without_findings(tm
         assert not service.evaluate_gate(run.id)["passed"]
 
 
-def test_claim_anchor_quote_is_validated_like_evidence(tmp_path):
+def test_claim_anchor_quote_is_validated_like_evidence(tmp_path, monkeypatch):
     repo = make_repository(tmp_path, roles=("substantive_review",))
     with ScriptoriumService(repo, manuscript_manager=PdfBuildingManuscriptManager(repo)) as service:
-        run = asyncio.run(service.start_run("HEAD", "quick"))["run"]
+        # Checks restate their claim anchor only in runs frozen before the verdict.
+        with monkeypatch.context() as patch:
+            patch.setitem(scriptorium.schemas.SCHEMA_MODELS, "scientific_review", RatedScientificReviewOutput)
+            run = asyncio.run(service.start_run("HEAD", "quick"))["run"]
         review = claim(service, run.id, AgentRole.SUBSTANTIVE_REVIEW)
         anchor = {**review_finding(review)["evidence"][0], "quoted_text": "This text is not in the manuscript."}
         receipt = submit(
@@ -360,7 +363,8 @@ def test_continuation_preserves_prior_claim_checks_and_accepts_new_checks(tmp_pa
         asyncio.run(service.continue_review(run.id, first["task"].id))
         second = claim(service, run.id, AgentRole.SUBSTANTIVE_REVIEW)
         assert "claim_checks" in second["prompt"]
-        assert '"claim_inventory":[{"check_indices":[0]' in second["prompt"]
+        assert '"claim_inventory":[{"claim":' in second["prompt"]
+        assert '"verdict":{"decisive_questions":' in second["prompt"]
         assert "except when a newly assessed claim check must link to an existing concern" in second["prompt"]
         assert second["attempt"].id != first["attempt"].id
         assert (
@@ -387,7 +391,7 @@ def test_continuation_must_keep_listing_claims_the_accepted_inventory_left_unche
         run = asyncio.run(service.start_run("HEAD", "quick"))["run"]
         first = claim(service, run.id, AgentRole.SUBSTANTIVE_REVIEW)
         page = {"source_path": "manuscript.pdf", "page": 1}
-        assert "empty check_indices list with a not_checked_reason" in first["prompt"]
+        assert "give that entry a not_checked_reason" in first["prompt"]
         assert "prior inventory left unchecked, one entry per claim" in first["prompt"]
         checked = {
             "claim": _claim_check()["claim"],
