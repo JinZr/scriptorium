@@ -12,6 +12,7 @@ from scriptorium.schemas import (
     EvidenceAnchorMap,
     InventoriedScientificReviewOutput,
     JudgedClaimCheck,
+    JudgedScientificReviewOutput,
     ReviewOutput,
     ReviewScopeArea,
     VisualTranscriptionOutput,
@@ -313,9 +314,12 @@ def test_claim_judgments_reject_contradictory_answers(changes, message) -> None:
 
 
 def test_scientific_review_schema_requires_claim_judgments() -> None:
-    check = output_schema("scientific_review")["$defs"]["JudgedClaimCheck"]
-    assert {"claim_anchor", "stated_scope", "check_type", "question_answer", "exceptions"} <= set(check["required"])
+    check = output_schema("scientific_review")["$defs"]["LinkedClaimCheck"]
+    assert {"claim_index", "stated_scope", "check_type", "question_answer", "exceptions"} <= set(check["required"])
     assert "recomputation" not in check["required"]
+    assert not {"claim", "claim_anchor"} & set(check["properties"])
+    judged = JudgedScientificReviewOutput.model_json_schema()["$defs"]["JudgedClaimCheck"]
+    assert {"claim", "claim_anchor"} <= set(judged["required"])
 
 
 def _inventoried_output(*, completion="complete", inventory=None):

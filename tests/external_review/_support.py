@@ -68,6 +68,7 @@ def answer(context, *, completion="complete", findings=True):
                     "explanation": "The word obscures the sentence.",
                     "suggested_action": "Correct teh to the.",
                     "consequence": "A reader would misread the reported result.",
+                    "affected_claim": "The result sentence reports that the result is clear.",
                     "confidence": 0.9,
                 }
             ]

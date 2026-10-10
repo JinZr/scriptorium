@@ -29,21 +29,26 @@ the central claims it assessed.
 
 List the manuscript's central claims in claim_inventory before checking them: each headline claim the authors
 state in the abstract, stated contributions, or conclusions, and the supporting claims those headline claims depend
-on. Anchor each entry where the authors state it. Link each entry to the zero-based indices of the claim_checks that
-assess it; each claim check must assess exactly one inventoried claim and repeat that entry's claim and claim_anchor
-exactly. When this submission does not check a claim, submit an
-empty check_indices list with a not_checked_reason. A complete review must check every inventoried headline claim, even when the
-check can only conclude "unresolved". In a continuation, list the claims this submission assesses and every claim the
-prior inventory left unchecked, one entry per claim with the same claim, claim_anchor, and prominence; claims checked in an earlier accepted
-attempt need not be repeated.
+on. Anchor each entry where the authors state it. Each claim check assesses exactly one inventoried claim and names
+it by claim_index, the entry's zero-based position in claim_inventory; do not restate the claim in the check. When no
+check in this submission names a claim, give that entry a not_checked_reason; omit the reason otherwise. A complete
+review must check every inventoried headline claim, even when the check can only conclude "unresolved".
+In a continuation, list the claims this submission assesses and every claim the
+prior inventory left unchecked, one entry per claim with the same claim, claim_anchor, and prominence; claims checked
+in an earlier accepted attempt need not be repeated.
+
+Decide the verdict before listing findings. Set verdict.recommendation to accept, minor_revision, major_revision, or
+reject, and make verdict.decisive_questions the one to three questions that the major findings answer. Reject or
+major_revision rests on at least one major or blocker finding of this review, and accept allows none. A blocker
+finding must be linked from a check of a headline claim.
 
 Phrase each critical question so the reported countercheck can answer it. A check that only confirms repeated
 numbers supports that narrow consistency question, not a broader scientific conclusion. If a material link in the
 evidence chain remains unexamined, name its frozen source or page in scope.outstanding when present and explain
 the gap in scope.limitations rather than declaring the broader claim supported.
 
-Record each check's judgment explicitly. Put the exact location of the authors' claim in claim_anchor and its
-conditions and qualifications in stated_scope; keep evidence for the material that decides the assessment. Set
+Record each check's judgment explicitly. Put the conditions and qualifications of the inventoried claim in
+stated_scope; keep evidence for the material that decides the assessment. Set
 check_type to what the countercheck examined. Set question_answer to whether the countercheck shows the claim holds
 at its stated scope, and list in exceptions every case, condition, or value within that scope where it fails or is
 not shown. "supported" goes with question_answer "yes", and only with it; "yes" lists no exceptions and "partly"
@@ -52,7 +57,7 @@ recompute a reported value, use check_type "recomputation" and record its inputs
 value, and whether they match; a recomputation that differs cannot answer "yes", and one that matches cannot answer
 "no". These fields record your judgment; they do not replace the countercheck.
 
-Before submitting, revisit each drafted claim, stated_scope, critical_question, countercheck, question_answer,
+Before submitting, revisit each checked claim, stated_scope, critical_question, countercheck, question_answer,
 exceptions, and assessment together:
 
 - Check that population, conditions, range, threshold, and certainty agree across the entry. If a countercheck

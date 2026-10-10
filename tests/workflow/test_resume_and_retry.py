@@ -382,11 +382,10 @@ def test_continue_replays_accepted_findings_before_reopening_after_crash(tmp_pat
                     "findings": [review_finding(first)],
                     "claim_checks": [
                         {
-                            "claim": "The reported result is clear.",
+                            "claim_index": 0,
                             "evidence": [{"source_path": "manuscript.pdf", "page": 1}],
                             "critical_question": "Does the wording support the claim?",
                             "countercheck": "Checked the reported result.",
-                            "claim_anchor": {"source_path": "manuscript.pdf", "page": 1},
                             "stated_scope": "As stated in the manuscript.",
                             "check_type": "design_and_analysis",
                             "question_answer": "no",
@@ -400,9 +399,12 @@ def test_continue_replays_accepted_findings_before_reopening_after_crash(tmp_pat
                             "claim": "The reported result is clear.",
                             "claim_anchor": {"source_path": "manuscript.pdf", "page": 1},
                             "prominence": "headline",
-                            "check_indices": [0],
                         }
                     ],
+                    "verdict": {
+                        "recommendation": "major_revision",
+                        "decisive_questions": ["Does the wording support the claim?"],
+                    },
                     "scope": {
                         "completion": "partial",
                         "checked": [{"source_path": "main.tex"}],
