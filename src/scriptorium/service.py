@@ -11,6 +11,7 @@ from hashlib import sha256
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import socket
 import sqlite3
@@ -53,6 +54,7 @@ from .manuscript import (
     render_page_view,
 )
 from .schemas import (
+    UNIVERSAL_LINE_TERMINATORS,
     EvidenceAnchorContract,
     InventoriedScientificReviewOutput,
     LinkedScientificReviewOutput,
@@ -1657,13 +1659,14 @@ class ScriptoriumService:
             lines.append(
                 f"  - category: {finding['category']}; role: {finding['role']}; confidence: {finding['confidence']}"
             )
-            lines.append(f"  - claim: {finding['claim']}")
+            text = ScriptoriumService._markdown_text
+            lines.append(f"  - claim: {text(finding['claim'])}")
             if finding.get("affected_claim"):
-                lines.append(f"  - affected claim: {finding['affected_claim']}")
+                lines.append(f"  - affected claim: {text(finding['affected_claim'])}")
             if finding.get("consequence"):
-                lines.append(f"  - consequence: {finding['consequence']}")
-            lines.append(f"  - explanation: {finding['explanation']}")
-            lines.append(f"  - suggested action: {finding['suggested_action']}")
+                lines.append(f"  - consequence: {text(finding['consequence'])}")
+            lines.append(f"  - explanation: {text(finding['explanation'])}")
+            lines.append(f"  - suggested action: {text(finding['suggested_action'])}")
             lines.extend(ScriptoriumService._markdown_finding_evidence(finding["evidence"]))
         return lines
 
@@ -1673,10 +1676,18 @@ class ScriptoriumService:
         for anchor in evidence:
             line = f"  - evidence: `{ScriptoriumService._markdown_location(anchor)}`"
             if quoted_text := anchor.get("quoted_text"):
-                # A quote spanning several source lines stays one list item; ⏎ marks each line break.
-                line += ": " + " ⏎ ".join(quoted_text.splitlines())
+                line += ": " + ScriptoriumService._markdown_text(quoted_text)
             lines.append(line)
         return lines
+
+    @staticmethod
+    def _markdown_text(text: str) -> str:
+        """Keep free text on one list item: each line terminator of the evidence contract becomes a visible ⏎.
+
+        Only CRLF, CR, and LF end a numbered source line, so other separators such as form feed or U+2028
+        stay verbatim, and a terminal line break keeps its mark instead of vanishing.
+        """
+        return _LINE_TERMINATOR.sub(" ⏎ ", text).rstrip(" ")
 
     @staticmethod
     def _claim_check_report(task_id: str, attempt_id: str, output: ScientificReviewOutput) -> dict[str, Any]:
@@ -2088,6 +2099,9 @@ def _read_text_window(path: Path, start_line: int, max_lines: int, offset: int, 
                     next_line, next_offset = number + 1, 0
                 break
     return pieces, next_line, next_offset
+
+
+_LINE_TERMINATOR = re.compile("|".join(re.escape(terminator) for terminator in UNIVERSAL_LINE_TERMINATORS))
 
 
 def _plain(value: Any) -> Any:
