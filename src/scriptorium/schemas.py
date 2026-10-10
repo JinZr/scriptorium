@@ -289,6 +289,10 @@ SEVERITY_RULES = (
     "Do not assign moderate or above unless consequence states a concrete misreading or failure.",
     "A finding at moderate or above names the claim whose reading it changes, in affected_claim or, in a substantive "
     "review, through its claim check; a blocker needs a headline claim.",
+    "For a reported value, margin, count, or ranking that disagrees between text, table, figure, or appendix: "
+    "moderate only when a claim rests on that value, major only when correcting it changes a headline claim. A "
+    "mismatch of names, labels, terms, captions, units written two ways, or bibliography fields is minor or "
+    "suggestion unless it hides or alters a reported result.",
 )
 _CONSEQUENCE = "what a reader would wrongly believe, or be unable to do, if this is not fixed"
 _COMPLIANCE_RULE = (
@@ -302,6 +306,7 @@ SEVERITY_RUBRIC = "\n".join(
         SEVERITY_RULES[0],
         f"A finding's consequence states {_CONSEQUENCE}. {SEVERITY_RULES[1]}",
         SEVERITY_RULES[2],
+        SEVERITY_RULES[3],
         _COMPLIANCE_RULE,
     )
 )

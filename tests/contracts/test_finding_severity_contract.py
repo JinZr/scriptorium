@@ -53,7 +53,7 @@ def test_new_review_schemas_require_a_consequence_and_publish_the_rubric(kind) -
         assert f"- {level.value}: {definition}" in SEVERITY_RUBRIC
     assert all(rule in severity and rule in SEVERITY_RUBRIC for rule in SEVERITY_RULES)
     assert "submission_compliance" in finding["properties"]["category"]["description"]
-    assert len(SEVERITY_RUBRIC.split()) < 230
+    assert len(SEVERITY_RUBRIC.split()) < 290
 
 
 def test_rated_finding_rejects_a_missing_or_blank_consequence() -> None:
