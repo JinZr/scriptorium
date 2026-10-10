@@ -30,7 +30,10 @@ from .schemas import (
     evidence_anchor_contract_digest,
 )
 
-INPUT_PATTERN = re.compile(r"\\(?:input(?![A-Za-z@])\s*(?:\{([^{}]+)\}|([^\\\s{}%]+))|include\s*\{([^{}]+)\})")
+INPUT_PATTERN = re.compile(
+    r"\\(?:input(?![A-Za-z@])\s*(?:\{([^{}]+)\}|([^\\\s{}%]+))|include\s*\{([^{}]+)\}"
+    r"|(?:[BL]?VerbatimInput|verbatiminput|lstinputlisting)(?![A-Za-z@])\s*(?:\[[^\]]*\])?\s*\{([^{}]+)\})"
+)
 BIB_PATTERN = re.compile(r"\\bibliography\s*\{([^}]+)\}")
 ADDBIB_PATTERN = re.compile(r"\\addbibresource(?:\[[^\]]*\])?\s*\{([^}]+)\}")
 GRAPHICS_PATTERN = re.compile(r"\\includegraphics\*?(?:\s*\[[^\]]*\])?\s*\{([^}]+)\}")
@@ -675,7 +678,9 @@ class ManuscriptManager:
                 continue
             for name in raw.split(",") if kind == "bibliography" else [raw]:
                 dependency = Path(name.strip())
-                if not dependency.suffix and kind in {"input", "bibliography"}:
+                # Verbatim-style includes name a file exactly; only \input and \include default to .tex.
+                verbatim = kind == "input" and match.lastindex == 4
+                if not dependency.suffix and kind in {"input", "bibliography"} and not verbatim:
                     dependency = dependency.with_suffix(".tex" if kind == "input" else ".bib")
                 yield self._resolve_dependency(
                     root,
@@ -743,6 +748,8 @@ class ManuscriptManager:
                 for match in re.finditer(r"\\(begin|end)\s*\{document\}", masked)
             ]
             for match in INPUT_PATTERN.finditer(masked):
+                if match.lastindex == 4:
+                    continue  # Verbatim-style includes typeset a file literally; they do not continue the document.
                 dependency = Path(next(group for group in match.groups() if group is not None).strip())
                 try:
                     child = self._resolve_dependency(

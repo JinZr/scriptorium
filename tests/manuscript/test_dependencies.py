@@ -120,6 +120,40 @@ def test_input_command_boundary(tmp_path: Path) -> None:
     assert len(ManuscriptManager(tmp_path).scan_sources(tmp_path, "main.tex")) == 1
 
 
+@pytest.mark.parametrize(
+    "command",
+    [
+        r"\VerbatimInput[breaklines=true]{protocols/prompt.txt}",
+        r"\BVerbatimInput{protocols/prompt.txt}",
+        r"\LVerbatimInput{protocols/prompt.txt}",
+        r"\verbatiminput{protocols/prompt.txt}",
+        r"\lstinputlisting[language=Python]{protocols/prompt.txt}",
+    ],
+)
+def test_verbatim_input_freezes_the_included_file(tmp_path: Path, command: str) -> None:
+    (tmp_path / "protocols").mkdir()
+    (tmp_path / "main.tex").write_text(command)
+    (tmp_path / "protocols" / "prompt.txt").write_text("Prompt.")
+    sources = ManuscriptManager(tmp_path).scan_sources(tmp_path, "main.tex")
+    assert {source.path for source in sources} == {"main.tex", "protocols/prompt.txt"}
+
+
+@pytest.mark.parametrize(
+    "text", [r"\VerbatimInputX{missing.txt}", r"% \VerbatimInput{missing.txt}", r"\lstinputlistings{missing.txt}"]
+)
+def test_verbatim_input_command_boundary_and_comments(tmp_path: Path, text: str) -> None:
+    (tmp_path / "main.tex").write_text(text)
+    assert len(ManuscriptManager(tmp_path).scan_sources(tmp_path, "main.tex")) == 1
+
+
+def test_verbatim_input_does_not_default_to_tex(tmp_path: Path) -> None:
+    (tmp_path / "main.tex").write_text(r"\verbatiminput{notes}")
+    (tmp_path / "notes").write_text("Notes.")
+    (tmp_path / "notes.tex").write_text("Other.")
+    sources = ManuscriptManager(tmp_path).scan_sources(tmp_path, "main.tex")
+    assert {source.path for source in sources} == {"main.tex", "notes"}
+
+
 def test_candidates_longer_than_the_path_limit_are_not_matches(tmp_path: Path) -> None:
     # Joining a deep including directory with a long reference makes a candidate the filesystem cannot name.
     chapter = Path(*[f"s{index:02d}-" + "d" * 240 for index in range(14)], "chapter.tex")
