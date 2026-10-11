@@ -130,7 +130,7 @@ def _float_index(
 ) -> tuple[list[tuple[str, int, int]], list[tuple[tuple[str, int, int], set[int]]]]:
     """Return the navigation index's table and figure spans, and each reference's span with the floats it names.
 
-    A reference names a float when its value is the label of a `\\label` located inside that float.
+    A reference names a float when its value is the label of a `\\label` located inside that float alone.
     """
     entries = json.loads(navigation)["entries"] if navigation is not None else []
 
@@ -143,8 +143,10 @@ def _float_index(
         if entry["command"] == "label":
             found = {index for index, outer in enumerate(floats) if _inside(span(entry), outer)}
             labelled.setdefault(entry["value"].strip(), set()).update(found)
+    # A label defined in more than one float, as in separately compiled documents, names none of them.
+    unique = {key: indexes for key, indexes in labelled.items() if len(indexes) == 1}
     references = [
-        (span(entry), {index for key in entry["value"].split(",") for index in labelled.get(key.strip(), ())})
+        (span(entry), {index for key in entry["value"].split(",") for index in unique.get(key.strip(), ())})
         for entry in entries
         if entry["command"] in REFERENCE_COMMANDS
     ]

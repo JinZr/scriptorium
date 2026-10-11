@@ -269,6 +269,23 @@ def test_findings_citing_one_figure_group_under_the_same_rule():
     assert group["finding_ids"] == ["finding_a", "finding_b"]
 
 
+def test_a_label_defined_in_more_than_one_float_names_none_of_them():
+    navigation = _navigation(
+        ("figure", "main.tex", 5, 12, "body"),
+        ("label", "main.tex", 11, 11, "fig:overview"),
+        ("figure", "supplement.tex", 5, 12, "body"),
+        ("label", "supplement.tex", 11, 11, "fig:overview"),
+        ("ref", "main.tex", 30, 30, "fig:overview"),
+        ("ref", "supplement.tex", 30, 30, "fig:overview"),
+    )
+    claim = "The overview figure holds."
+    findings = [
+        _finding("a", _lines("main.tex", 30), affected_claim=claim),
+        _finding("b", _lines("supplement.tex", 30), role=AgentRole.CONSISTENCY, affected_claim=claim),
+    ]
+    assert len(finding_groups(findings, [], navigation=navigation)["groups"]) == 2
+
+
 def test_grouping_without_navigation_is_unchanged():
     findings = [
         _finding("a", _lines("main.tex", 14), affected_claim=MARGINAL),
