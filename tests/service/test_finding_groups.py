@@ -253,6 +253,74 @@ def test_a_group_under_the_table_rule_never_chains_through_a_bridge_finding():
     assert sorted(_ids(grouped)) == [["finding_a", "finding_c"], ["finding_b"]]
 
 
+TABLE_FIVE = _navigation(
+    ("table", "neurips_2026.tex", 617, 638, "rows"),
+    ("label", "neurips_2026.tex", 636, 636, "tab:ablation"),
+    ("ref", "neurips_2026.tex", 316, 316, "tab:ablation"),
+)
+
+
+def test_findings_citing_one_table_group_when_they_share_a_line_anchor_without_a_shared_claim():
+    tex = "neurips_2026.tex"
+    findings = [
+        _finding(
+            "substantive",
+            *(_lines(tex, line) for line in (614, 316, 568, 606, 631, 632, 625, 634)),
+            role=AgentRole.SUBSTANTIVE_REVIEW,
+            severity=FindingSeverity.MAJOR,
+        ),
+        _finding("copyedit", *(_lines(tex, line) for line in (625, 631, 632, 634)), affected_claim="Marginal gains."),
+        _finding(
+            "figure",
+            *(_lines(tex, line) for line in (625, 634, 633, 642)),
+            role=AgentRole.FIGURE_REVIEW,
+            affected_claim="Only marginal improvements over the baseline.",
+        ),
+    ]
+    # Without the index the third finding overlaps exactly half of its own anchors, which is not more than half.
+    separate = finding_groups(findings, [])
+    assert sorted(_ids(separate)) == [["finding_copyedit", "finding_substantive"], ["finding_figure"]]
+
+    grouped = finding_groups(findings, [], navigation=TABLE_FIVE)
+    assert _ids(grouped) == [["finding_copyedit", "finding_figure", "finding_substantive"]]
+
+
+def test_findings_citing_one_table_stay_apart_when_no_line_anchor_overlaps_and_no_claim_is_shared():
+    findings = [
+        _finding("a", _lines("neurips_2026.tex", 625, 626), affected_claim="First claim."),
+        _finding("b", _lines("neurips_2026.tex", 634), role=AgentRole.FIGURE_REVIEW, affected_claim="Second claim."),
+        _finding("c", _lines("neurips_2026.tex", 316), role=AgentRole.CONSISTENCY),
+    ]
+    # c covers a reference to the table, so all three cite it, but no two share a line.
+    assert len(finding_groups(findings, [], navigation=TABLE_FIVE)["groups"]) == 3
+
+
+def test_a_shared_line_alone_does_not_group_findings_that_do_not_cite_one_table():
+    tex = "neurips_2026.tex"
+    findings = [
+        _finding("a", *(_lines(tex, line) for line in (100, 200, 300, 400)), severity=FindingSeverity.MODERATE),
+        _finding("b", *(_lines(tex, line) for line in (100, 150, 250, 350)), role=AgentRole.FIGURE_REVIEW),
+    ]
+    # One of four anchors overlaps, which the half-overlap rule rejects, and neither finding cites the table.
+    assert len(finding_groups(findings, [], navigation=TABLE_FIVE)["groups"]) == 2
+    # Only c cites the table, and it shares one of its two lines with each: exactly half, not more than half.
+    cited = findings + [_finding("c", _lines(tex, 100), _lines(tex, 630), role=AgentRole.CONSISTENCY)]
+    assert len(finding_groups(cited, [], navigation=TABLE_FIVE)["groups"]) == 3
+
+
+def test_the_line_anchor_rule_never_chains_through_a_bridge_finding():
+    tex = "neurips_2026.tex"
+    findings = [
+        _finding("a", _lines(tex, 620), severity=FindingSeverity.MAJOR),
+        _finding("b", _lines(tex, 630), severity=FindingSeverity.MODERATE, role=AgentRole.FIGURE_REVIEW),
+        _finding("c", _lines(tex, 620), _lines(tex, 630), _lines(tex, 100), role=AgentRole.CONSISTENCY),
+    ]
+    grouped = finding_groups(findings, [], navigation=TABLE_FIVE)
+
+    # c overlaps both a and b inside the table, but joins only the group whose primary comes first.
+    assert sorted(_ids(grouped)) == [["finding_a", "finding_c"], ["finding_b"]]
+
+
 def test_findings_citing_one_figure_group_under_the_same_rule():
     navigation = _navigation(
         ("figure*", "main.tex", 5, 12, "body"),
