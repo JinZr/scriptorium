@@ -57,6 +57,25 @@ def test_consistency_roles_freeze_the_value_versus_label_severity_rule(tmp_path)
     assert "label, caption, or wording" in prompts["figure_review"]
 
 
+def test_copyedit_role_freezes_the_scope_and_severity_sentences(tmp_path):
+    repo = make_repository(tmp_path, roles=("copyedit",))
+    with ScriptoriumService(repo, manuscript_manager=PdfBuildingManuscriptManager(repo)) as service:
+        run = asyncio.run(service.start_run("HEAD", "quick"))["run"]
+        prompt = claim(service, run.id, "copyedit")["prompt"]
+    assert prompt.count("consistency review, not here.") == 1
+    assert prompt.count("Rate naming, terminology, notation, caption wording") == 1
+    assert prompt.count(SEVERITY_RUBRIC) == 1
+
+
+def test_substantive_role_freezes_the_presentation_scope_sentence(tmp_path):
+    repo = make_repository(tmp_path, roles=("substantive_review",))
+    with ScriptoriumService(repo, manuscript_manager=PdfBuildingManuscriptManager(repo)) as service:
+        run = asyncio.run(service.start_run("HEAD", "quick"))["run"]
+        prompt = claim(service, run.id, "substantive_review")["prompt"]
+    assert prompt.count("are not substantive findings. Report such an item only when it changes how a\nclaim") == 1
+    assert prompt.count(SEVERITY_RUBRIC) == 1
+
+
 def test_new_findings_require_a_recorded_consequence(tmp_path):
     repo = make_repository(tmp_path, roles=("copyedit",))
     with ScriptoriumService(repo, manuscript_manager=PdfBuildingManuscriptManager(repo)) as service:
