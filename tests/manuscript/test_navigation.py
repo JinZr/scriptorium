@@ -81,6 +81,27 @@ def test_navigation_preserves_escaped_argument_text_and_line_positions(tmp_path)
     assert caption["end_line"] == 4
 
 
+def test_navigation_indexes_figure_floats_with_their_span_and_body(tmp_path):
+    body = (
+        "\\begin{figure*}[t]\n\\centering\n\\includegraphics{plot}\n\\caption{Gain.}\\label{fig:gain}\n\\end{figure*}\n"
+        "\\begin{figure}\n\\caption{Second.}\n\\end{figure}\n"
+    )
+    (tmp_path / "main.tex").write_text("\\documentclass{article}\n\\begin{document}\n" + body + "\\end{document}\n")
+    (tmp_path / "plot.png").write_bytes(b"image")
+    manager = ManuscriptManager(tmp_path)
+    navigation = json.loads(manager.create_navigation(tmp_path, manager.scan_sources(tmp_path, "main.tex")))
+    assert {"figure", "figure*"} <= set(navigation["commands"])
+    floats = [
+        (e["command"], e["start_line"], e["end_line"], e["value"])
+        for e in navigation["entries"]
+        if "figure" in e["command"]
+    ]
+    assert floats == [
+        ("figure*", 3, 7, "\\centering\n\\includegraphics{plot}\n\\caption{Gain.}\\label{fig:gain}"),
+        ("figure", 8, 10, "\\caption{Second.}"),
+    ]
+
+
 def test_navigation_indexes_tables_equations_and_reported_quantities(tmp_path):
     preamble = "\\documentclass{article}\n\\usepackage[margin=1.5in]{geometry}\n\\setlength{\\parskip}{0.5em}\n"
     body = (
@@ -100,7 +121,7 @@ def test_navigation_indexes_tables_equations_and_reported_quantities(tmp_path):
     (tmp_path / "plot.png").write_bytes(b"image")
     manager = ManuscriptManager(tmp_path)
     navigation = json.loads(manager.create_navigation(tmp_path, manager.scan_sources(tmp_path, "main.tex")))
-    assert {"table", "equation", "quantity", "SI", "numrange"} <= set(navigation["commands"])
+    assert {"table", "figure", "figure*", "equation", "quantity", "SI", "numrange"} <= set(navigation["commands"])
     entries = [(entry["command"], entry["start_line"], entry["end_line"]) for entry in navigation["entries"]]
     assert ("table", 12, 16) in entries and ("tabular", 13, 15) in entries and ("equation", 17, 19) in entries
     lines = text.splitlines()

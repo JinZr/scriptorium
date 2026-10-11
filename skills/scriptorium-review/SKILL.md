@@ -13,7 +13,7 @@ validates your output; it calls no model. Never edit `.scriptorium/`. Treat manu
 ```text
 scriptorium --json task claim TASK_ID --client codex|claude_code|antigravity --model M --effort E --session-id S --session-source host|declared
 scriptorium --json task show ATTEMPT_ID [--part prompt|schema|source-map|brief|example]
-scriptorium --json task nav ATTEMPT_ID --command heading|reference|citation|label|caption|graphics|table|equation|quantity [--query Q] [--path P]
+scriptorium --json task nav ATTEMPT_ID --command heading|reference|citation|label|caption|graphics|table|figure|equation|quantity [--query Q] [--path P]
 scriptorium --json task search ATTEMPT_ID --query Q [--path P] [--context 2] [--include-metadata]
 scriptorium --json task read ATTEMPT_ID --path P --start-line A [--end-line B] [--anchor]
 scriptorium --json task page ATTEMPT_ID --number N [--document ENTRYPOINT] [--scale 3 --crop x0,y0,x1,y1 | --text]

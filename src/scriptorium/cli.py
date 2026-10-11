@@ -190,7 +190,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--command",
         action="append",
         dest="commands",
-        help="repeatable: heading, reference, citation, label, caption, graphics, table, equation, quantity, "
+        help="repeatable: heading, reference, citation, label, caption, graphics, table, figure, equation, quantity, "
         "or an exact LaTeX command or environment",
     )
     nav_parser.add_argument("--query", help="case-insensitive substring of the entry value")

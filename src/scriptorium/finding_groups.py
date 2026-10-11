@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping, Sequence
+import json
 from typing import Any
 
 from .domain import AgentRole, Finding, FindingSeverity, canonical_json, digest_json
+from .manuscript import FLOAT_ENVIRONMENTS, REFERENCE_COMMANDS
 
 TIERS = ("headline", "supporting", "other", "compliance")
 COMPLIANCE_CATEGORY = "submission_compliance"
@@ -119,21 +121,96 @@ def _mostly_covered(first: set[tuple[str, str, int, int]], second: set[tuple[str
     )
 
 
-def _shares_evidence(first: Finding, second: Finding, links: Mapping[str, Sequence[Mapping[str, Any]]]) -> bool:
+def _inside(inner: tuple[str, int, int], outer: tuple[str, int, int]) -> bool:
+    return inner[0] == outer[0] and outer[1] <= inner[1] and inner[2] <= outer[2]
+
+
+def _within_float(inner: tuple[str, int, int], float_span: tuple[str, int, int]) -> bool:
+    """Whether a span lies in a float, leaving out content confined to its `\\begin` or `\\end` line.
+
+    The index is line-granular, so text on a boundary line may sit outside the environment, as in
+    `\\end{figure}\\label{sec:results}`; a span that reaches beyond one boundary line is taken as inside.
+    """
+    confined = inner[1] == inner[2] and inner[1] in float_span[1:]
+    return _inside(inner, float_span) and not confined
+
+
+def _float_index(
+    navigation: str | None,
+) -> tuple[list[tuple[str, int, int]], list[tuple[tuple[str, int, int], set[int]]]]:
+    """Return the navigation index's table and figure spans, and each reference's span with the floats it names.
+
+    A reference names a float when its value is the label of a `\\label` located inside that float alone.
+    """
+    entries = json.loads(navigation)["entries"] if navigation is not None else []
+
+    def span(entry: Mapping[str, Any]) -> tuple[str, int, int]:
+        return entry["source_path"], entry["start_line"], entry["end_line"]
+
+    floats = [span(entry) for entry in entries if entry["command"] in FLOAT_ENVIRONMENTS]
+    labelled: dict[str, list[set[int]]] = {}
+    for entry in entries:
+        if entry["command"] == "label":
+            found = {index for index, outer in enumerate(floats) if _within_float(span(entry), outer)}
+            labelled.setdefault(entry["value"].strip(), []).append(found)
+    # A label defined more than once, in a float or not, as in separately compiled documents, names no float.
+    unique = {key: found[0] for key, found in labelled.items() if len(found) == 1 and len(found[0]) == 1}
+    references = [
+        (span(entry), {index for key in entry["value"].split(",") for index in unique.get(key.strip(), ())})
+        for entry in entries
+        if entry["command"] in REFERENCE_COMMANDS
+    ]
+    return floats, references
+
+
+def _cited_floats(findings: Sequence[Finding], navigation: str | None) -> dict[str, frozenset[int]]:
+    """Return, by finding ID, the frozen table and figure objects a finding cites.
+
+    A finding cites a float when one of its line anchors lies inside the float's span or covers a reference to
+    a label inside it, as `Table~\\ref{tab:main}` in the body cites the table labelled `tab:main`. A run frozen
+    without a navigation index, or without figure entries, cites no such objects.
+    """
+    floats, references = _float_index(navigation)
+    cited: dict[str, frozenset[int]] = {}
+    for finding in findings:
+        found: set[int] = set()
+        for _, *anchor in (item for item in _anchors(finding) if item[0] == "lines"):
+            found.update(index for index, outer in enumerate(floats) if _within_float(tuple(anchor), outer))
+            for reference, targets in references:
+                if _inside(reference, tuple(anchor)):
+                    found.update(targets)
+        cited[finding.id] = frozenset(found)
+    return cited
+
+
+def _shares_evidence(
+    first: Finding,
+    second: Finding,
+    links: Mapping[str, Sequence[Mapping[str, Any]]],
+    floats: Mapping[str, frozenset[int]] | None = None,
+) -> bool:
     """Whether two findings cite mostly the same evidence, so they likely report one issue.
 
     Line anchors decide whenever either finding has one. A PDF page is too coarse to decide alone, so two
-    findings with only page anchors must also share a linked claim.
+    findings with only page anchors must also share a linked claim. Two findings also share evidence when they
+    cite one table or figure object, wherever in it, and share a linked claim.
     """
+    texts = [{link["text"] for link in links.get(item.id, ())} for item in (first, second)]
+    cited = [(floats or {}).get(item.id, frozenset()) for item in (first, second)]
+    if not texts[0].isdisjoint(texts[1]) and not cited[0].isdisjoint(cited[1]):
+        return True
     anchors = [set(_anchors(item)) for item in (first, second)]
     lines = [{anchor for anchor in found if anchor[0] == "lines"} for found in anchors]
     if any(lines):
         return all(lines) and _mostly_covered(*lines)
-    texts = [{link["text"] for link in links.get(item.id, ())} for item in (first, second)]
     return not texts[0].isdisjoint(texts[1]) and _mostly_covered(*anchors)
 
 
-def _components(findings: Sequence[Finding], links: Mapping[str, Sequence[Mapping[str, Any]]]) -> list[list[Finding]]:
+def _components(
+    findings: Sequence[Finding],
+    links: Mapping[str, Sequence[Mapping[str, Any]]],
+    floats: Mapping[str, frozenset[int]] | None = None,
+) -> list[list[Finding]]:
     """Gather each finding, in primary order, with the later ungrouped findings that share evidence with it.
 
     Groups never chain: every member shares evidence with its group's primary, the group's first finding.
@@ -142,7 +219,7 @@ def _components(findings: Sequence[Finding], links: Mapping[str, Sequence[Mappin
     components = []
     while remaining:
         primary, *rest = remaining
-        joined = {item.id for item in rest if _shares_evidence(primary, item, links)}
+        joined = {item.id for item in rest if _shares_evidence(primary, item, links, floats)}
         components.append([primary] + [item for item in rest if item.id in joined])
         remaining = [item for item in rest if item.id not in joined]
     return components
@@ -250,12 +327,13 @@ def finding_groups(
     findings: Sequence[Finding],
     claim_reports: Sequence[Mapping[str, Any]],
     duplicates: Sequence[Mapping[str, Any]] = (),
+    navigation: str | None = None,
 ) -> dict[str, Any]:
     """Group findings across roles and attempts by overlapping evidence and order the groups for triage.
 
     `findings` carry the status their latest decision implies; `claim_reports` are the report's substantive
     claim-check entries; `duplicates` attribute a stored finding to each later task (`finding_id`, `task_id`,
-    `role`) that submitted it again.
+    `role`) that submitted it again; `navigation` is the run's frozen navigation index, if it has one.
     """
     links = _claim_links(findings, claim_reports, duplicates)
     claims = _most_prominent(links)
@@ -263,8 +341,10 @@ def finding_groups(
     for duplicate in duplicates:
         if duplicate.get("role"):
             duplicate_roles.setdefault(duplicate["finding_id"], set()).add(duplicate["role"])
+    floats = _cited_floats(findings, navigation)
     groups = sorted(
-        (_group(members, claims, duplicate_roles) for members in _components(findings, links)), key=_group_order
+        (_group(members, claims, duplicate_roles) for members in _components(findings, links, floats)),
+        key=_group_order,
     )
     counts = {
         tier: {

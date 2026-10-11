@@ -1,3 +1,5 @@
+import json
+
 from scriptorium.domain import AgentRole, Finding, FindingSeverity, FindingStatus
 from scriptorium.finding_groups import finding_groups, markdown_lines
 
@@ -164,6 +166,174 @@ def test_the_group_id_depends_only_on_the_member_ids():
     first = finding_groups(findings, [])["groups"][0]["group_id"]
     assert first == finding_groups(list(reversed(findings)), [])["groups"][0]["group_id"]
     assert first.startswith("group_") and len(first) == len("group_") + 16
+
+
+def _navigation(*entries):
+    """A frozen navigation index holding (command, path, start, end, value) entries."""
+    return json.dumps(
+        {
+            "entries": [
+                {"command": command, "source_path": path, "start_line": start, "end_line": end, "value": value}
+                for command, path, start, end, value in entries
+            ]
+        }
+    )
+
+
+MARGINAL = "Table 3 shows marginal gains."
+TABLES = _navigation(
+    ("table", "main.tex", 10, 20, "rows"),
+    ("caption", "main.tex", 17, 17, "Main results"),
+    ("label", "main.tex", 18, 18, "tab:main"),
+    ("table", "main.tex", 30, 36, "rows"),
+    ("label", "main.tex", 35, 35, "tab:other"),
+    ("ref", "main.tex", 50, 50, "tab:main"),
+    ("cref", "main.tex", 60, 60, "tab:other, tab:main"),
+    ("ref", "main.tex", 70, 70, "tab:missing"),
+    ("ref", "other.tex", 50, 50, "tab:other"),
+)
+
+
+def test_findings_citing_one_table_group_when_they_share_a_claim_wherever_they_anchor_in_it():
+    findings = [
+        _finding("a", _lines("main.tex", 14), severity=FindingSeverity.MAJOR, affected_claim=MARGINAL),
+        _finding("b", _lines("main.tex", 17), role=AgentRole.CONSISTENCY, affected_claim=MARGINAL),
+        _finding("c", _lines("main.tex", 50), role=AgentRole.FIGURE_REVIEW, affected_claim=MARGINAL),
+        _finding("d", _lines("main.tex", 59, 61), role=AgentRole.CONSISTENCY, affected_claim=MARGINAL),
+        _finding("e", _lines("main.tex", 70), affected_claim=MARGINAL),
+    ]
+
+    # Without the index the four line anchors never overlap.
+    assert len(finding_groups(findings, [])["groups"]) == 5
+    grouped = finding_groups(findings, [], navigation=TABLES)
+
+    # d covers a reference to tab:main in a list of keys; e references a label that no table holds.
+    assert sorted(_ids(grouped)) == [["finding_a", "finding_b", "finding_c", "finding_d"], ["finding_e"]]
+    (group,) = (item for item in grouped["groups"] if item["primary_finding_id"] == "finding_a")
+    assert group["evidence"] == [
+        {"source_path": "main.tex", "start_line": 14, "end_line": 14},
+        {"source_path": "main.tex", "start_line": 17, "end_line": 17},
+        {"source_path": "main.tex", "start_line": 50, "end_line": 50},
+        {"source_path": "main.tex", "start_line": 59, "end_line": 61},
+    ]
+
+
+def test_findings_citing_one_table_stay_apart_without_a_shared_claim():
+    findings = [
+        _finding("a", _lines("main.tex", 14), affected_claim=MARGINAL),
+        _finding("b", _lines("main.tex", 17), role=AgentRole.CONSISTENCY, affected_claim="Another claim."),
+        _finding("c", _lines("main.tex", 50), role=AgentRole.FIGURE_REVIEW),
+    ]
+    assert len(finding_groups(findings, [], navigation=TABLES)["groups"]) == 3
+
+
+def test_a_shared_claim_across_different_tables_does_not_group_but_a_reference_from_another_file_cites_its_table():
+    findings = [
+        _finding("a", _lines("main.tex", 14), affected_claim=MARGINAL),
+        _finding("b", _lines("main.tex", 33), role=AgentRole.CONSISTENCY, affected_claim=MARGINAL),
+        _finding("c", _lines("other.tex", 14), role=AgentRole.FIGURE_REVIEW, affected_claim=MARGINAL),
+        _finding("d", _lines("other.tex", 50), role=AgentRole.SUBSTANTIVE_REVIEW, affected_claim=MARGINAL),
+    ]
+    # d covers a reference to the label inside b's table, wherever that reference is written; c cites no table.
+    grouped = finding_groups(findings, [], navigation=TABLES)
+    assert sorted(_ids(grouped)) == [["finding_a"], ["finding_b", "finding_d"], ["finding_c"]]
+
+
+def test_a_group_under_the_table_rule_never_chains_through_a_bridge_finding():
+    findings = [
+        _finding("a", _lines("main.tex", 14), severity=FindingSeverity.MAJOR, affected_claim=MARGINAL),
+        _finding("b", _lines("main.tex", 33), severity=FindingSeverity.MODERATE, affected_claim=MARGINAL),
+        _finding(
+            "c", _lines("main.tex", 17), _lines("main.tex", 34), role=AgentRole.CONSISTENCY, affected_claim=MARGINAL
+        ),
+    ]
+    grouped = finding_groups(findings, [], navigation=TABLES)
+
+    # c cites both tables and shares the claim with both, but joins only the group whose primary comes first.
+    assert sorted(_ids(grouped)) == [["finding_a", "finding_c"], ["finding_b"]]
+
+
+def test_findings_citing_one_figure_group_under_the_same_rule():
+    navigation = _navigation(
+        ("figure*", "main.tex", 5, 12, "body"),
+        ("label", "main.tex", 11, 11, "fig:ablation"),
+        ("autoref", "main.tex", 30, 30, "fig:ablation"),
+    )
+    claim = "Figure 2 shows the gain."
+    findings = [
+        _finding("a", _lines("main.tex", 8), affected_claim=claim),
+        _finding("b", _lines("main.tex", 30), role=AgentRole.CONSISTENCY, affected_claim=claim),
+    ]
+    assert len(finding_groups(findings, [])["groups"]) == 2
+    (group,) = finding_groups(findings, [], navigation=navigation)["groups"]
+    assert group["finding_ids"] == ["finding_a", "finding_b"]
+
+
+def test_a_label_defined_in_more_than_one_float_names_none_of_them():
+    navigation = _navigation(
+        ("figure", "main.tex", 5, 12, "body"),
+        ("label", "main.tex", 11, 11, "fig:overview"),
+        ("figure", "supplement.tex", 5, 12, "body"),
+        ("label", "supplement.tex", 11, 11, "fig:overview"),
+        ("ref", "main.tex", 30, 30, "fig:overview"),
+        ("ref", "supplement.tex", 30, 30, "fig:overview"),
+    )
+    claim = "The overview figure holds."
+    findings = [
+        _finding("a", _lines("main.tex", 30), affected_claim=claim),
+        _finding("b", _lines("supplement.tex", 30), role=AgentRole.CONSISTENCY, affected_claim=claim),
+    ]
+    assert len(finding_groups(findings, [], navigation=navigation)["groups"]) == 2
+
+
+def test_a_label_also_defined_outside_any_float_is_ambiguous():
+    navigation = _navigation(
+        ("figure", "main.tex", 5, 12, "body"),
+        ("label", "main.tex", 11, 11, "fig:overview"),
+        ("label", "supplement.tex", 2, 2, "fig:overview"),
+        ("ref", "main.tex", 30, 30, "fig:overview"),
+    )
+    claim = "The overview holds."
+    findings = [
+        _finding("a", _lines("main.tex", 8), affected_claim=claim),
+        _finding("b", _lines("main.tex", 30), role=AgentRole.CONSISTENCY, affected_claim=claim),
+    ]
+    assert len(finding_groups(findings, [], navigation=navigation)["groups"]) == 2
+
+
+def test_content_confined_to_a_float_boundary_line_is_taken_as_outside_it():
+    navigation = _navigation(
+        ("table", "main.tex", 10, 20, "rows"),
+        ("label", "main.tex", 20, 20, "sec:results"),
+        ("label", "main.tex", 15, 15, "tab:main"),
+        ("ref", "main.tex", 40, 40, "sec:results"),
+        ("ref", "main.tex", 50, 50, "tab:main"),
+    )
+    claim = "Table 3 shows marginal gains."
+    findings = [
+        _finding("a", _lines("main.tex", 15), affected_claim=claim),
+        # Quotes only the closing line, which may hold prose after \end{table}.
+        _finding("b", _lines("main.tex", 20), role=AgentRole.CONSISTENCY, affected_claim=claim),
+        # Covers a reference to a label that shares the closing line, so it names no table.
+        _finding("c", _lines("main.tex", 40), role=AgentRole.FIGURE_REVIEW, affected_claim=claim),
+        # Starts on the opening line and runs into the first row; still cites the table.
+        _finding("d", _lines("main.tex", 10, 11), role=AgentRole.SUBSTANTIVE_REVIEW, affected_claim=claim),
+        _finding("e", _lines("main.tex", 50), role=AgentRole.FIGURE_REVIEW, affected_claim=claim),
+    ]
+    grouped = finding_groups(findings, [], navigation=navigation)
+
+    assert sorted(_ids(grouped)) == [["finding_a", "finding_d", "finding_e"], ["finding_b"], ["finding_c"]]
+
+
+def test_grouping_without_navigation_is_unchanged():
+    findings = [
+        _finding("a", _lines("main.tex", 14), affected_claim=MARGINAL),
+        _finding("b", _lines("main.tex", 17), role=AgentRole.CONSISTENCY, affected_claim=MARGINAL),
+    ]
+    absent = finding_groups(findings, [])
+    assert absent == finding_groups(findings, [], navigation=None)
+    assert absent == finding_groups(findings, [], navigation=_navigation())
+    assert len(absent["groups"]) == 2
 
 
 def _linked_claim_report(task_id, submitted, prominences):

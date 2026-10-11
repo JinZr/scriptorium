@@ -100,8 +100,8 @@ def test_long_values_are_truncated_and_bad_filters_rejected(navigator):
     service, _, attempt_id, _ = navigator
     (caption,) = service.nav_task(attempt_id, ["caption"])["entries"]
     assert caption["value_truncated"] is True and len(caption["value"]) == 500
-    with pytest.raises(ConfigurationError, match="unknown navigation command 'figure'"):
-        service.nav_task(attempt_id, ["figure"])
+    with pytest.raises(ConfigurationError, match="unknown navigation command 'figures'"):
+        service.nav_task(attempt_id, ["figures"])
     with pytest.raises(ConfigurationError, match="closest text read paths"):
         service.nav_task(attempt_id, path="result.tex")
 
@@ -141,6 +141,7 @@ RESULT_BODY = (
     "The error is 0.1 eV/atom.\n"
     "\\begin{table}\n\\begin{tabular}{cc}\nA & 1.5\\\\\n\\end{tabular}\n\\end{table}\n"
     "\\begin{align}\nE &= 2.25\n\\end{align}\n"
+    "\\begin{figure}[t]\n\\caption{Gain.}\n\\end{figure}\n"
 )
 
 
@@ -154,6 +155,9 @@ def test_tables_equations_and_quantities_are_navigable_groups(tmp_path):
 
         assert located("table") == [("table", 5, 9), ("tabular", 6, 8)]
         assert located("equation") == [("align", 10, 12)]
+        assert located("figure") == [("figure", 13, 15)]
+        (figure,) = service.nav_task(attempt_id, ["figure"])["entries"]
+        assert figure["value"] == "\\caption{Gain.}"
         assert [entry["value"] for entry in service.nav_task(attempt_id, ["quantity"])["entries"]] == [
             "0.1 eV/atom",
             "1.5",
@@ -174,8 +178,8 @@ def test_indexes_without_table_equation_or_quantity_entries_reject_those_filters
     service, attempt_id = _nav_run(tmp_path, {}, RESULT_BODY)
     with service:
         assert [entry["value"] for entry in service.nav_task(attempt_id, ["heading"])["entries"]] == ["Results"]
-        for group in ("table", "equation", "quantity", "SI"):
-            with pytest.raises(ConfigurationError, match="predates table, equation, and quantity entries"):
+        for group in ("table", "figure", "equation", "quantity", "SI"):
+            with pytest.raises(ConfigurationError, match="predates table, figure, equation, and quantity entries"):
                 service.nav_task(attempt_id, [group])
 
 

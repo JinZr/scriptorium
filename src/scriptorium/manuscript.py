@@ -62,6 +62,10 @@ TABLE_ENVIRONMENTS = (
     "longtable",
     "sidewaystable",
 )
+FIGURE_ENVIRONMENTS = ("figure", "figure*")
+# Floats and longtables are the table and figure objects whose captions and labels a finding can cite.
+FLOAT_ENVIRONMENTS = ("table", "table*", "sidewaystable", "longtable", *FIGURE_ENVIRONMENTS)
+REFERENCE_COMMANDS = ("ref", "eqref", "pageref", "autoref", "cref", "Cref")
 EQUATION_ENVIRONMENTS = (
     "equation",
     "equation*",
@@ -107,7 +111,10 @@ NAVIGATION_COMMAND_PATTERN = re.compile(
 )
 NAVIGATION_ENVIRONMENT_PATTERN = re.compile(
     r"\\begin\s*\{("
-    + "|".join(re.escape(name) for name in sorted({*TABLE_ENVIRONMENTS, *EQUATION_ENVIRONMENTS}, key=len, reverse=True))
+    + "|".join(
+        re.escape(name)
+        for name in sorted({*TABLE_ENVIRONMENTS, *FIGURE_ENVIRONMENTS, *EQUATION_ENVIRONMENTS}, key=len, reverse=True)
+    )
     + r")\}"
 )
 QUANTITY_COMMAND_PATTERN = re.compile(r"\\(" + "|".join(QUANTITY_COMMANDS) + r")(?![A-Za-z@])(?:\s*\[[^\]]*\])?\s*\{")
@@ -503,6 +510,7 @@ NAVIGATION_INDEXED_COMMANDS = frozenset(
         "caption",
         "includegraphics",
         *TABLE_ENVIRONMENTS,
+        *FIGURE_ENVIRONMENTS,
         *EQUATION_ENVIRONMENTS,
         *QUANTITY_COMMANDS,
         "quantity",
@@ -577,7 +585,7 @@ def _within(spans: list[tuple[int, int]], lefts: list[int], position: int) -> bo
 def _environment_body_start(text: str, name: str, position: int) -> int:
     """Return where an environment's body starts, past the placement options and mandatory arguments it takes."""
     groups = ENVIRONMENT_ARGUMENT_GROUPS.get(name, 0)
-    options = name in TABLE_ENVIRONMENTS
+    options = name in TABLE_ENVIRONMENTS or name in FIGURE_ENVIRONMENTS
     start = position
     # Options precede the last mandatory argument, or follow the name of a table without one, as in \begin{table}[h].
     while (group := re.match(ARGUMENT_SPACE + r"([\[{])", text[position:])) and (
