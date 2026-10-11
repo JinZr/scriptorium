@@ -286,6 +286,21 @@ def test_a_label_defined_in_more_than_one_float_names_none_of_them():
     assert len(finding_groups(findings, [], navigation=navigation)["groups"]) == 2
 
 
+def test_a_label_also_defined_outside_any_float_is_ambiguous():
+    navigation = _navigation(
+        ("figure", "main.tex", 5, 12, "body"),
+        ("label", "main.tex", 11, 11, "fig:overview"),
+        ("label", "supplement.tex", 2, 2, "fig:overview"),
+        ("ref", "main.tex", 30, 30, "fig:overview"),
+    )
+    claim = "The overview holds."
+    findings = [
+        _finding("a", _lines("main.tex", 8), affected_claim=claim),
+        _finding("b", _lines("main.tex", 30), role=AgentRole.CONSISTENCY, affected_claim=claim),
+    ]
+    assert len(finding_groups(findings, [], navigation=navigation)["groups"]) == 2
+
+
 def test_content_confined_to_a_float_boundary_line_is_taken_as_outside_it():
     navigation = _navigation(
         ("table", "main.tex", 10, 20, "rows"),

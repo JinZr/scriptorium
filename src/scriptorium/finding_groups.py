@@ -148,13 +148,13 @@ def _float_index(
         return entry["source_path"], entry["start_line"], entry["end_line"]
 
     floats = [span(entry) for entry in entries if entry["command"] in FLOAT_ENVIRONMENTS]
-    labelled: dict[str, set[int]] = {}
+    labelled: dict[str, list[set[int]]] = {}
     for entry in entries:
         if entry["command"] == "label":
             found = {index for index, outer in enumerate(floats) if _within_float(span(entry), outer)}
-            labelled.setdefault(entry["value"].strip(), set()).update(found)
-    # A label defined in more than one float, as in separately compiled documents, names none of them.
-    unique = {key: indexes for key, indexes in labelled.items() if len(indexes) == 1}
+            labelled.setdefault(entry["value"].strip(), []).append(found)
+    # A label defined more than once, in a float or not, as in separately compiled documents, names no float.
+    unique = {key: found[0] for key, found in labelled.items() if len(found) == 1 and len(found[0]) == 1}
     references = [
         (span(entry), {index for key in entry["value"].split(",") for index in unique.get(key.strip(), ())})
         for entry in entries
