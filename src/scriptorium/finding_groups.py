@@ -125,6 +125,16 @@ def _inside(inner: tuple[str, int, int], outer: tuple[str, int, int]) -> bool:
     return inner[0] == outer[0] and outer[1] <= inner[1] and inner[2] <= outer[2]
 
 
+def _within_float(inner: tuple[str, int, int], float_span: tuple[str, int, int]) -> bool:
+    """Whether a span lies in a float, leaving out content confined to its `\\begin` or `\\end` line.
+
+    The index is line-granular, so text on a boundary line may sit outside the environment, as in
+    `\\end{figure}\\label{sec:results}`; a span that reaches beyond one boundary line is taken as inside.
+    """
+    confined = inner[1] == inner[2] and inner[1] in float_span[1:]
+    return _inside(inner, float_span) and not confined
+
+
 def _float_index(
     navigation: str | None,
 ) -> tuple[list[tuple[str, int, int]], list[tuple[tuple[str, int, int], set[int]]]]:
@@ -141,7 +151,7 @@ def _float_index(
     labelled: dict[str, set[int]] = {}
     for entry in entries:
         if entry["command"] == "label":
-            found = {index for index, outer in enumerate(floats) if _inside(span(entry), outer)}
+            found = {index for index, outer in enumerate(floats) if _within_float(span(entry), outer)}
             labelled.setdefault(entry["value"].strip(), set()).update(found)
     # A label defined in more than one float, as in separately compiled documents, names none of them.
     unique = {key: indexes for key, indexes in labelled.items() if len(indexes) == 1}
@@ -165,7 +175,7 @@ def _cited_floats(findings: Sequence[Finding], navigation: str | None) -> dict[s
     for finding in findings:
         found: set[int] = set()
         for _, *anchor in (item for item in _anchors(finding) if item[0] == "lines"):
-            found.update(index for index, outer in enumerate(floats) if _inside(tuple(anchor), outer))
+            found.update(index for index, outer in enumerate(floats) if _within_float(tuple(anchor), outer))
             for reference, targets in references:
                 if _inside(reference, tuple(anchor)):
                     found.update(targets)

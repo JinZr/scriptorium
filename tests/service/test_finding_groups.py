@@ -286,6 +286,30 @@ def test_a_label_defined_in_more_than_one_float_names_none_of_them():
     assert len(finding_groups(findings, [], navigation=navigation)["groups"]) == 2
 
 
+def test_content_confined_to_a_float_boundary_line_is_taken_as_outside_it():
+    navigation = _navigation(
+        ("table", "main.tex", 10, 20, "rows"),
+        ("label", "main.tex", 20, 20, "sec:results"),
+        ("label", "main.tex", 15, 15, "tab:main"),
+        ("ref", "main.tex", 40, 40, "sec:results"),
+        ("ref", "main.tex", 50, 50, "tab:main"),
+    )
+    claim = "Table 3 shows marginal gains."
+    findings = [
+        _finding("a", _lines("main.tex", 15), affected_claim=claim),
+        # Quotes only the closing line, which may hold prose after \end{table}.
+        _finding("b", _lines("main.tex", 20), role=AgentRole.CONSISTENCY, affected_claim=claim),
+        # Covers a reference to a label that shares the closing line, so it names no table.
+        _finding("c", _lines("main.tex", 40), role=AgentRole.FIGURE_REVIEW, affected_claim=claim),
+        # Starts on the opening line and runs into the first row; still cites the table.
+        _finding("d", _lines("main.tex", 10, 11), role=AgentRole.SUBSTANTIVE_REVIEW, affected_claim=claim),
+        _finding("e", _lines("main.tex", 50), role=AgentRole.FIGURE_REVIEW, affected_claim=claim),
+    ]
+    grouped = finding_groups(findings, [], navigation=navigation)
+
+    assert sorted(_ids(grouped)) == [["finding_a", "finding_d", "finding_e"], ["finding_b"], ["finding_c"]]
+
+
 def test_grouping_without_navigation_is_unchanged():
     findings = [
         _finding("a", _lines("main.tex", 14), affected_claim=MARGINAL),
