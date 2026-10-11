@@ -45,7 +45,9 @@ from .errors import ConfigurationError, DuplicateRunError, InfrastructureError, 
 from .finding_groups import finding_groups, markdown_lines as markdown_finding_groups
 from .manuscript import (
     EQUATION_ENVIRONMENTS,
+    FIGURE_ENVIRONMENTS,
     QUANTITY_COMMANDS,
+    REFERENCE_COMMANDS,
     TABLE_ENVIRONMENTS,
     ManuscriptManager,
     export_files,
@@ -851,7 +853,7 @@ class ScriptoriumService:
         indexed = set(index.get("commands", _LEGACY_NAVIGATION_COMMANDS))
         if selected is not None and not selected <= indexed:
             raise ConfigurationError(
-                "this run's navigation index predates table, equation, and quantity entries; "
+                "this run's navigation index predates table, figure, equation, and quantity entries; "
                 "use task search to locate them"
             )
         folded = query.casefold() if query is not None else None
@@ -1405,6 +1407,7 @@ class ScriptoriumService:
                     for event in events
                     if event.event_type == "finding.duplicate"
                 ],
+                self.armarius._navigation_for_run(run_view["run"]),
             ),
             "decision_stats": decision_stats((item["finding"], item["decisions"]) for item in finding_records),
             "patches": [
@@ -1959,7 +1962,7 @@ def _unknown_text_path(path: str, anchor_map) -> ConfigurationError:
 
 NAVIGATION_GROUPS = {
     "heading": ("part", "chapter", "section", "subsection", "subsubsection", "paragraph", "subparagraph"),
-    "reference": ("ref", "eqref", "pageref", "autoref", "cref", "Cref"),
+    "reference": REFERENCE_COMMANDS,
     "citation": ("cite", "citep", "citet", "autocite", "parencite", "textcite"),
     "label": ("label",),
     "caption": ("caption",),
@@ -1969,6 +1972,7 @@ NAVIGATION_GROUPS = {
 _LEGACY_NAVIGATION_COMMANDS = frozenset(name for names in NAVIGATION_GROUPS.values() for name in names)
 NAVIGATION_GROUPS.update(
     table=TABLE_ENVIRONMENTS,
+    figure=FIGURE_ENVIRONMENTS,
     equation=EQUATION_ENVIRONMENTS,
     quantity=("quantity", *QUANTITY_COMMANDS),
 )
