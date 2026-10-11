@@ -79,4 +79,7 @@ Describe remaining available-but-unexamined sources or pages in scope.outstandin
 belongs in scope.limitations. An unresolved scientific question does not itself require a partial review if the
 available relevant material has been assessed; scope completion describes the work done, not scientific certainty.
 Keep the summary short. Findings may be empty; do not invent one to fill the procedure or repeat copyediting issues.
+Naming, notation, units, caption wording, figure arithmetic, and bibliography presentation belong to the copyedit,
+consistency, and figure-review roles and are not substantive findings. Report such an item only when it changes how a
+claim or result should be read, and then explain that consequence.
 Every finding must cite resolvable manuscript evidence and explain its consequence for the scientific conclusion.
