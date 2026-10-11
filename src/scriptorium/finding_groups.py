@@ -121,6 +121,11 @@ def _mostly_covered(first: set[tuple[str, str, int, int]], second: set[tuple[str
     )
 
 
+def _any_overlap(first: set[tuple[str, str, int, int]], second: set[tuple[str, str, int, int]]) -> bool:
+    """Whether any anchor of one side overlaps any anchor of the other."""
+    return any(_overlaps(anchor, other) for anchor in first for other in second)
+
+
 def _inside(inner: tuple[str, int, int], outer: tuple[str, int, int]) -> bool:
     return inner[0] == outer[0] and outer[1] <= inner[1] and inner[2] <= outer[2]
 
@@ -193,7 +198,8 @@ def _shares_evidence(
 
     Line anchors decide whenever either finding has one. A PDF page is too coarse to decide alone, so two
     findings with only page anchors must also share a linked claim. Two findings also share evidence when they
-    cite one table or figure object, wherever in it, and share a linked claim.
+    cite one table or figure object, wherever in it, and share a linked claim, or cite one such object and
+    overlap by a line anchor.
     """
     texts = [{link["text"] for link in links.get(item.id, ())} for item in (first, second)]
     cited = [(floats or {}).get(item.id, frozenset()) for item in (first, second)]
@@ -201,6 +207,8 @@ def _shares_evidence(
         return True
     anchors = [set(_anchors(item)) for item in (first, second)]
     lines = [{anchor for anchor in found if anchor[0] == "lines"} for found in anchors]
+    if not cited[0].isdisjoint(cited[1]) and _any_overlap(*lines):
+        return True
     if any(lines):
         return all(lines) and _mostly_covered(*lines)
     return not texts[0].isdisjoint(texts[1]) and _mostly_covered(*anchors)
