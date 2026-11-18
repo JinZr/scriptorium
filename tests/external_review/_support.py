@@ -81,7 +81,6 @@ def answer(context, *, findings=True, limitations=()):
 
 def submit(service, task_id, *, model="model-a", session="review-a", findings=True, limitations=()):
     context = service.claim_task(task_id, "codex", model, "low", session, "host")
-    service.read_task(context["attempt"].id, "sources/main.tex", 1, 100, 0, 8000)
     service.page_task(context["attempt"].id, 1)
     receipt = asyncio.run(
         service.submit_task(

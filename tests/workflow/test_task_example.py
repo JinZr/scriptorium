@@ -5,10 +5,9 @@ import subprocess
 import pytest
 
 from scriptorium.domain import AgentRole, AttemptStatus
-from scriptorium.errors import ExampleUnavailableError, InfrastructureError
+from scriptorium.errors import InfrastructureError
 from scriptorium.schemas import SCHEMA_MODELS
 from scriptorium.service import ScriptoriumService
-from scriptorium.tool_output import MAX_TOOL_RESPONSE_BYTES, success_json
 import scriptorium.workflow
 
 from ._support import MANUSCRIPT, PdfBuildingManuscriptManager, claim, make_repository, prepare_patch
@@ -16,16 +15,14 @@ from ._support import MANUSCRIPT, PdfBuildingManuscriptManager, claim, make_repo
 _REVIEW_ROLES = ("substantive_review", "copyedit", "consistency", "figure_review")
 
 
-def _example(service, attempt_id):
-    """Follow the example fragments to the end, checking each response stays within the tool limit."""
-    pieces, offset, fragments = [], 0, 0
-    while offset is not None:
-        fragment = service.task_view(service.show_task(attempt_id), "example", offset)
-        assert len(success_json(fragment).encode("utf-8")) <= MAX_TOOL_RESPONSE_BYTES
-        assert fragment["offset"] == offset
-        pieces.append(fragment["text"])
-        offset, fragments = fragment["next_offset"], fragments + 1
-    return "".join(pieces), fragment["digest"], fragments
+def _example(service, attempt_id, directory):
+    """Export the attempt and return its example text and reported digest, or None when none was frozen."""
+    exported = service.export_task(attempt_id, directory)
+    digests = {item["path"]: item["digest"] for item in exported["task_inputs"]}
+    if "task/example.json" not in digests:
+        assert not (directory / "task/example.json").exists()
+        return None
+    return (directory / "task/example.json").read_bytes().decode("utf-8"), digests["task/example.json"]
 
 
 def _anchors(value):
@@ -49,19 +46,12 @@ def test_each_review_role_serves_a_checked_example_with_real_frozen_anchors(tmp_
     with ScriptoriumService(repo, manuscript_manager=PdfBuildingManuscriptManager(repo)) as service:
         run = asyncio.run(service.start_run("HEAD", "quick"))["run"]
         context = claim(service, run.id, role)
-        overview = service.task_view(context)
-        text, digest, fragments = _example(service, context["attempt"].id)
+        text, digest = _example(service, context["attempt"].id, tmp_path / "export")
         check = service.check_submission(context["attempt"].id, context["input_digest"], text)
         model = _output_model(service, context)
         frozen = service.database.get_external_task(context["task"].id)["example_digest"]
         stored = service.armarius.artifacts.get_bytes(frozen).decode("utf-8")
 
-    attempt_id = context["attempt"].id
-    assert overview["inputs"]["example"] == {
-        "digest": digest,
-        "command": f"scriptorium --json task show {attempt_id} --part example",
-    }
-    assert fragments == 1
     assert (stored, frozen) == (text, digest)
     assert check["valid"] is True and check["validation_report"] is None
     example = json.loads(text)
@@ -93,19 +83,19 @@ def test_each_review_role_serves_a_checked_example_with_real_frozen_anchors(tmp_
         assert any("recomputation" in check for check in checks)
 
 
-def test_a_finished_attempt_still_serves_its_example(tmp_path):
+def test_a_finished_attempt_still_exports_its_example(tmp_path):
     repo = make_repository(tmp_path, roles=("copyedit",))
     with ScriptoriumService(repo, manuscript_manager=PdfBuildingManuscriptManager(repo)) as service:
         run = asyncio.run(service.start_run("HEAD", "quick"))["run"]
         context = claim(service, run.id, "copyedit")
-        text, digest, _ = _example(service, context["attempt"].id)
+        text, digest = _example(service, context["attempt"].id, tmp_path / "active")
         receipt = asyncio.run(service.submit_task(context["attempt"].id, context["input_digest"], text))
         assert receipt["attempt"].status == AttemptStatus.COMPLETED
 
-        assert _example(service, context["attempt"].id)[:2] == (text, digest)
+        assert _example(service, context["attempt"].id, tmp_path / "completed") == (text, digest)
 
 
-def test_a_long_example_is_read_through_bounded_fragments(tmp_path):
+def test_a_long_example_is_exported_whole(tmp_path):
     repo = make_repository(tmp_path, roles=("substantive_review",))
     long_line = "% " + "x" * 3000
     (repo / "main.tex").write_text(f"{long_line}\n{MANUSCRIPT}", encoding="utf-8")
@@ -113,10 +103,9 @@ def test_a_long_example_is_read_through_bounded_fragments(tmp_path):
     with ScriptoriumService(repo, manuscript_manager=PdfBuildingManuscriptManager(repo)) as service:
         run = asyncio.run(service.start_run("HEAD", "quick"))["run"]
         context = claim(service, run.id, "substantive_review")
-        text, _, fragments = _example(service, context["attempt"].id)
+        text, _ = _example(service, context["attempt"].id, tmp_path / "export")
         check = service.check_submission(context["attempt"].id, context["input_digest"], text)
 
-    assert len(text.encode("utf-8")) > MAX_TOOL_RESPONSE_BYTES and fragments > 1
     assert json.loads(text)["findings"][0]["evidence"][0]["quoted_text"] == long_line
     assert check["valid"] is True
 
@@ -127,28 +116,19 @@ def test_an_example_that_fails_validation_is_not_frozen(tmp_path, monkeypatch):
     with ScriptoriumService(repo, manuscript_manager=PdfBuildingManuscriptManager(repo)) as service:
         run = asyncio.run(service.start_run("HEAD", "quick"))["run"]
         context = claim(service, run.id, "copyedit")
-        overview = service.task_view(context)
-        with pytest.raises(ExampleUnavailableError, match="no example was frozen with this attempt's task"):
-            service.task_view(context, "example")
+        assert _example(service, context["attempt"].id, tmp_path / "export") is None
         assert service.database.get_external_task(context["task"].id)["example_digest"] is None
 
-    assert "example" not in overview["inputs"]
-    assert ExampleUnavailableError.code == "example_unavailable"
 
-
-def test_revision_attempts_report_that_no_example_is_available(tmp_path):
+def test_revision_attempts_export_no_example(tmp_path):
     repo = make_repository(tmp_path)
     with ScriptoriumService(repo, manuscript_manager=PdfBuildingManuscriptManager(repo)) as service:
         run = asyncio.run(service.start_run("HEAD", "quick"))["run"]
         prepare_patch(service, run.id)
         revision = next(task for task in service.database.list_tasks(run.id) if task.role == AgentRole.REVISION)
         attempt_id = service.database.list_attempts(revision.id)[-1].id
-        overview = service.task_view(service.show_task(attempt_id))
-        with pytest.raises(ExampleUnavailableError, match="revision and verification tasks"):
-            service.task_view(service.show_task(attempt_id), "example")
+        assert _example(service, attempt_id, tmp_path / "export") is None
         assert service.database.get_external_task(revision.id)["example_digest"] is None
-
-    assert "example" not in overview["inputs"]
 
 
 def test_a_tampered_snapshot_fails_example_preparation_as_infrastructure(tmp_path):

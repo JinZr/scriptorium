@@ -1,6 +1,6 @@
 ---
 name: scriptorium
-description: Operate Scriptorium review runs on a Git-managed LaTeX manuscript from Codex, Claude Code, or Antigravity. Agree a review brief with the author, start or resume runs, read bounded reports, triage findings, and record only the decisions and patch approvals the author gives.
+description: Operate Scriptorium review runs on a Git-managed LaTeX manuscript from Codex, Claude Code, or Antigravity. Agree a review brief with the author, start or resume runs, read reports, triage findings, and record only the decisions and patch approvals the author gives.
 ---
 
 # Scriptorium operator
@@ -16,7 +16,7 @@ scriptorium --json doctor --revision REV --profile PROFILE          -> ok, detec
 scriptorium --json run start --revision REV --profile PROFILE --brief brief.json [--allow-duplicate]
 scriptorium --json run status RUN_ID                                -> next_actions; follow them
 scriptorium --json run list [--status STATUS] [--limit N]           -> newest first; find RUN_ID
-scriptorium --json run report RUN_ID --part PART                    -> follow next_command until null
+scriptorium --json run report RUN_ID --part PART > PART.json       -> one whole report section
 scriptorium --json finding decide ID [ID ...] --confirm|--reject|--waive --reason TEXT
 scriptorium --json patch decide PATCH_ID --approve|--reject --reason TEXT
 scriptorium --json patch apply PATCH_ID
@@ -51,10 +51,9 @@ after a decision, or recovers a failed run when status offers it; repair the ext
 
 ## Reports
 
-`run status` lists `report_parts`. Read one with `run report RUN_ID --part PART`: follow every `next_command`
-unchanged until null, concatenate `text` in offset order without separators, and parse the whole value. Responses
-are at most 7,000 bytes. Changed reports and reading several parts from one state: `reference/fragments.md`.
-`task list`, `finding list/show`, `patch show`, and `--format` exports are unbounded; keep them out of context.
+`run status` lists `report_parts`. `run report RUN_ID --part PART > PART.json` writes one whole section as JSON;
+read the file. `--format json|markdown` writes the full report. Send `task list`, `finding list/show`, and
+`patch show` to files too. If `has_error` is true, read the `run`, `validation_reports`, and `gate` sections.
 
 `decision_stats` counts past decisions by role, category, and severity, with recent rejection and waiver reasons.
 Use it at the next intake to calibrate `severity_notes`, not as a quality score.

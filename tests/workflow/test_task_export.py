@@ -1,18 +1,26 @@
 import asyncio
+import json
 import os
 from pathlib import Path
 
 import pytest
 
 from scriptorium.artifacts import ArtifactStore
-from scriptorium.domain import AgentRole
+from scriptorium.domain import AgentRole, digest_json
 from scriptorium.errors import ConfigurationError, InfrastructureError, StateError
 from scriptorium.service import ScriptoriumService
-from scriptorium.tool_output import MAX_TOOL_RESPONSE_BYTES, bound_export, fits_response
 
-from ._support import PdfBuildingManuscriptManager, claim, complete_reviews, make_repository, submit
+from ._support import (
+    PdfBuildingManuscriptManager,
+    claim,
+    complete_reviews,
+    make_repository,
+    prepare_verification,
+    submit,
+)
 
-EXPECTED = {"manifest.json", "manuscript.pdf", "navigation.json", "source-map.json", "sources/main.tex"}
+BUNDLE = {"manifest.json", "manuscript.pdf", "navigation.json", "source-map.json", "sources/main.tex"}
+TASK_INPUTS = {"task/prompt.md", "task/schema.json", "task/example.json"}
 
 
 @pytest.fixture
@@ -32,22 +40,79 @@ def _files(root: Path) -> set[str]:
     return {path.relative_to(root).as_posix() for path in root.rglob("*") if path.is_file()}
 
 
-def test_export_matches_the_frozen_bundle_and_is_recorded_for_the_attempt(exporting):
+def test_export_writes_the_bundle_and_task_inputs_and_records_them(exporting):
     service, run, context, out = exporting
-    response = service.export_task(context["attempt"].id, out)
-    assert _files(out) == EXPECTED
-    assert {item["path"] for item in response["files"]} == EXPECTED
-    for item in response["files"]:
-        assert (out / item["path"]).read_bytes() == (Path(context["bundle_path"]) / item["path"]).read_bytes()
+    attempt = context["attempt"]
+    response = service.export_task(attempt.id, out)
+    assert _files(out) == BUNDLE | TASK_INPUTS
+    assert set(response) == {"attempt_id", "directory", "file_count", "total_bytes", "files_digest", "task_inputs"}
+    assert (response["attempt_id"], response["directory"]) == (attempt.id, str(out.resolve()))
+    assert response["file_count"] == len(BUNDLE | TASK_INPUTS)
+    assert response["total_bytes"] == sum((out / name).stat().st_size for name in BUNDLE | TASK_INPUTS)
+    for name in BUNDLE:
+        assert (out / name).read_bytes() == (Path(context["bundle_path"]) / name).read_bytes()
+    example_digest = service.database.get_external_task(context["task"].id)["example_digest"]
+    assert response["task_inputs"] == [
+        {"path": "task/prompt.md", "digest": attempt.prompt_digest},
+        {"path": "task/schema.json", "digest": attempt.schema_digest},
+        {"path": "task/example.json", "digest": example_digest},
+    ]
+    for item in response["task_inputs"]:
+        assert (out / item["path"]).read_bytes() == service.artifacts.get_bytes(item["digest"])
         assert ArtifactStore.digest_file(out / item["path"]) == item["digest"]
-        assert (out / item["path"]).stat().st_mode & 0o777 == 0o444
+    assert (out / "task/prompt.md").read_text(encoding="utf-8") == context["prompt"]
+    assert json.loads((out / "task/schema.json").read_text(encoding="utf-8")) == context["schema"]
+    for name in BUNDLE | TASK_INPUTS:
+        assert (out / name).stat().st_mode & 0o777 == 0o444
     assert not any(path.name.startswith("page") for path in out.rglob("*"))
     (event,) = _exports(service, run)
-    assert (event.entity_type, event.entity_id) == ("attempt", context["attempt"].id)
-    assert event.payload["files"] == sorted(response["files"], key=lambda item: item["path"])
-    assert event.payload["bundle_digest"] == context["attempt"].bundle_digest
-    assert response["files_digest"] and "only task command" in response["note"]
-    assert fits_response(response)
+    assert (event.entity_type, event.entity_id) == ("attempt", attempt.id)
+    listing = event.payload["files"]
+    assert [item["path"] for item in listing] == sorted(BUNDLE | TASK_INPUTS)
+    assert all(ArtifactStore.digest_file(out / item["path"]) == item["digest"] for item in listing)
+    assert response["files_digest"] == digest_json(listing)
+    assert event.payload["bundle_digest"] == attempt.bundle_digest
+
+
+def test_a_briefed_run_exports_its_brief(tmp_path):
+    repo = make_repository(tmp_path, roles=("copyedit",))
+    brief = json.dumps({"venue_family": "other", "stage": "internal_draft"})
+    with ScriptoriumService(repo, manuscript_manager=PdfBuildingManuscriptManager(repo)) as service:
+        run = asyncio.run(service.start_run("HEAD", "quick", brief=brief))["run"]
+        context = claim(service, run.id, "copyedit")
+        response = service.export_task(context["attempt"].id, tmp_path / "out")
+        frozen = service.artifacts.get_bytes(run.brief_digest)
+    assert {"path": "task/brief.json", "digest": run.brief_digest} in response["task_inputs"]
+    assert (tmp_path / "out/task/brief.json").read_bytes() == frozen
+
+
+def test_a_retried_attempt_exports_its_own_prompt_with_the_correction(exporting, tmp_path):
+    service, run, context, out = exporting
+    rejected = asyncio.run(service.submit_task(context["attempt"].id, context["input_digest"], "{}"))
+    assert rejected["attempt"].status.value == "failed"
+    asyncio.run(service.retry_task(run.id, context["task"].id))
+    retried = claim(service, run.id, AgentRole.SUBSTANTIVE_REVIEW, session="second")
+    first = service.export_task(context["attempt"].id, tmp_path / "first")
+    second = service.export_task(retried["attempt"].id, tmp_path / "second")
+    assert first["task_inputs"][0]["digest"] != second["task_inputs"][0]["digest"]
+    assert "was rejected" not in (tmp_path / "first/task/prompt.md").read_text(encoding="utf-8")
+    assert "was rejected" in (tmp_path / "second/task/prompt.md").read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize("status", ["completed", "failed", "interrupted"])
+def test_a_finished_attempt_exports_without_changing_state(exporting, status):
+    service, run, context, out = exporting
+    attempt_id = context["attempt"].id
+    if status == "interrupted":
+        service.cancel_run(run.id, "Stop the review.")
+    else:
+        submit(service, context, {"summary": "Done.", "findings": []} if status == "completed" else {})
+    before = (service.database.get_attempt(attempt_id), service.database.get_task(context["task"].id))
+    assert before[0].status.value == status
+    response = service.export_task(attempt_id, out)
+    assert _files(out) == BUNDLE | TASK_INPUTS and response["file_count"] == len(BUNDLE | TASK_INPUTS)
+    assert (service.database.get_attempt(attempt_id), service.database.get_task(context["task"].id)) == before
+    assert len(_exports(service, run)) == 1
 
 
 def test_a_failure_part_way_leaves_no_files_and_no_event(exporting, monkeypatch):
@@ -67,7 +132,7 @@ def test_a_failure_part_way_leaves_no_files_and_no_event(exporting, monkeypatch)
     assert len(calls) == 2 and not out.exists() and _exports(service, run) == []
     monkeypatch.undo()
     service.export_task(context["attempt"].id, out)
-    assert _files(out) == EXPECTED and len(_exports(service, run)) == 1
+    assert _files(out) == BUNDLE | TASK_INPUTS and len(_exports(service, run)) == 1
 
 
 def test_an_unrecordable_export_is_rolled_back(exporting, monkeypatch):
@@ -80,6 +145,23 @@ def test_an_unrecordable_export_is_rolled_back(exporting, monkeypatch):
     with pytest.raises(StateError, match="cannot record"):
         service.export_task(context["attempt"].id, out)
     assert not out.exists()
+
+
+def test_a_task_input_that_does_not_match_its_digest_is_never_exported(exporting, monkeypatch):
+    service, run, context, out = exporting
+    monkeypatch.setattr(service.armarius, "_load_prompt_artifact", lambda digest: "a different prompt")
+    with pytest.raises(InfrastructureError, match="does not match its recorded digest: task/prompt.md"):
+        service.export_task(context["attempt"].id, out)
+    assert not out.exists() and _exports(service, run) == []
+
+
+@pytest.mark.parametrize("colliding", ["task/prompt.md", "task", "task/notes.md"])
+def test_a_bundle_path_colliding_with_the_task_inputs_fails_cleanly(exporting, monkeypatch, colliding):
+    service, run, context, out = exporting
+    monkeypatch.setattr(service, "_export_names", lambda bundle, files: ["sources/main.tex", colliding])
+    with pytest.raises(StateError, match=f"collides with the exported task inputs: {colliding}"):
+        service.export_task(context["attempt"].id, out)
+    assert not out.exists() and _exports(service, run) == []
 
 
 def test_a_path_that_would_escape_the_directory_is_refused_before_anything_is_written(exporting, monkeypatch):
@@ -129,15 +211,7 @@ def test_a_used_destination_is_refused_without_recording(exporting):
     assert [path.name for path in out.iterdir()] == ["mine.txt"] and _exports(service, run) == []
 
 
-def test_a_finished_attempt_cannot_export(exporting):
-    service, run, context, out = exporting
-    submit(service, context, {"summary": "Done.", "findings": []})
-    with pytest.raises(StateError, match="active attempt"):
-        service.export_task(context["attempt"].id, out)
-    assert not out.exists() and _exports(service, run) == []
-
-
-def test_a_revision_attempt_exports_like_task_read_allows(tmp_path):
+def test_a_revision_attempt_exports_its_own_task_inputs(tmp_path):
     repo = make_repository(tmp_path)
     with ScriptoriumService(repo, manuscript_manager=PdfBuildingManuscriptManager(repo)) as service:
         run = asyncio.run(service.start_run("HEAD", "quick"))["run"]
@@ -146,17 +220,42 @@ def test_a_revision_attempt_exports_like_task_read_allows(tmp_path):
         asyncio.run(service.resume_run(run.id))
         revision = claim(service, run.id, AgentRole.REVISION, session="revision-session")
         response = service.export_task(revision["attempt"].id, tmp_path / "revision-out")
-        assert {item["path"] for item in response["files"]} == EXPECTED
+        assert _files(tmp_path / "revision-out") == BUNDLE | {"task/prompt.md", "task/schema.json"}
+        assert [item["digest"] for item in response["task_inputs"]] == [
+            revision["attempt"].prompt_digest,
+            revision["attempt"].schema_digest,
+        ]
+        assert "Confirmed findings" in (tmp_path / "revision-out/task/prompt.md").read_text(encoding="utf-8")
         assert len(_exports(service, run)) == 1
 
 
-def test_the_response_stays_bounded_for_many_files():
-    listing = [{"path": f"sources/chapters/section-{number:04d}.tex", "digest": "a" * 64} for number in range(400)]
-    response = bound_export("attempt_1", "/exports/" + "x" * 200, listing, 123456)
-    assert fits_response(response)
-    assert response["file_count"] == 400 and response["listing_truncated"] is True
-    assert 0 < len(response["files"]) < 400
-    assert response["files"] == listing[: len(response["files"])]
-    assert len(response["note"].encode()) < MAX_TOOL_RESPONSE_BYTES
-    small = bound_export("attempt_1", "/exports/a", listing[:3], 10)
-    assert small["files"] == listing[:3] and small["listing_truncated"] is False
+def test_a_verification_attempt_exports_the_patched_bundle(tmp_path):
+    repo = make_repository(tmp_path)
+    with ScriptoriumService(repo, manuscript_manager=PdfBuildingManuscriptManager(repo)) as service:
+        run = asyncio.run(service.start_run("HEAD", "quick"))["run"]
+        prepare_verification(service, run.id)
+        verification = claim(service, run.id, AgentRole.VERIFICATION, session="verification-session")
+        out = tmp_path / "verification-out"
+        service.export_task(verification["attempt"].id, out)
+        assert (out / "sources/main.tex").read_bytes() == (
+            Path(verification["bundle_path"]) / "sources/main.tex"
+        ).read_bytes()
+        assert "The result is clear." in (out / "sources/main.tex").read_text(encoding="utf-8")
+        assert "Approved diff" in (out / "task/prompt.md").read_text(encoding="utf-8")
+
+
+def test_claim_and_show_return_a_compact_overview_that_points_to_export(exporting):
+    service, _, context, _ = exporting
+    attempt_id = context["attempt"].id
+    for overview in (service.task_view(context), service.task_view(service.show_task(attempt_id))):
+        assert set(overview) == {
+            "run_id",
+            "task",
+            "attempt",
+            "input_digest",
+            "bundle_digest",
+            "navigation_digest",
+            "export_command",
+        }
+        assert overview["input_digest"] == context["input_digest"]
+        assert overview["export_command"] == f"scriptorium --json task export {attempt_id} --dir DIR"

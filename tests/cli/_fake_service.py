@@ -46,9 +46,9 @@ class FakeService:
         self.calls.append(("show_task", attempt_id))
         return {"attempt_id": attempt_id}
 
-    def task_view(self, context: dict, part: str | None = None, offset: int = 0) -> dict:
-        self.calls.append(("task_view", context["attempt_id"], part, offset))
-        return {"part": part, "offset": offset}
+    def task_view(self, context: dict) -> dict:
+        self.calls.append(("task_view", context["attempt_id"]))
+        return {"attempt": {"id": context["attempt_id"]}}
 
     def run_status(self, run_id: str) -> Result:
         return self._record("run_status", run_id)
@@ -73,9 +73,9 @@ class FakeService:
             return "# Report"
         return {"run_id": run_id}
 
-    def read_report(self, run_id: str, part: str, offset: int, report_digest: str | None) -> dict:
-        self.calls.append(("read_report", run_id, part, offset, report_digest))
-        return {"run_id": run_id, "part": part, "offset": offset, "text": "[]", "next_command": None}
+    def read_report(self, run_id: str, part: str) -> list:
+        self.calls.append(("read_report", run_id, part))
+        return [{"part": part}]
 
     def evaluate_gate(self, run_id: str) -> dict:
         self.calls.append(("evaluate_gate", run_id))

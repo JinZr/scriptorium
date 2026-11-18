@@ -76,27 +76,20 @@ def test_a_run_without_a_brief_keeps_its_earlier_prompt_bytes(tmp_path) -> None:
     assert set(plain.frozen_config) == set(briefed.frozen_config)
 
 
-def test_task_show_returns_the_frozen_brief_and_status_and_report_summarize_it(tmp_path) -> None:
+def test_task_export_writes_the_frozen_brief_and_status_and_report_summarize_it(tmp_path) -> None:
     repo = make_repository(tmp_path, roles=("copyedit",))
     with ScriptoriumService(repo, manuscript_manager=PdfBuildingManuscriptManager(repo)) as service:
         started = _start(service, _BRIEF)
         run = started["run"]
         context = claim(service, run.id, "copyedit")
-        overview = service.task_view(context)
-        fragment = service.task_view(service.show_task(context["attempt"].id), "brief")
+        exported = service.export_task(context["attempt"].id, tmp_path / "export")
         status = service.run_status(run.id)
         report = service.render_report(run.id, "json")
         markdown = service.render_report(run.id, "markdown")
-        events = [event.payload for event in service.database.list_events(run.id) if event.event_type == "tool.show"]
 
     expected = canonical_json(ReviewBrief.model_validate(_BRIEF).model_dump(mode="json"))
-    assert overview["inputs"]["brief"] == {
-        "digest": run.brief_digest,
-        "command": f"scriptorium --json task show {context['attempt'].id} --part brief",
-    }
-    assert fragment["text"] == expected and fragment["next_command"] is None
-    assert fragment["digest"] == run.brief_digest
-    assert events[-1]["part"] == "brief" and events[-1]["digest"] == run.brief_digest
+    assert (tmp_path / "export/task/brief.json").read_text(encoding="utf-8") == expected
+    assert {"path": "task/brief.json", "digest": run.brief_digest} in exported["task_inputs"]
     summary = {
         "digest": run.brief_digest,
         "venue_family": "ml_conference",
@@ -116,18 +109,21 @@ def test_task_show_returns_the_frozen_brief_and_status_and_report_summarize_it(t
     assert "- Review brief: `ml_conference` (NeurIPS 2026), stage `presubmission`" in markdown
 
 
-def test_a_run_without_a_brief_has_no_brief_part(tmp_path) -> None:
+def test_a_run_without_a_brief_exports_no_brief(tmp_path) -> None:
     repo = make_repository(tmp_path, roles=("copyedit",))
     with ScriptoriumService(repo, manuscript_manager=PdfBuildingManuscriptManager(repo)) as service:
         run = _start(service)["run"]
         context = claim(service, run.id, "copyedit")
-        overview = service.task_view(context)
+        exported = service.export_task(context["attempt"].id, tmp_path / "export")
         status = service.run_status(run.id)
         report = service.render_report(run.id, "json")
-        with pytest.raises(ConfigurationError, match="without a review brief"):
-            service.task_view(context, "brief")
 
-    assert set(overview["inputs"]) == {"prompt", "schema", "source-map", "example"}
+    assert [item["path"] for item in exported["task_inputs"]] == [
+        "task/prompt.md",
+        "task/schema.json",
+        "task/example.json",
+    ]
+    assert not (tmp_path / "export/task/brief.json").exists()
     assert "review_brief" not in status
     assert report["run"]["brief_digest"] is None and "review_brief" not in report["run"]
 

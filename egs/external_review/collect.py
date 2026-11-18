@@ -6,13 +6,11 @@ from importlib.metadata import version
 import json
 from pathlib import Path
 import re
-import shlex
 import subprocess
 import sys
 
 import scriptorium
 from scriptorium.domain import digest_json
-from scriptorium.tool_output import MAX_TOOL_RESPONSE_BYTES
 
 from .files import contained_file, file_records, publication, read_json, verify_seal, write_json
 from .labels import LabelSet
@@ -43,40 +41,14 @@ def cli(project, arguments, records):
     )
     if result.returncode:
         raise ValueError(f"Scriptorium inspection failed: {result.stdout or result.stderr}")
-    if len(result.stdout.encode("utf-8")) > MAX_TOOL_RESPONSE_BYTES:
-        raise ValueError("Inspection response exceeds the CLI byte bound")
     response = json.loads(result.stdout)
     if not response["ok"]:
         raise ValueError(f"Scriptorium rejected inspection: {response}")
     return response["data"]
 
 
-def report_parts(project, run_id, records):
-    status = cli(project, ["--json", "run", "status", run_id], records)
-    report = {}
-    report_digest = None
-    for part, command in status["report_parts"].items():
-        arguments = shlex.split(command)[1:]
-        if report_digest is not None:
-            arguments += ["--report-digest", report_digest]
-        text = ""
-        while arguments:
-            fragment = cli(project, arguments, records)
-            report_digest = report_digest or fragment["report_digest"]
-            if (
-                fragment["report_digest"] != report_digest
-                or fragment["part"] != part
-                or fragment["offset"] != len(text)
-            ):
-                raise ValueError("Report fragments do not describe the same frozen view")
-            text += fragment["text"]
-            arguments = shlex.split(fragment["next_command"])[1:] if fragment["next_command"] else None
-        if len(text) != fragment["total_chars"] or sha256(text.encode()).hexdigest() != fragment["digest"]:
-            raise ValueError(f"Incomplete report part: {part}")
-        report[part] = json.loads(text)
-    if digest_json(report) != report_digest:
-        raise ValueError("Reconstructed report digest does not match")
-    return report
+def run_report(project, run_id, records):
+    return cli(project, ["--json", "run", "report", run_id, "--format", "json"], records)
 
 
 def artifact(project, digest):
@@ -173,7 +145,7 @@ def collect(
         raise ValueError("Evaluation output must be outside Scriptorium state")
     records = []
     with publication(output, [path for path in (baseline, labels) if path is not None]) as stage:
-        report = report_parts(project, run_id, records)
+        report = run_report(project, run_id, records)
         if report["run"]["frozen_config"].get("execution") != "external":
             raise ValueError("This example requires an external-harness run")
         if not report["gate"]["conditions"]["review_artifacts_valid"]:
@@ -228,11 +200,8 @@ def collect(
             target.parent.mkdir(exist_ok=True)
             target.write_bytes(path.read_bytes())
         # Recheck after copying to reject a run that advanced during collection.
-        cli(
-            project,
-            ["--json", "run", "report", run_id, "--part", "run", "--report-digest", digest_json(report)],
-            records,
-        )
+        if digest_json(run_report(project, run_id, records)) != digest_json(report):
+            raise ValueError("Run report changed during collection; collect it again")
         package_root = Path(scriptorium.__file__).parent
         write_json(
             stage / "collection.json",

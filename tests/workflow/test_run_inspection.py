@@ -1,23 +1,21 @@
 import asyncio
-from hashlib import sha256
 import json
-import shlex
 import subprocess
 import sys
 
 import pytest
 
 from scriptorium import cli
-from scriptorium.domain import AgentRole, RunStatus, canonical_json, digest_json
+from scriptorium.domain import AgentRole, RunStatus
 from scriptorium.errors import ConfigurationError, InfrastructureError, NotFoundError
 from scriptorium.service import ScriptoriumService
-from scriptorium.tool_output import MAX_TOOL_RESPONSE_BYTES, REPORT_PARTS, success_json
+from scriptorium.tool_output import REPORT_PARTS, success_json
 
 from ._support import PdfBuildingManuscriptManager, claim, make_repository, prepare_verification, review_finding, submit
 
 
 @pytest.mark.parametrize("json_output", [True, False], ids=["json", "plain"])
-def test_bounded_status_and_report_parts_reconstruct_full_report(tmp_path, monkeypatch, capsys, json_output):
+def test_status_and_report_parts_return_the_full_report(tmp_path, monkeypatch, capsys, json_output):
     repo = make_repository(tmp_path, roles=("substantive_review",))
     options = ["--json"] if json_output else []
     with ScriptoriumService(repo, manuscript_manager=PdfBuildingManuscriptManager(repo)) as service:
@@ -26,9 +24,7 @@ def test_bounded_status_and_report_parts_reconstruct_full_report(tmp_path, monke
 
         def command(arguments):
             assert cli.main(arguments) == 0
-            raw = capsys.readouterr().out
-            assert len(raw.encode()) <= MAX_TOOL_RESPONSE_BYTES
-            value = json.loads(raw)
+            value = json.loads(capsys.readouterr().out)
             return value["data"] if json_output else value
 
         overview = command([*options, "run", "start", "--profile", "quick"])
@@ -53,20 +49,9 @@ def test_bounded_status_and_report_parts_reconstruct_full_report(tmp_path, monke
         assert len(success_json(full).encode()) > 100_000
         assert set(full) == set(REPORT_PARTS)
         assert full["validation_reports"]
+        assert set(overview["report_parts"]) == set(REPORT_PARTS)
         for part in overview["report_parts"]:
-            arguments = [*options, "run", "report", run_id, "--part", part]
-            text = ""
-            while arguments:
-                fragment = command(arguments)
-                assert fragment["offset"] == len(text)
-                assert fragment["part"] == part
-                assert fragment["report_digest"] == digest_json(full)
-                text += fragment["text"]
-                arguments = shlex.split(fragment["next_command"])[1:] if fragment["next_command"] else None
-            assert len(text) == fragment["total_chars"]
-            assert fragment["next_offset"] is None
-            assert sha256(text.encode()).hexdigest() == fragment["digest"]
-            assert text == canonical_json(full[part])
+            assert command([*options, "run", "report", run_id, "--part", part]) == full[part]
         assert service.database.list_events(run_id) == events
         assert cli.main(["run", "report", run_id, "--format", "json"]) == 0
         assert json.loads(capsys.readouterr().out) == full
@@ -79,51 +64,26 @@ def test_bounded_status_and_report_parts_reconstruct_full_report(tmp_path, monke
 
 
 @pytest.mark.parametrize("json_output", [True, False], ids=["json", "plain"])
-def test_report_continuation_crosses_processes_and_rejects_changed_state(tmp_path, json_output):
+def test_a_report_part_is_one_complete_json_value_across_processes(tmp_path, json_output):
     repo = make_repository(tmp_path, roles=("substantive_review",))
     with ScriptoriumService(repo, manuscript_manager=PdfBuildingManuscriptManager(repo)) as service:
         run_id = asyncio.run(service.start_run("HEAD", "quick"))["run"].id
+        expected = service.render_report(run_id, "json")["findings_grouped"]
     options = ["--json"] if json_output else []
-    command = [sys.executable, "-m", "scriptorium", *options, "run", "report", run_id, "--part", "run"]
-    started = subprocess.run(command, cwd=repo, text=True, capture_output=True, check=True)
-    first = json.loads(started.stdout)
-    if json_output:
-        first = first["data"]
-    assert first["next_command"]
-    command = [sys.executable, "-m", "scriptorium", *shlex.split(first["next_command"])[1:]]
-    continued = subprocess.run(command, cwd=repo, text=True, capture_output=True, check=True)
-    assert len(continued.stdout.encode()) <= MAX_TOOL_RESPONSE_BYTES
-    fragment = json.loads(continued.stdout)
-    if json_output:
-        fragment = fragment["data"]
-    assert fragment["offset"] == first["next_offset"]
-    with ScriptoriumService(repo) as service:
-        context = claim(service, run_id, AgentRole.SUBSTANTIVE_REVIEW)
-        # The run part is unchanged by claiming a task, but the whole report has changed.
-        assert digest_json(service.render_report(run_id, "json")["run"]) == first["digest"]
-        with pytest.raises(ConfigurationError, match="report changed"):
-            service.read_report(run_id, "run", first["next_offset"], first["report_digest"])
-        refreshed = service.read_report(run_id, "run")
-        assert refreshed["report_digest"] != first["report_digest"]
-        assert (
-            service.read_report(run_id, "tasks", 0, refreshed["report_digest"])["report_digest"]
-            == refreshed["report_digest"]
-        )
-        assert service.database.get_attempt(context["attempt"].id).status.value == "running"
+    command = [sys.executable, "-m", "scriptorium", *options, "run", "report", run_id, "--part", "findings_grouped"]
+    result = subprocess.run(command, cwd=repo, text=True, capture_output=True, check=True)
+    value = json.loads(result.stdout)
+    assert (value["data"] if json_output else value) == expected
 
 
-@pytest.mark.parametrize("offset,digest", [(1, None), (-1, None), (10**9, None), (0, "wrong")])
-def test_report_invalid_cursors_are_rejected(tmp_path, offset, digest):
+def test_report_parts_are_the_report_sections(tmp_path):
     repo = make_repository(tmp_path, roles=("substantive_review",))
     with ScriptoriumService(repo, manuscript_manager=PdfBuildingManuscriptManager(repo)) as service:
         run_id = asyncio.run(service.start_run("HEAD", "quick"))["run"].id
-        with pytest.raises(ConfigurationError):
-            service.read_report(run_id, "run", offset, digest)
-        first = service.read_report(run_id, "findings")
-        end = service.read_report(run_id, "findings", first["total_chars"], first["report_digest"])
-        assert end["text"] == "" and end["next_command"] is None
-        with pytest.raises(ConfigurationError, match="outside"):
-            service.read_report(run_id, "findings", first["total_chars"] + 1, first["report_digest"])
+        claim(service, run_id, AgentRole.SUBSTANTIVE_REVIEW)
+        report = service.render_report(run_id, "json")
+        for part in REPORT_PARTS:
+            assert service.read_report(run_id, part) == report[part]
         with pytest.raises(ConfigurationError, match="unknown report part"):
             service.read_report(run_id, "missing")
 
@@ -145,9 +105,7 @@ def test_status_preserves_human_gates(tmp_path, monkeypatch, capsys):
         monkeypatch.chdir(repo)
         monkeypatch.setattr(cli, "_build_service", lambda _: service)
         assert cli.main(["--json", "run", "status", run_id]) == 0
-        raw = capsys.readouterr().out
-        assert len(raw.encode()) <= MAX_TOOL_RESPONSE_BYTES
-        assert json.loads(raw)["data"]["next_actions"] == status["next_actions"]
+        assert json.loads(capsys.readouterr().out)["data"]["next_actions"] == status["next_actions"]
         patch, finding_id = prepare_verification(service, run_id)
         verification = claim(service, run_id, AgentRole.VERIFICATION, session="independent-verifier")
         receipt = submit(

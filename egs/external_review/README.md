@@ -76,10 +76,9 @@ preflight ledger as infrastructure-blocked; do not count it as a zero-finding re
 the planned manuscript set.
 
 The collector invokes its own Scriptorium package with isolated Python imports, so manuscript-local modules
-and `PYTHONPATH` cannot shadow the inspection CLI or its dependencies. It reconstructs all report sections
-through bounded `run report --part` calls, executes returned
-continuation commands unchanged, and checks offsets, section hashes and the shared report digest. It checks
-the digest again after copying, so a concurrently advancing run requires a fresh collection. The full bundle
+and `PYTHONPATH` cannot shadow the inspection CLI or its dependencies. It reads the complete JSON report in one
+`run report --format json` call and reads it again after copying; a differing digest means a concurrently
+advancing run, which requires a fresh collection. The full bundle
 must match its content-addressed file index. Every available attempt prompt, schema, bundle index, raw output,
 trace and validation artifact is copied with its digest checked, including invalid raw submissions. Corruption
 or changing input leaves no published collection. Baselines must precede all attempts and match case/trial,

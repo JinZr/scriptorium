@@ -1,7 +1,6 @@
 import asyncio
 import json
 from pathlib import Path
-import shlex
 
 import fitz
 import pytest
@@ -97,58 +96,34 @@ def test_crops_select_the_displayed_region_of_a_rotated_page(tmp_path):
         assert dark_pixels((0, 0, 0.2, 0.2)) == 0
 
 
-def test_text_layer_is_bounded_and_not_counted_as_a_page_view(pages):
+def test_text_layer_is_written_to_a_file_and_is_never_evidence(pages):
     service, run, context, command = pages
     attempt_id = context["attempt"].id
-    first = command(["--json", "task", "page", attempt_id, "--number", "1", "--text"])
-    assert "The result is clear." in first["text"]
-    assert first["evidence"] is False and first["text_layer"] == "pdf" and first["next_command"] is None
-    continuation = ["--offset", "4", "--text-digest", first["text_digest"]]
-    middle = command(["--json", "task", "page", attempt_id, "--number", "1", "--text", *continuation])
-    assert middle["text"] == first["text"][4:] and middle["text_digest"] == first["text_digest"]
-    receipt = submit(
-        service,
-        context,
-        {
-            "summary": "Checked the page text layer only.",
-            "findings": [],
-            "limitations": ["The rendered page image was not inspected."],
-        },
-    )
-    assert receipt["attempt"].status.value == "completed"
-    events = [event.event_type for event in service.database.list_events(run.id)]
-    assert events.count("tool.page_text") == 2
-    assert "tool.page" not in events
+    response = command(["--json", "task", "page", attempt_id, "--number", "1", "--text"])
+    path = Path(response["path"])
+    assert path.parent == service.repo / ".scriptorium/runs" / run.id / "page-views"
+    assert path.name == f"{response['digest']}.txt" and ArtifactStore.digest_file(path) == response["digest"]
+    assert "The result is clear." in path.read_text(encoding="utf-8")
+    assert response["bytes"] == path.stat().st_size
+    assert response["evidence"] is False and response["text_layer"] == "pdf" and "never evidence" in response["note"]
+    assert (response["source_path"], response["page"]) == ("manuscript.pdf", 1)
+    assert "text" not in response and "next_command" not in response
+    assert command(["--json", "task", "page", attempt_id, "--number", "1", "--text"]) == response
+    events = [event for event in service.database.list_events(run.id) if event.event_type.startswith("tool.")]
+    assert [event.event_type for event in events] == ["tool.page", "tool.page"]
+    assert events[0].payload["text"] == {"digest": response["digest"], "path": response["path"]}
 
 
-def test_long_text_layer_continues_with_offsets(pages, monkeypatch):
-    service, _, context, command = pages
-    text = "页面文字 " * 3000
-    monkeypatch.setattr("scriptorium.service.page_text", lambda pdf, page: text)
-    collected = ""
-    arguments = ["--json", "task", "page", context["attempt"].id, "--number", "1", "--text"]
-    while arguments:
-        response = command(arguments)
-        assert response["offset"] == len(collected)
-        collected += response["text"]
-        arguments = shlex.split(response["next_command"])[1:] if response["next_command"] else None
-    assert collected == text
-
-
-def test_text_continuations_are_bound_to_one_extraction(pages, monkeypatch):
-    service, run, context, _ = pages
+def test_a_changed_text_layer_gets_a_new_file_and_the_old_one_keeps_its_bytes(pages, monkeypatch):
+    service, _, context, _ = pages
     attempt_id = context["attempt"].id
-    monkeypatch.setattr("scriptorium.service.page_text", lambda pdf, page: "first extraction " * 1000)
+    monkeypatch.setattr("scriptorium.service.page_text", lambda pdf, page: "页面文字 " * 3000)
     first = service.page_task(attempt_id, 1, text=True)
-    assert f"--text-digest {first['text_digest']}" in first["next_command"]
-    with pytest.raises(ConfigurationError, match="requires --text-digest"):
-        service.page_task(attempt_id, 1, text=True, offset=first["next_offset"])
-    # A different extractor result must not be stitched onto fragments of the first one.
-    monkeypatch.setattr("scriptorium.service.page_text", lambda pdf, page: "second extraction " * 1000)
-    before = service.database.list_events(run.id)
-    with pytest.raises(ConfigurationError, match="page text layer changed"):
-        service.page_task(attempt_id, 1, text=True, offset=first["next_offset"], text_digest=first["text_digest"])
-    assert service.database.list_events(run.id) == before
+    monkeypatch.setattr("scriptorium.service.page_text", lambda pdf, page: "second extraction")
+    second = service.page_task(attempt_id, 1, text=True)
+    assert second["path"] != first["path"]
+    assert Path(first["path"]).read_text(encoding="utf-8") == "页面文字 " * 3000
+    assert Path(second["path"]).read_bytes() == b"second extraction"
 
 
 def test_views_keep_their_bytes_and_a_run_keeps_a_bounded_amount(pages, monkeypatch):
@@ -166,13 +141,19 @@ def test_views_keep_their_bytes_and_a_run_keeps_a_bounded_amount(pages, monkeypa
     second = service.page_task(attempt_id, 1, scale=2.0)
     assert second["path"] != first["path"]
     assert ArtifactStore.digest_file(first["path"]) == first["view"]["digest"]
+    text = service.page_task(attempt_id, 1, text=True)
     views = service.repo / ".scriptorium/runs" / run.id / "page-views"
-    kept = sum(path.stat().st_size for path in views.glob("*.png"))
+    kept = sum(path.stat().st_size for path in views.iterdir() if not path.name.startswith("."))
+    # Text layers count toward the same limit as rendered views.
     monkeypatch.setattr("scriptorium.service.MAX_RUN_PAGE_VIEW_BYTES", kept)
     with pytest.raises(StateError, match="reached the 0 MiB limit"):
         service.page_task(attempt_id, 1, scale=3.0)
-    assert sum(path.stat().st_size for path in views.glob("*.png")) == kept
+    monkeypatch.setattr("scriptorium.service.page_text", lambda pdf, page: "a different extraction")
+    with pytest.raises(StateError, match="reached the 0 MiB limit"):
+        service.page_task(attempt_id, 1, text=True)
+    assert sum(path.stat().st_size for path in views.iterdir()) == kept
     assert service.page_task(attempt_id, 1, scale=2.0)["path"] == second["path"]
+    assert Path(text["path"]).exists()
 
 
 @pytest.mark.parametrize(
@@ -181,8 +162,6 @@ def test_views_keep_their_bytes_and_a_run_keeps_a_bounded_amount(pages, monkeypa
         ({"scale": 5.0}, "scale"),
         ({"crop": (0.5, 0.0, 0.5, 1.0)}, "crop"),
         ({"text": True, "scale": 2.0}, "cannot be combined"),
-        ({"offset": 3}, "require --text"),
-        ({"text_digest": "a" * 64}, "require --text"),
     ],
 )
 def test_invalid_page_options_are_rejected_before_access(pages, options, message):
@@ -197,3 +176,10 @@ def test_cli_rejects_malformed_crop(pages, capsys):
     _, _, context, _ = pages
     assert cli.main(["--json", "task", "page", context["attempt"].id, "--number", "1", "--crop", "0,0,1"]) == 2
     assert json.loads(capsys.readouterr().out)["error"]["code"] == "invalid_arguments"
+
+
+def test_a_finished_attempt_cannot_render_pages(pages):
+    service, _, context, _ = pages
+    submit(service, context, {"summary": "Done.", "findings": []})
+    with pytest.raises(StateError, match="active attempt"):
+        service.page_task(context["attempt"].id, 1)
