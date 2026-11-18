@@ -1,13 +1,15 @@
 from __future__ import annotations
 
+from dataclasses import asdict
 import hashlib
+import json
 import os
 from pathlib import Path
 import shutil
 import tempfile
 from typing import BinaryIO
 
-from scriptorium.domain import Artifact
+from scriptorium.domain import Artifact, canonical_json
 
 
 class ArtifactError(RuntimeError):
@@ -139,6 +141,46 @@ class ArtifactStore:
         finally:
             temporary_path.unlink(missing_ok=True)
         return destination_path
+
+    def record_path(self, digest: str) -> Path:
+        target = self.path_for(digest)
+        return target.with_name(f"{target.name}.json")
+
+    def record(self, artifact: Artifact) -> Artifact:
+        """Keep the first metadata record published for a digest and return the record that is kept."""
+        existing = self.read_record(artifact.digest)
+        if existing is not None:
+            return existing
+        target = self.record_path(artifact.digest)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        temporary_path = self._temporary_path(target.parent)
+        try:
+            with temporary_path.open("wb") as destination:
+                destination.write(canonical_json(asdict(artifact)).encode("utf-8"))
+                destination.flush()
+                os.fsync(destination.fileno())
+            try:
+                # A hard link never replaces: the first complete record wins, and a reader never sees a partial one.
+                os.link(temporary_path, target)
+            except FileExistsError:
+                pass
+        finally:
+            temporary_path.unlink(missing_ok=True)
+        return self.read_record(artifact.digest)
+
+    def read_record(self, digest: str) -> Artifact | None:
+        path = self.record_path(digest)
+        try:
+            data = path.read_bytes()
+        except FileNotFoundError:
+            return None
+        try:
+            artifact = Artifact(**json.loads(data))
+            if artifact.digest != digest:
+                raise ValueError("digest mismatch")
+        except (TypeError, ValueError) as exc:
+            raise ArtifactCorruptionError(f"artifact record is corrupt: {path}") from exc
+        return artifact
 
     def _artifact(self, path: Path, digest: str, size: int, media_type: str) -> Artifact:
         return Artifact(

@@ -1,3 +1,4 @@
+from dataclasses import replace
 import hashlib
 
 import pytest
@@ -48,3 +49,19 @@ def test_unknown_and_invalid_digest_are_rejected(tmp_path) -> None:
         store.get_bytes(unknown)
     with pytest.raises(ValueError):
         store.path_for("../not-a-digest")
+
+
+def test_the_first_metadata_record_of_a_digest_is_kept(tmp_path) -> None:
+    store = ArtifactStore(tmp_path / "artifacts")
+    artifact = store.put_text("evidence", "text/plain")
+
+    assert store.read_record(artifact.digest) is None
+    first = store.record(artifact)
+    later = store.record(replace(artifact, media_type="application/json", created_at="later"))
+
+    assert first == later == artifact
+    assert store.read_record(artifact.digest) == artifact
+    assert not list(store.record_path(artifact.digest).parent.glob(".artifact-*"))
+    store.record_path(artifact.digest).write_text("{}", encoding="utf-8")
+    with pytest.raises(ArtifactCorruptionError, match="artifact record is corrupt"):
+        store.read_record(artifact.digest)

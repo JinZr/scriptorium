@@ -17,7 +17,7 @@ from ._factories import create_completed_attempt, make_run
 
 
 def test_patch_verification_and_artifact_metadata(tmp_path) -> None:
-    with Database(tmp_path / "state.sqlite3") as database:
+    with Database(tmp_path) as database:
         run = database.create_run(make_run())
         _, attempt = create_completed_attempt(database, run)
         artifact = database.add_artifact(
@@ -56,7 +56,7 @@ def test_patch_verification_and_artifact_metadata(tmp_path) -> None:
 
 
 def test_patch_records_the_generating_attempt(tmp_path) -> None:
-    with Database(tmp_path / "state.sqlite3") as database:
+    with Database(tmp_path) as database:
         run = database.create_run(make_run())
         _, attempt = create_completed_attempt(database, run)
         artifact = database.add_artifact(
@@ -83,7 +83,7 @@ def test_patch_records_the_generating_attempt(tmp_path) -> None:
 
 
 def test_new_patch_requires_a_generating_attempt(tmp_path) -> None:
-    with Database(tmp_path / "state.sqlite3") as database:
+    with Database(tmp_path) as database:
         with pytest.raises(ValueError, match="generating attempt_id"):
             database.create_patch(
                 Patch(
@@ -97,7 +97,7 @@ def test_new_patch_requires_a_generating_attempt(tmp_path) -> None:
 
 
 def test_repropose_rejected_patch_updates_lineage_and_preserves_decision(tmp_path) -> None:
-    with Database(tmp_path / "state.sqlite3") as database:
+    with Database(tmp_path) as database:
         run = database.create_run(make_run())
         _, first_attempt = create_completed_attempt(database, run)
         artifact = database.add_artifact(

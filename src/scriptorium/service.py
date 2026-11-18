@@ -12,7 +12,6 @@ from pathlib import Path
 import re
 import shutil
 import socket
-import sqlite3
 import stat
 import subprocess
 import tempfile
@@ -71,9 +70,9 @@ class ScriptoriumService:
         self.repo = find_repo(repo)
         self.state_dir = self.repo / ".scriptorium"
         try:
-            self.database = Database(self.state_dir / "state.sqlite3")
+            self.database = Database(self.state_dir)
             self.artifacts = ArtifactStore(self.state_dir / "artifacts")
-        except (sqlite3.Error, StorageError, OSError) as exc:
+        except (StorageError, OSError) as exc:
             raise InfrastructureError(f"cannot initialize local state: {exc}") from exc
         self.manuscript = manuscript_manager or ManuscriptManager(self.repo)
         self.armarius = Armarius(
@@ -296,7 +295,7 @@ class ScriptoriumService:
                 check("review_profile", False, str(exc), "configuration")
             else:
                 check("review_profile", True, f"profile {selected_profile}")
-        check("sqlite", True, str(self.state_dir / "state.sqlite3"))
+        check("run_state", True, str(self.database.runs_dir))
 
         failed = [item for item in checks if not item["ok"]]
         exit_code = 3 if infrastructure_failed else 2 if configuration_failed or failed else 0
@@ -1169,7 +1168,7 @@ class ScriptoriumService:
             raise NotFoundError(str(exc)) from exc
         except ConflictError as exc:
             raise StateError(str(exc)) from exc
-        except (StorageError, sqlite3.Error) as exc:
+        except StorageError as exc:
             raise InfrastructureError(str(exc)) from exc
         except ValueError as exc:
             raise StateError(str(exc)) from exc

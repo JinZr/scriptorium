@@ -7,7 +7,7 @@ description: Operate Scriptorium review runs on a Git-managed LaTeX manuscript f
 
 You run the workflow and talk with the author. To work a claimed review, revision, or verification task, use the
 `scriptorium-review` skill; that can be this session. Run `scriptorium --json` from the manuscript project that owns
-the run. Never edit `.scriptorium/`, its SQLite database, artifacts, snapshots, bundles, or generated patches.
+the run. Never edit `.scriptorium/`, its run state files, artifacts, snapshots, bundles, or generated patches.
 
 ## Quick reference
 

@@ -1,7 +1,3 @@
-import sqlite3
-
-import pytest
-
 from scriptorium.domain import AgentRole, Finding, FindingSeverity, FindingStatus
 from scriptorium.storage import Database
 
@@ -9,7 +5,7 @@ from ._factories import create_completed_attempt, make_run
 
 
 def test_finding_decision_is_atomic_and_history_is_immutable(tmp_path) -> None:
-    with Database(tmp_path / "state.sqlite3") as database:
+    with Database(tmp_path) as database:
         run = database.create_run(make_run())
         task, attempt = create_completed_attempt(database, run)
         finding = database.create_finding(
@@ -35,15 +31,15 @@ def test_finding_decision_is_atomic_and_history_is_immutable(tmp_path) -> None:
 
         assert database.get_finding(finding.id).status == FindingStatus.CONFIRMED
         assert database.list_decisions("finding", finding.id) == [decision]
-        with pytest.raises(sqlite3.IntegrityError, match="append-only"):
-            database.connection.execute(
-                "UPDATE decisions SET reason = 'changed' WHERE id = ?",
-                (decision.id,),
-            )
+        later = database.decide_finding(finding.id, "waive", "Out of scope for this draft.")
+
+        assert database.get_finding(finding.id).status == FindingStatus.WAIVED
+        assert database.list_decisions("finding", finding.id) == [decision, later]
+        assert [event.event_type for event in database.list_events(run.id)].count("finding.decided") == 2
 
 
 def test_findings_deduplicate_only_by_exact_fingerprint(tmp_path) -> None:
-    with Database(tmp_path / "state.sqlite3") as database:
+    with Database(tmp_path) as database:
         run = database.create_run(make_run())
         task, attempt = create_completed_attempt(database, run)
 

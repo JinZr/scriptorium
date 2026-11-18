@@ -139,7 +139,7 @@ def collect(
         raise ValueError(f"Host computation must be one of {', '.join(HOST_COMPUTATION)}")
     host_conditions = {"computation": host_computation}
     project = project.resolve()
-    if not (project / ".scriptorium/state.sqlite3").is_file():
+    if not any((project / ".scriptorium/runs").glob("*/state.json")):
         raise ValueError("Project must have an existing Scriptorium run")
     if output.resolve().is_relative_to((project / ".scriptorium").resolve()):
         raise ValueError("Evaluation output must be outside Scriptorium state")

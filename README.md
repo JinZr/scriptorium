@@ -9,7 +9,7 @@ frozen review tasks → human finding decisions → revision task → human patc
 → independent verification task → explicit patch application → release gate
 ```
 
-Git commits identify manuscript inputs. SQLite records workflow state and append-only decisions. A SHA-256 artifact store preserves prompts, submissions, validation reports, and build evidence. Uncommitted manuscript changes never enter a run.
+Git commits identify manuscript inputs. One state file per run records workflow state and append-only decisions, replaced atomically on each change. A SHA-256 artifact store preserves prompts, submissions, validation reports, and build evidence. Uncommitted manuscript changes never enter a run.
 
 ## Install
 
