@@ -95,7 +95,7 @@ def _complete_reviews(service: ScriptoriumService, run_id: str, *, skip: AgentRo
         )
         output = {
             "summary": f"Reviewed the frozen {task.role.value} material.",
-            "scope": {"completion": "complete", "checked": [], "outstanding": [], "limitations": []},
+            "limitations": [],
             "findings": [
                 {
                     "category": task.role.value,
@@ -449,7 +449,7 @@ def test_completed_benchmark_paper_is_not_repeated_on_resume(
     [
         "skills/scriptorium/SKILL.md",
         "skills/scriptorium-review/SKILL.md",
-        "skills/scriptorium-review/reference/scope.md",
+        "skills/scriptorium-review/reference/anchors.md",
     ],
 )
 def test_skill_change_invalidates_frozen_benchmark_sources(

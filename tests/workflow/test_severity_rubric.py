@@ -89,7 +89,7 @@ def test_new_findings_require_a_recorded_consequence(tmp_path):
                 {
                     "summary": "Checked language.",
                     "findings": [missing],
-                    "scope": {"completion": "complete", "checked": [], "outstanding": [], "limitations": []},
+                    "limitations": [],
                 }
             ),
         )
@@ -104,7 +104,7 @@ def test_new_findings_require_a_recorded_consequence(tmp_path):
                 {
                     "summary": "Checked language.",
                     "findings": [compliance],
-                    "scope": {"completion": "complete", "checked": [], "outstanding": [], "limitations": []},
+                    "limitations": [],
                 }
             ),
         )
@@ -119,25 +119,3 @@ def test_new_findings_require_a_recorded_consequence(tmp_path):
         assert service.get_finding(stored.id)["finding"].consequence == finding["consequence"]
         report = service.render_report(run.id, "json")
         assert report["findings"][0]["finding"]["consequence"] == finding["consequence"]
-
-
-def test_scope_entries_given_as_strings_are_explained_by_check(tmp_path):
-    repo = make_repository(tmp_path, roles=("copyedit",))
-    with ScriptoriumService(repo, manuscript_manager=PdfBuildingManuscriptManager(repo)) as service:
-        run = asyncio.run(service.start_run("HEAD", "quick"))["run"]
-        review = claim(service, run.id, AgentRole.COPYEDIT)
-        checked = service.check_submission(
-            review["attempt"].id,
-            review["input_digest"],
-            canonical_json(
-                {
-                    "summary": "Checked language.",
-                    "findings": [],
-                    "scope": {"completion": "partial", "checked": ["main.tex"], "outstanding": [], "limitations": []},
-                }
-            ),
-        )
-        [issue] = checked["validation_report"]["issues"]
-        assert (issue["code"], issue["path"], issue["actual"]) == ("schema.type", "/scope/checked/0", "main.tex")
-        assert "must be an object, not a string" in issue["message"]
-        assert "source_path" in issue["message"] and "start_line" in issue["message"]

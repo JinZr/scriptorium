@@ -44,8 +44,8 @@ computation as `unknown` in comparisons and scores, whatever value was declared.
 
 Record the planned host/model/effort, tool versions, allowed corrections and existing paid budget externally
 before launching the host. A fresh conversation uses the shared Scriptorium skill to claim, retrieve and submit.
-An accepted partial/unknown review requires an explicit continuation; a process exit or valid submission is
-not by itself completion. Use `run status` to determine the next action. Stop at human finding decisions.
+An accepted submission completes its review; a process exit does not. Use `run status` to determine the
+next action. Stop at human finding decisions.
 There is no time limit or automatic retry in this example. Paid host calls require explicit authorization.
 
 Repeat with independent runs for other configurations or papers. Never change a run's frozen artifacts to
@@ -95,9 +95,8 @@ Each collection contains:
 - `report.json`, `inspection-calls.json`, `artifacts/`, `bundle/`: the complete report, actual collector CLI
   returns, all available attempt artifacts and frozen material. Collector calls are explicitly separate from
   the reviewer's tool events in the report.
-- `summary.json`: attempts and their reported client/model/effort/session provenance, retry/continuation
-  counts, latest declared scope, successful tool returns and the core coverage audit. Page returns leave
-  `image_views_verified` unknown. Unknown costs remain null.
+- `summary.json`: attempts and their reported client/model/effort/session provenance, retry counts and each
+  accepted review's limitations. `image_views_verified` stays unknown. Unknown costs remain null.
 - `seal.json`: exact file inventory and SHA-256 digests, checked by downstream steps.
 
 File seals detect changes; they are not provider signatures. Host/caller-reported identities remain claims.

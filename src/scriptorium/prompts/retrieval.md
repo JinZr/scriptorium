@@ -8,7 +8,7 @@ uncertainties, exponents, and percentages to recompute or compare, not every num
 When the source map includes compiled_pdf.documents, inspect its entrypoints and page ranges, including
 independent supplements. Each range is part of the assembled manuscript.pdf. A task page request with
 --document ENTRYPOINT uses a document-local physical page; its returned page is the global manuscript.pdf
-coordinate to use in evidence, claim checks, and scope. Do not substitute local or printed page numbers.
+coordinate to use in evidence and claim checks. Do not substitute local or printed page numbers.
 Seek relevant supplementary qualifications and counterevidence before retaining a concern about the main text.
 
 Read the relevant source in bounded ranges. Search alternative terms, abbreviations, units, and numeric forms;
@@ -17,7 +17,7 @@ supplementary material. Continue with further ranges or targeted searches after 
 or a partial read is not evidence that an issue is absent. The index may omit macros or unsupported commands.
 Raw source searches can also return comments or inactive variants. Check whether a passage belongs to the compiled
 manuscript before treating it as a claim. If the manuscript mentions separate material absent from the frozen
-manifest, describe the missing link in `scope.limitations` for a review output or in `summary` for a revision or
+manifest, describe the missing link in `limitations` for a review output or in `summary` for a revision or
 verification output. Do not infer the absent material's contents.
 
 Before reporting a suspected issue, actively seek qualifications, definitions, or supplementary explanations that

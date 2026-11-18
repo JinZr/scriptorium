@@ -68,7 +68,8 @@ def test_each_review_role_serves_a_checked_example_with_real_frozen_anchors(tmp_
     model.model_validate_json(text)
     sources = {source["source_path"]: source for source in context["source_map"]["sources"]}
     anchors = list(_anchors(example))
-    assert {anchor["source_path"] for anchor in anchors} == {"main.tex", "manuscript.pdf"}
+    cited = {"main.tex", "manuscript.pdf"} if role == "substantive_review" else {"main.tex"}
+    assert {anchor["source_path"] for anchor in anchors} == cited
     for anchor in anchors:
         if anchor["source_path"] == "manuscript.pdf":
             assert anchor == {"source_path": "manuscript.pdf", "page": 1}
@@ -82,7 +83,7 @@ def test_each_review_role_serves_a_checked_example_with_real_frozen_anchors(tmp_
     finding = example["findings"][0]
     assert {"consequence", "evidence"} <= set(finding)
     assert ("affected_claim" in finding) == (role != "substantive_review")
-    assert example["scope"]["outstanding"] and example["scope"]["limitations"]
+    assert "scope" not in example and example["limitations"]
     if role == "substantive_review":
         assert example["verdict"]["recommendation"] == "major_revision"
         assert [entry["prominence"] for entry in example["claim_inventory"]] == ["headline", "supporting"]

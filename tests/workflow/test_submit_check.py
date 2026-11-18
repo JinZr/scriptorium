@@ -23,7 +23,7 @@ def _review_output(review, *, findings=None):
     output = {
         "summary": "Checked the reported result.",
         "findings": findings,
-        "scope": {"completion": "complete", "checked": [], "outstanding": [], "limitations": []},
+        "limitations": [],
         "claim_checks": [
             {
                 "claim": "The reported result is clear.",

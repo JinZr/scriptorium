@@ -115,7 +115,7 @@ def copy_bundle(project, report, stage):
 def review_summary(report):
     tasks = [item for item in report["tasks"] if item["task"]["stage"] == "review"]
     attempts = [attempt for item in tasks for attempt in item["attempts"]]
-    latest_scopes = {item["task_id"]: item["scope"] for item in report["review_scopes"]}
+    limitations = {item["task_id"]: item["limitations"] for item in report["review_limitations"]}
     task_ids = {item["task"]["id"] for item in tasks}
     transitions = [
         event["payload"]
@@ -126,7 +126,6 @@ def review_summary(report):
         "run_status": report["run"]["status"],
         "attempt_status_counts": dict(Counter(item["status"] for item in attempts)),
         "attempts": attempts,
-        "continuations": sum(item == {"from": "completed", "to": "pending"} for item in transitions),
         "retries": sum(item["from"] in {"failed", "interrupted"} and item["to"] == "pending" for item in transitions),
         "required_reviews_completed": report["gate"]["conditions"]["required_reviews_completed"],
         "tasks": [
@@ -134,13 +133,11 @@ def review_summary(report):
                 "task_id": item["task"]["id"],
                 "role": item["task"]["role"],
                 "status": item["task"]["status"],
-                "scope": latest_scopes.get(item["task"]["id"]),
+                "limitations": limitations.get(item["task"]["id"]),
             }
             for item in tasks
         ],
         "accepted_findings": len(report["findings"]),
-        "tool_returns": report["review_tool_access"],
-        "coverage_audit": report["review_coverage_audit"],
         "image_views_verified": None,
         "scientific_correctness": "not_evaluated",
         "cost_usd": report["run"]["estimated_cost_usd"],

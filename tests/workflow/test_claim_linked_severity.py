@@ -9,12 +9,6 @@ from scriptorium.service import ScriptoriumService
 from ._support import PdfBuildingManuscriptManager, claim, make_repository, review_finding, submit
 
 _PAGE = {"source_path": "manuscript.pdf", "page": 1}
-_PARTIAL = {
-    "completion": "partial",
-    "checked": [{"source_path": "main.tex", "start_line": 1, "end_line": 4}],
-    "outstanding": [_PAGE],
-    "limitations": ["The rendered page remains unchecked."],
-}
 
 
 def _check(claim_index=0, finding_indices=()):
@@ -41,15 +35,15 @@ def _verdict(recommendation):
     return {"recommendation": recommendation, "decisive_questions": ["Is the main result sentence readable?"]}
 
 
-def _output(findings, recommendation, *, checks=None, inventory=None, scope=None):
-    output = {
+def _output(findings, recommendation, *, checks=None, inventory=None):
+    return {
         "summary": "Checked the reported result.",
         "findings": findings,
+        "limitations": [],
         "claim_checks": checks if checks is not None else [_check(finding_indices=range(len(findings)))],
         "claim_inventory": inventory if inventory is not None else [_claim()],
         "verdict": _verdict(recommendation),
     }
-    return output if scope is None else {**output, "scope": scope}
 
 
 def _issues(receipt):
@@ -64,7 +58,7 @@ def test_new_substantive_review_requires_indexed_checks_and_reports_the_verdict_
         assert "verdict" in review["schema"]["required"]
         assert "Decide the verdict before listing findings" in review["prompt"]
         finding = review_finding(review)
-        restated = _output([finding], "major_revision", scope={**_PARTIAL, "completion": "unknown"})
+        restated = _output([finding], "major_revision")
         restated["claim_checks"][0] |= {"claim": "The result is clear.", "claim_anchor": _PAGE}
         # Submitted directly: the shared helper would rewrite a restated check into the indexed shape.
         rejected = asyncio.run(service.submit_task(review["attempt"].id, review["input_digest"], json.dumps(restated)))
@@ -125,41 +119,6 @@ def test_blocker_finding_needs_a_check_of_a_headline_claim(tmp_path):
         assert "a blocker finding needs a headline claim" in str(_issues(receipt))
 
 
-def test_continuation_verdict_counts_recorded_findings_and_carries_unchecked_claims(tmp_path):
-    repo = make_repository(tmp_path, roles=("substantive_review",))
-    with ScriptoriumService(repo, manuscript_manager=PdfBuildingManuscriptManager(repo)) as service:
-        run = asyncio.run(service.start_run("HEAD", "quick"))["run"]
-        first = claim(service, run.id, AgentRole.SUBSTANTIVE_REVIEW)
-        open_claim = _claim("The result generalizes.", reason="Not reached yet.")
-        partial = _output([review_finding(first)], "major_revision", inventory=[_claim(), open_claim], scope=_PARTIAL)
-        assert submit(service, first, partial)["attempt"].status == AttemptStatus.COMPLETED
-        asyncio.run(service.continue_review(run.id, first["task"].id))
-        second = claim(service, run.id, AgentRole.SUBSTANTIVE_REVIEW)
-        assert '"verdict":{"decisive_questions":' in second["prompt"]
-        resumed = {key: value for key, value in open_claim.items() if key != "not_checked_reason"}
-        # Accepting would contradict the major finding recorded by the accepted partial attempt.
-        accepted = submit(service, second, _output([], "accept", inventory=[resumed]))
-        assert [issue["code"] for issue in _issues(accepted)] == ["verdict.inconsistent"]
-        asyncio.run(service.retry_task(run.id, second["task"].id))
-        minor = claim(service, run.id, AgentRole.SUBSTANTIVE_REVIEW, session="minor")
-        understated = submit(service, minor, _output([], "minor_revision", inventory=[resumed]))
-        assert [issue["code"] for issue in _issues(understated)] == ["verdict.inconsistent"]
-        asyncio.run(service.retry_task(run.id, second["task"].id))
-        third = claim(service, run.id, AgentRole.SUBSTANTIVE_REVIEW, session="third")
-        dropped = submit(service, third, _output([], "major_revision", inventory=[_claim("The result is new.")]))
-        assert [issue["code"] for issue in _issues(dropped)] == ["claim_inventory.unchecked_claim_dropped"]
-        asyncio.run(service.retry_task(run.id, second["task"].id))
-        fourth = claim(service, run.id, AgentRole.SUBSTANTIVE_REVIEW, session="fourth")
-        receipt = submit(service, fourth, _output([], "major_revision", inventory=[resumed]))
-        assert receipt["attempt"].status == AttemptStatus.COMPLETED
-        assert receipt["run_status"] == RunStatus.AWAITING_DECISION
-        report = service.render_report(run.id, "json")
-        assert [entry["verdict"]["recommendation"] for entry in report["review_claim_checks"]] == [
-            "major_revision",
-            "major_revision",
-        ]
-
-
 @pytest.mark.parametrize("role", ["copyedit", "consistency", "figure_review"])
 def test_other_review_roles_must_name_the_affected_claim_at_moderate_or_above(tmp_path, role):
     repo = make_repository(tmp_path, roles=(role,))
@@ -177,7 +136,7 @@ def test_other_review_roles_must_name_the_affected_claim_at_moderate_or_above(tm
         assert receipt["attempt"].status == AttemptStatus.COMPLETED
 
 
-def test_continuation_verdict_counts_its_own_findings_deduplicated_into_another_task(tmp_path):
+def test_verdict_counts_its_own_findings_deduplicated_into_another_task(tmp_path):
     repo = make_repository(tmp_path, roles=("substantive_review", "copyedit"))
     with ScriptoriumService(repo, manuscript_manager=PdfBuildingManuscriptManager(repo)) as service:
         run = asyncio.run(service.start_run("HEAD", "quick"))["run"]
@@ -187,17 +146,19 @@ def test_continuation_verdict_counts_its_own_findings_deduplicated_into_another_
         assert receipt["attempt"].status == AttemptStatus.COMPLETED
         first = claim(service, run.id, AgentRole.SUBSTANTIVE_REVIEW)
         same = {key: value for key, value in shared.items() if key != "affected_claim"}
-        partial = _output([same], "major_revision", scope=_PARTIAL)
-        assert submit(service, first, partial)["attempt"].status == AttemptStatus.COMPLETED
+        # Accepting would contradict this submission's major finding, whichever task owns its stored row.
+        accepted = submit(service, first, _output([same], "accept"))
+        assert accepted["attempt"].status == AttemptStatus.FAILED
+        asyncio.run(service.retry_task(run.id, first["task"].id))
+        second = claim(service, run.id, AgentRole.SUBSTANTIVE_REVIEW, session="second")
+        receipt = submit(service, second, _output([same], "major_revision"))
+        assert receipt["attempt"].status == AttemptStatus.COMPLETED
+        assert receipt["run_status"] == RunStatus.AWAITING_DECISION
         # The identical finding keeps the copyedit task's row, yet it is part of this review's accepted output.
         assert [finding.task_id for finding in service.database.list_findings(run.id)] == [copyedit["task"].id]
-        asyncio.run(service.continue_review(run.id, first["task"].id))
-        second = claim(service, run.id, AgentRole.SUBSTANTIVE_REVIEW)
-        receipt = submit(service, second, _output([], "major_revision", inventory=[_claim()]))
-        assert receipt["attempt"].status == AttemptStatus.COMPLETED
 
 
-def test_affected_claim_is_stored_reported_and_carried_into_a_continuation(tmp_path):
+def test_affected_claim_is_stored_and_reported(tmp_path):
     repo = make_repository(tmp_path, roles=("copyedit",))
     with ScriptoriumService(repo, manuscript_manager=PdfBuildingManuscriptManager(repo)) as service:
         run = asyncio.run(service.start_run("HEAD", "quick"))["run"]
@@ -205,8 +166,8 @@ def test_affected_claim_is_stored_reported_and_carried_into_a_continuation(tmp_p
         finding = review_finding(first)
         minor = {**finding, "severity": "minor", "title": "Minor wording"}
         del minor["affected_claim"]
-        partial = {"summary": "Checked the text.", "findings": [finding, minor], "scope": _PARTIAL}
-        assert submit(service, first, partial)["attempt"].status == AttemptStatus.COMPLETED
+        output = {"summary": "Checked the text.", "findings": [finding, minor]}
+        assert submit(service, first, output)["attempt"].status == AttemptStatus.COMPLETED
         stored = {item.title: item for item in service.database.list_findings(run.id)}
         assert stored[finding["title"]].affected_claim == finding["affected_claim"]
         assert stored["Minor wording"].affected_claim is None
@@ -218,26 +179,21 @@ def test_affected_claim_is_stored_reported_and_carried_into_a_continuation(tmp_p
             "Minor wording": None,
         }
         assert f"  - affected claim: {finding['affected_claim']}" in service.render_report(run.id, "markdown")
-        asyncio.run(service.continue_review(run.id, first["task"].id))
-        second = claim(service, run.id, AgentRole.COPYEDIT)
-        assert second["prompt"].count('"affected_claim":') == 1
 
 
 def test_a_duplicate_finding_fills_a_missing_affected_claim_once(tmp_path):
-    repo = make_repository(tmp_path, roles=("copyedit",))
+    repo = make_repository(tmp_path, roles=("copyedit", "consistency"))
     with ScriptoriumService(repo, manuscript_manager=PdfBuildingManuscriptManager(repo)) as service:
         run = asyncio.run(service.start_run("HEAD", "quick"))["run"]
         first = claim(service, run.id, AgentRole.COPYEDIT)
         minor = {**review_finding(first), "severity": "minor", "title": "Minor wording"}
         del minor["affected_claim"]
-        submit(service, first, {"summary": "Checked the text.", "findings": [minor], "scope": _PARTIAL})
+        submit(service, first, {"summary": "Checked the text.", "findings": [minor]})
         (original,) = service.database.list_findings(run.id)
         assert original.affected_claim is None
-        asyncio.run(service.continue_review(run.id, first["task"].id))
-        second = claim(service, run.id, AgentRole.COPYEDIT)
+        second = claim(service, run.id, AgentRole.CONSISTENCY)
         named = {**minor, "affected_claim": "The headline accuracy claim."}
-        complete = {"completion": "complete", "checked": [_PAGE], "outstanding": [], "limitations": []}
-        submit(service, second, {"summary": "Checked the page.", "findings": [named], "scope": complete})
+        submit(service, second, {"summary": "Checked the page.", "findings": [named]})
 
         (filled,) = service.database.list_findings(run.id)
         assert (filled.id, filled.fingerprint) == (original.id, original.fingerprint)

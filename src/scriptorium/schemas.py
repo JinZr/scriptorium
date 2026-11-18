@@ -6,8 +6,7 @@ import re
 import sys
 from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
-from pydantic_core import PydanticCustomError
+from pydantic import AfterValidator, BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from .domain import ReviewStage, VenueFamily, digest_json
 
@@ -423,85 +422,26 @@ class ClaimedFinding(RatedFinding):
         return self
 
 
-def _json_kind(value: Any) -> str:
-    if value is None:
-        return "null"
-    if isinstance(value, bool):
-        return "a boolean"
-    if isinstance(value, (int, float, Decimal)):
-        return "a number"
-    return {str: "a string", list: "an array"}.get(type(value), type(value).__name__)
+def _items_are_not_blank(value: list[str]) -> list[str]:
+    if any(not item.strip() for item in value):
+        raise ValueError("items must not be blank")
+    return value
 
 
-class ReviewScopeArea(StrictModel):
-    source_path: str = Field(min_length=1)
-    start_line: int | None = Field(default=None, ge=1, strict=True)
-    end_line: int | None = Field(default=None, ge=1, strict=True)
-    page: int | None = Field(default=None, ge=1, strict=True)
-
-    @field_validator("start_line", "end_line", "page", mode="before")
-    @classmethod
-    def accept_integral_number(cls, value: Any) -> Any:
-        if isinstance(value, Decimal):
-            if value.is_finite() and 1 <= value <= sys.maxsize and value == value.to_integral_value():
-                return int(value)
-            return value
-        if isinstance(value, float) and 1 <= value <= sys.maxsize and value.is_integer():
-            return int(value)
-        return value
-
-    @model_validator(mode="before")
-    @classmethod
-    def validate_field_presence(cls, value: Any) -> Any:
-        if isinstance(value, cls):
-            return value
-        if not isinstance(value, dict):
-            raise PydanticCustomError(
-                "scope_area_type",
-                "each scope.checked and scope.outstanding entry must be an object, not {kind}: give source_path "
-                "with optional start_line and end_line together, or source_path manuscript.pdf with page",
-                {"kind": _json_kind(value)},
-            )
-        if value.get("source_path") == "manuscript.pdf":
-            if {"start_line", "end_line"}.intersection(value):
-                raise ValueError("compiled PDF scope cannot include line fields")
-        else:
-            if "page" in value:
-                raise ValueError("source scope cannot include a page field")
-            lines = {"start_line", "end_line"}.intersection(value)
-            if lines and (len(lines) != 2 or any(value[line] is None for line in lines)):
-                raise ValueError("source scope requires both non-null line endpoints or neither")
-        return value
-
-    @model_validator(mode="after")
-    def validate_location(self) -> "ReviewScopeArea":
-        if self.source_path == "manuscript.pdf":
-            if self.page is None or self.start_line is not None or self.end_line is not None:
-                raise ValueError("compiled PDF scope requires only a page")
-        elif self.page is not None or (self.start_line is None) != (self.end_line is None):
-            raise ValueError("source scope requires both line endpoints or neither")
-        elif self.start_line is not None and self.end_line < self.start_line:
-            raise ValueError("end_line cannot precede start_line")
-        return self
-
-
-class ReviewScope(StrictModel):
-    completion: Literal["complete", "partial", "unknown"]
-    checked: list[ReviewScopeArea]
-    outstanding: list[ReviewScopeArea]
-    limitations: list[str]
-
-    @model_validator(mode="after")
-    def validate_completion(self) -> "ReviewScope":
-        if self.completion == "complete" and self.outstanding:
-            raise ValueError("complete scope cannot include outstanding areas")
-        return self
+Limitations = Annotated[
+    list[Annotated[str, Field(min_length=1)]],
+    AfterValidator(_items_are_not_blank),
+    Field(
+        description="Relevant material the reviewer could not check or could not read, including material the "
+        "manuscript mentions that is absent from the frozen sources; empty when there is none."
+    ),
+]
 
 
 class ReviewOutput(StrictModel):
     summary: str = Field(min_length=1)
     findings: list[ClaimedFinding]
-    scope: ReviewScope
+    limitations: Limitations
 
 
 def _integral_indices(value: Any) -> Any:
@@ -631,7 +571,7 @@ class ScientificReviewOutput(StrictModel):
 
     summary: str = Field(min_length=1)
     findings: list[RatedFinding]
-    scope: ReviewScope
+    limitations: Limitations
     claim_checks: list[LinkedClaimCheck]
     claim_inventory: list[LinkedClaim] = Field(
         description="The central claims identified in the manuscript; claim checks refer to them by claim_index."
@@ -640,8 +580,8 @@ class ScientificReviewOutput(StrictModel):
 
     @model_validator(mode="after")
     def validate_claim_checks(self) -> "ScientificReviewOutput":
-        if self.scope.completion == "complete" and not self.claim_checks:
-            raise ValueError("a complete substantive review requires claim checks")
+        if not self.claim_checks:
+            raise ValueError("a substantive review requires at least one claim check")
         linked: set[int] = set()
         for check in self.claim_checks:
             if (check.assessment == "finding") != bool(check.finding_indices):
@@ -663,11 +603,14 @@ class ScientificReviewOutput(StrictModel):
                 raise ValueError(
                     "an inventoried claim has a not_checked_reason exactly when no claim check names it by claim_index"
                 )
-        if self.scope.completion == "complete" and any(
+        if any(
             entry.prominence == "headline" and index not in referenced
             for index, entry in enumerate(self.claim_inventory)
         ):
-            raise ValueError("a complete substantive review must check every inventoried headline claim")
+            raise ValueError(
+                'a substantive review must check every inventoried headline claim; use question_answer "not_checkable" '
+                "for one the frozen bundle cannot decide"
+            )
         headline_findings = {
             finding_index
             for check in self.claim_checks
@@ -778,37 +721,6 @@ def output_schema(
         )
         evidence["properties"]["quoted_text"]["description"] = contract.source_line.matching_rule
         evidence["oneOf"] = _evidence_anchor_schema(contract)
-        if kind in {"review", "scientific_review"}:
-            schema["$defs"]["ReviewScopeArea"]["oneOf"] = [
-                {
-                    "title": "Compiled PDF page",
-                    "required": ["page"],
-                    "properties": {
-                        "source_path": {"const": "manuscript.pdf"},
-                        "page": {"type": "integer", "minimum": 1},
-                    },
-                    "not": {"anyOf": [{"required": ["start_line"]}, {"required": ["end_line"]}]},
-                },
-                {
-                    "title": "Source path or line range",
-                    "properties": {
-                        "source_path": {"not": {"const": "manuscript.pdf"}},
-                        "start_line": {"type": "integer", "minimum": 1},
-                        "end_line": {"type": "integer", "minimum": 1},
-                    },
-                    "not": {"required": ["page"]},
-                    "oneOf": [
-                        {"required": ["start_line", "end_line"]},
-                        {"not": {"anyOf": [{"required": ["start_line"]}, {"required": ["end_line"]}]}},
-                    ],
-                },
-            ]
-            schema["$defs"]["ReviewScope"]["allOf"] = [
-                {
-                    "if": {"properties": {"completion": {"const": "complete"}}, "required": ["completion"]},
-                    "then": {"properties": {"outstanding": {"maxItems": 0}}},
-                }
-            ]
     elif kind == "revision":
         properties = schema["$defs"]["ExactEdit"]["properties"]
         properties["path"]["description"] = contract.revision_edit.source_path_rule

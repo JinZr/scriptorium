@@ -14,7 +14,6 @@ from scriptorium.schemas import (
 )
 
 _PAGE = {"source_path": "manuscript.pdf", "page": 1}
-_SCOPE = {"completion": "complete", "checked": [], "outstanding": [], "limitations": []}
 
 
 def _finding(severity="moderate", **changes):
@@ -52,13 +51,13 @@ def _claim(claim="The method is accurate.", prominence="headline", reason=None):
     return entry if reason is None else {**entry, "not_checked_reason": reason}
 
 
-def _output(*, findings=(), checks=None, inventory=None, recommendation=None, completion="complete"):
+def _output(*, findings=(), checks=None, inventory=None, recommendation=None):
     findings = list(findings)
     high = any(finding["severity"] in {"blocker", "major"} for finding in findings)
     return {
         "summary": "Checked the central claim.",
         "findings": findings,
-        "scope": {**_SCOPE, "completion": completion},
+        "limitations": [],
         "claim_checks": checks if checks is not None else [_check(finding_indices=range(len(findings)))],
         "claim_inventory": inventory if inventory is not None else [_claim()],
         "verdict": {
@@ -108,12 +107,13 @@ def test_linked_output_accepts_indexed_checks_and_explained_unchecked_claims() -
 @pytest.mark.parametrize(
     ("changes", "message"),
     [
+        ({"checks": []}, "requires at least one claim check"),
         ({"checks": [_check(claim_index=1)]}, "unknown claim_index"),
         ({"inventory": [_claim(reason="Also unchecked.")]}, "not_checked_reason exactly when no claim check"),
         ({"inventory": [_claim(), _claim("It transfers.", "supporting")]}, "not_checked_reason exactly when"),
         (
             {"inventory": [_claim(), _claim("It scales.", reason="Not reached.")]},
-            "must check every inventoried headline claim",
+            'must check every inventoried headline claim; use question_answer "not_checkable"',
         ),
         (
             {

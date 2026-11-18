@@ -64,9 +64,6 @@ class FakeService:
     ) -> dict:
         return self._record_run("retry_task", run_id, task_id, abandon_attempt_id, reason)
 
-    async def continue_review(self, run_id: str, task_id: str) -> dict:
-        return self._record_run("continue_review", run_id, task_id)
-
     def cancel_run(self, run_id: str, reason: str) -> dict:
         return self._record_run("cancel_run", run_id, reason)
 

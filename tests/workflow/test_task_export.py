@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 
 from scriptorium.artifacts import ArtifactStore
-from scriptorium.domain import AgentRole, Event
+from scriptorium.domain import AgentRole
 from scriptorium.errors import ConfigurationError, InfrastructureError, StateError
 from scriptorium.service import ScriptoriumService
 from scriptorium.tool_output import MAX_TOOL_RESPONSE_BYTES, bound_export, fits_response
@@ -48,56 +48,6 @@ def test_export_matches_the_frozen_bundle_and_is_recorded_for_the_attempt(export
     assert event.payload["bundle_digest"] == context["attempt"].bundle_digest
     assert response["files_digest"] and "only task command" in response["note"]
     assert fits_response(response)
-
-
-@pytest.mark.parametrize("export", [False, True])
-def test_audit_reports_declared_lines_as_read_exported_or_without_access(exporting, export):
-    service, run, context, out = exporting
-    attempt_id = context["attempt"].id
-    if export:
-        service.export_task(attempt_id, out)
-    service.read_task(attempt_id, "main.tex", 1, 1, 0, 8000)
-    scope = {
-        "completion": "complete",
-        "checked": [{"source_path": "main.tex", "start_line": 1, "end_line": 4}],
-        "outstanding": [],
-        "limitations": [],
-    }
-    submit(service, context, {"summary": "Checked.", "findings": [], "scope": scope})
-    report = service.render_report(run.id, "json")
-    audit = report["review_coverage_audit"][0]
-    unread = [{"source_path": "main.tex", "start_line": 2, "end_line": 4}]
-    assert audit["read_lines"] == [{"source_path": "main.tex", "ranges": [{"start_line": 1, "end_line": 1}]}]
-    assert audit["declared_without_task_read"] == unread
-    assert audit["exported"] == (unread if export else [])
-    assert audit["declared_without_access"] == ([] if export else unread)
-    assert audit["exported_sources"] == (["main.tex"] if export else [])
-    assert audit["exports"] == report["review_tool_access"][0]["exports"] == int(export)
-    markdown = service.render_report(run.id, "markdown")
-    assert ("declared checked exported but not returned by task read: `main.tex:2-4`" in markdown) == export
-    assert ("declared checked without task read return: `main.tex:2-4`" in markdown) != export
-    assert f"export {int(export)}" in markdown
-
-
-def test_an_export_of_another_digest_does_not_count_for_the_source(exporting):
-    service, run, context, out = exporting
-    sources = service.armarius._bundle_for_run(run).anchor_map.sources
-    read_paths = {item.read_path: item for item in sources}
-
-    def export_event(digest):
-        files = [{"path": "sources/main.tex", "digest": digest}]
-        return Event(
-            run_id=run.id,
-            event_type="tool.export",
-            entity_type="attempt",
-            entity_id=context["attempt"].id,
-            payload={"directory": str(out), "bundle_digest": "b", "files": files},
-        )
-
-    stale = ScriptoriumService._exported_sources([export_event("0" * 64)], read_paths)
-    assert stale == (1, set())
-    current = ScriptoriumService._exported_sources([export_event(sources[0].source_digest)], read_paths)
-    assert current == (1, {"main.tex"})
 
 
 def test_a_failure_part_way_leaves_no_files_and_no_event(exporting, monkeypatch):

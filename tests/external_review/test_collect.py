@@ -13,7 +13,7 @@ from scriptorium.service import ScriptoriumService
 from ._support import project, start, submit
 
 
-def test_collect_preserves_prepared_inputs_failures_continuations_and_unknowns(tmp_path):
+def test_collect_preserves_prepared_inputs_failures_retries_and_unknowns(tmp_path):
     root = project(tmp_path)
     run_id, task_id = start(root)
     baseline = collect(root, run_id, tmp_path / "before", "paper-a", "trial-a", host_computation="denied")
@@ -23,9 +23,7 @@ def test_collect_preserves_prepared_inputs_failures_continuations_and_unknowns(t
         rejected = asyncio.run(service.submit_task(context["attempt"].id, context["input_digest"], "{broken"))
         assert rejected["attempt"].status.value == "failed"
         asyncio.run(service.retry_task(run_id, task_id))
-        submit(service, task_id, completion="partial")
-        asyncio.run(service.continue_review(run_id, task_id))
-        submit(service, task_id)
+        submit(service, task_id, limitations=["External data unavailable."])
         before = service.render_report(run_id, "json")
     artifacts = file_records(root / ".scriptorium/artifacts")
     host = tmp_path / "host.json"
@@ -33,8 +31,10 @@ def test_collect_preserves_prepared_inputs_failures_continuations_and_unknowns(t
     output = collect(root, run_id, tmp_path / "after", "paper-a", "trial-a", baseline, [host], "denied")
     verify_seal(output)
     summary = read_json(output / "summary.json")
-    assert summary["attempt_status_counts"] == {"failed": 1, "completed": 2}
-    assert summary["continuations"] == summary["retries"] == 1
+    assert summary["attempt_status_counts"] == {"failed": 1, "completed": 1}
+    assert summary["retries"] == 1
+    assert summary["tasks"][0]["limitations"] == ["External data unavailable."]
+    assert {"continuations", "tool_returns", "coverage_audit"}.isdisjoint(summary)
     assert summary["required_reviews_completed"]
     assert summary["accepted_findings"] == 1
     assert summary["cost_usd"] is None
@@ -56,17 +56,19 @@ def test_collect_preserves_prepared_inputs_failures_continuations_and_unknowns(t
     assert file_records(root / ".scriptorium/artifacts") == artifacts
 
 
-def test_collector_keeps_partial_and_failed_trials_incomplete(tmp_path):
+def test_collector_keeps_failed_trials_incomplete(tmp_path):
     root = project(tmp_path)
     run_id, task_id = start(root)
     with ScriptoriumService(root) as service:
-        submit(service, task_id, completion="partial")
-    output = collect(root, run_id, tmp_path / "partial", "case", "trial")
+        context = service.claim_task(task_id, "codex", "model-a", "low", "review-a", "host")
+        rejected = asyncio.run(service.submit_task(context["attempt"].id, context["input_digest"], "{broken"))
+        assert rejected["attempt"].status.value == "failed"
+    output = collect(root, run_id, tmp_path / "failed", "case", "trial")
     summary = read_json(output / "summary.json")
     assert not summary["required_reviews_completed"]
     assert summary["run_status"] == "reviewing"
-    assert summary["tasks"][0]["scope"]["completion"] == "partial"
-    assert summary["accepted_findings"] == 1
+    assert summary["tasks"][0]["limitations"] is None
+    assert summary["accepted_findings"] == 0
     assert not read_json(output / "collection.json")["prepared_before_review"]
 
 

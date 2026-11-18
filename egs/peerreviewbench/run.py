@@ -74,7 +74,6 @@ BENCHMARK_SOURCE_FILES = (
     "skills/scriptorium-review/SKILL.md",
     "skills/scriptorium-review/reference/anchors.md",
     "skills/scriptorium-review/reference/fragments.md",
-    "skills/scriptorium-review/reference/scope.md",
 )
 
 

@@ -45,7 +45,7 @@ def start(root, revision="HEAD"):
     return run_id, task.id
 
 
-def answer(context, *, completion="complete", findings=True):
+def answer(context, *, findings=True, limitations=()):
     source = next(item for item in context["source_map"]["sources"] if item["source_path"] == "main.tex")
     return {
         "summary": "Reviewed the available manuscript.",
@@ -75,16 +75,11 @@ def answer(context, *, completion="complete", findings=True):
             if findings
             else []
         ),
-        "scope": {
-            "completion": completion,
-            "checked": [{"source_path": "main.tex", "start_line": 1, "end_line": 4}],
-            "outstanding": [],
-            "limitations": ["External data unavailable."] if completion == "partial" else [],
-        },
+        "limitations": list(limitations),
     }
 
 
-def submit(service, task_id, *, model="model-a", session="review-a", completion="complete", findings=True):
+def submit(service, task_id, *, model="model-a", session="review-a", findings=True, limitations=()):
     context = service.claim_task(task_id, "codex", model, "low", session, "host")
     service.read_task(context["attempt"].id, "sources/main.tex", 1, 100, 0, 8000)
     service.page_task(context["attempt"].id, 1)
@@ -92,7 +87,7 @@ def submit(service, task_id, *, model="model-a", session="review-a", completion=
         service.submit_task(
             context["attempt"].id,
             context["input_digest"],
-            json.dumps(answer(context, completion=completion, findings=findings)),
+            json.dumps(answer(context, findings=findings, limitations=limitations)),
         )
     )
     assert receipt["attempt"].status.value == "completed"

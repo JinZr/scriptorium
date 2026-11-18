@@ -83,8 +83,6 @@ def test_filters_combine_and_continuations_keep_them(navigator):
     events = [e.payload for e in service.database.list_events(run.id) if e.event_type == "tool.nav"]
     assert events[0]["entries"] == [{"command": "ref", "source_path": "main.tex", "start_line": 4, "end_line": 4}]
     assert events[-1]["path"] == "sources/results.tex"
-    report = service.render_report(run.id, "json")
-    assert report["review_tool_access"][0]["returns"]["nav"] == len(events)
 
 
 def test_repeated_command_filters_collapse_in_continuations(navigator):
