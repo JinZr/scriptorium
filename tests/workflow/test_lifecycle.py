@@ -48,7 +48,7 @@ def test_full_workflow_preserves_worktree_until_approved_patch_is_applied(tmp_pa
         run = asyncio.run(service.start_run("HEAD", "quick"))["run"]
         patch, finding_id = prepare_verification(service, run.id)
         assert (repo / "main.tex").read_text() == MANUSCRIPT
-        assert service.database.get_run(run.id).status == RunStatus.VERIFYING
+        assert service.store.get_run(run.id).status == RunStatus.VERIFYING
         assert not service.evaluate_gate(run.id)["passed"]
 
         verifier = claim(service, run.id, AgentRole.VERIFICATION, session="independent-session")
@@ -94,10 +94,10 @@ def test_task_list_handoffs_patch_approval_and_replays_verification(tmp_path):
                 }
             ),
         )
-        assert service.database.get_run(run.id).status == RunStatus.VERIFYING
+        assert service.store.get_run(run.id).status == RunStatus.VERIFYING
         assert service.list_tasks(run.id)["next_actions"] == [{"command": "run resume", "run_id": run.id}]
         asyncio.run(service.resume_run(run.id))
-        assert service.database.get_run(run.id).status == RunStatus.READY_TO_APPLY
+        assert service.store.get_run(run.id).status == RunStatus.READY_TO_APPLY
         assert service.list_tasks(run.id)["next_actions"] == [
             {"command": "patch apply", "patch_id": patch.id, "requires_human_decision": True}
         ]
@@ -134,7 +134,7 @@ def test_task_list_replays_accepted_revision(tmp_path):
                 }
             ),
         )
-        assert service.database.get_run(run.id).status == RunStatus.REVISING
+        assert service.store.get_run(run.id).status == RunStatus.REVISING
         assert service.list_tasks(run.id)["next_actions"] == [{"command": "run resume", "run_id": run.id}]
         asyncio.run(service.resume_run(run.id))
-        assert service.database.get_run(run.id).status == RunStatus.AWAITING_PATCH_APPROVAL
+        assert service.store.get_run(run.id).status == RunStatus.AWAITING_PATCH_APPROVAL

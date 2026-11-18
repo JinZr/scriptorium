@@ -623,7 +623,7 @@ def _load_resume_manifest(run_dir: Path) -> dict[str, Any]:
 def _recover_run_id(service: ScriptoriumService, known_run_id: str | None) -> str | None:
     if known_run_id:
         return known_run_id
-    runs = service.database.list_runs()
+    runs = service.store.list_runs()
     if len(runs) == 1:
         return runs[0].id
     if len(runs) > 1:
@@ -796,7 +796,7 @@ def validate_completed_scriptorium_state(
                 digest = attempt.get(field)
                 if digest is None:
                     continue
-                service.database.get_artifact(digest)
+                service.store.get_artifact(digest)
                 if not service.artifacts.verify(digest):
                     raise BenchmarkError(f"paper{entry['paper_id']} artifact failed verification: {digest}")
 

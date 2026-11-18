@@ -233,8 +233,8 @@ def test_doctor_rebuilds_without_persisting_workflow_state(
         before_artifacts = sorted(path.relative_to(service.state_dir) for path in service.artifacts.root.rglob("*"))
         first = service.doctor(profile="quick")
         second = service.doctor(profile="quick")
-        runs = service.database.list_runs()
-        run_entries = list(service.database.runs_dir.iterdir())
+        runs = service.store.list_runs()
+        run_entries = list(service.store.runs_dir.iterdir())
         after_artifacts = sorted(path.relative_to(service.state_dir) for path in service.artifacts.root.rglob("*"))
 
     assert first["ok"] is True
@@ -278,7 +278,7 @@ def test_doctor_reports_compiler_source_omission(tmp_path, monkeypatch):
     prepare_doctor(monkeypatch)
     with ScriptoriumService(repo, manuscript_manager=UncoveredBuildManager(repo)) as service:
         result = service.doctor(profile="quick")
-        assert service.database.list_runs() == []
+        assert service.store.list_runs() == []
     assert result["exit_code"] == 3
     check = next(item for item in result["checks"] if item["name"] == "manuscript_compile")
     assert not check["ok"]

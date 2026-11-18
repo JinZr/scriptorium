@@ -45,7 +45,7 @@ def make_repository(tmp_path, roles=("substantive_review", "copyedit")):
 
 def claim(service, run_id, role, *, session=None, source="host"):
     role = AgentRole(role)
-    task = next(task for task in service.database.list_tasks(run_id) if task.role == role)
+    task = next(task for task in service.store.list_tasks(run_id) if task.role == role)
     return service.claim_task(task.id, "codex", "test-model", "max", session or f"session-{role.value}", source)
 
 
@@ -155,7 +155,7 @@ def review_finding(claim_data):
 
 
 def complete_reviews(service, run_id, *, with_finding=True):
-    for task in service.database.list_tasks(run_id):
+    for task in service.store.list_tasks(run_id):
         if task.stage != "review" or task.status.value == "completed":
             continue
         review = claim(service, run_id, task.role)
@@ -183,7 +183,7 @@ def prepare_patch(service, run_id, *, after="The result is clear."):
     }
     receipt = submit(service, revision, {"summary": "Corrected the sentence.", "edits": [edit]})
     assert receipt["attempt"].status.value == "completed"
-    return service.database.list_patches(run_id)[-1], finding_id
+    return service.store.list_patches(run_id)[-1], finding_id
 
 
 def prepare_verification(service, run_id):

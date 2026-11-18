@@ -75,7 +75,7 @@ def test_decision_stats_count_each_finding_once_by_its_latest_decision(tmp_path)
         service.decide_finding(ids["f"], "waive", "House style differs.")
         service.decide_finding(ids["g"], "reject", "Already fixed upstream.")
         # e and h stay pending.
-        assert len(service.database.list_decisions("finding", ids["b"])) == 2
+        assert len(service.store.list_decisions("finding", ids["b"])) == 2
         stats = service.render_report(run.id, "json")["decision_stats"]
 
         assert stats["totals"] == {**_counts(confirmed=2, rejected=2, waived=2, pending=2), "total": 8}
@@ -170,9 +170,9 @@ def test_exports_agree_when_findings_were_read_before_a_decision(tmp_path, monke
         service.decide_finding(ids["a"], "reject", "Early view.")
         service.decide_finding(ids["a"], "waive", "Later view.")
         service.decide_finding(ids["b"], "confirm", "Holds.")
-        listed = service.database.list_findings(run.id)
+        listed = service.store.list_findings(run.id)
         stale = [dataclasses.replace(finding, status=FindingStatus.PENDING) for finding in listed]
-        monkeypatch.setattr(service.database, "list_findings", lambda _run_id: stale)
+        monkeypatch.setattr(service.store, "list_findings", lambda _run_id: stale)
         report = service.render_report(run.id, "json")
         statuses = {item["finding"]["id"]: item["finding"]["status"] for item in report["findings"]}
         assert statuses[ids["a"]] == "waived"
@@ -181,4 +181,4 @@ def test_exports_agree_when_findings_were_read_before_a_decision(tmp_path, monke
         assert report["decision_stats"]["totals"] == {**_counts(confirmed=1, waived=1, pending=6), "total": 8}
         assert [entry["decision"] for entry in report["decision_stats"]["reasons"]] == ["waived"]
         assert f"`{ids['a']}` — blocker / waived:" in service.render_report(run.id, "markdown")
-        assert service.database.get_finding(ids["a"]).status == FindingStatus.WAIVED
+        assert service.store.get_finding(ids["a"]).status == FindingStatus.WAIVED

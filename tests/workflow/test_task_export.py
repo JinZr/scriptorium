@@ -33,7 +33,7 @@ def exporting(tmp_path):
 
 
 def _exports(service, run):
-    return [event for event in service.database.list_events(run.id) if event.event_type == "tool.export"]
+    return [event for event in service.store.list_events(run.id) if event.event_type == "tool.export"]
 
 
 def _files(root: Path) -> set[str]:
@@ -51,7 +51,7 @@ def test_export_writes_the_bundle_and_task_inputs_and_records_them(exporting):
     assert response["total_bytes"] == sum((out / name).stat().st_size for name in BUNDLE | TASK_INPUTS)
     for name in BUNDLE:
         assert (out / name).read_bytes() == (Path(context["bundle_path"]) / name).read_bytes()
-    example_digest = service.database.get_external_task(context["task"].id)["example_digest"]
+    example_digest = service.store.get_external_task(context["task"].id)["example_digest"]
     assert response["task_inputs"] == [
         {"path": "task/prompt.md", "digest": attempt.prompt_digest},
         {"path": "task/schema.json", "digest": attempt.schema_digest},
@@ -107,11 +107,11 @@ def test_a_finished_attempt_exports_without_changing_state(exporting, status):
         service.cancel_run(run.id, "Stop the review.")
     else:
         submit(service, context, {"summary": "Done.", "findings": []} if status == "completed" else {})
-    before = (service.database.get_attempt(attempt_id), service.database.get_task(context["task"].id))
+    before = (service.store.get_attempt(attempt_id), service.store.get_task(context["task"].id))
     assert before[0].status.value == status
     response = service.export_task(attempt_id, out)
     assert _files(out) == BUNDLE | TASK_INPUTS and response["file_count"] == len(BUNDLE | TASK_INPUTS)
-    assert (service.database.get_attempt(attempt_id), service.database.get_task(context["task"].id)) == before
+    assert (service.store.get_attempt(attempt_id), service.store.get_task(context["task"].id)) == before
     assert len(_exports(service, run)) == 1
 
 

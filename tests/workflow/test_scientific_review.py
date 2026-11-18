@@ -44,7 +44,7 @@ def test_substantive_review_records_anchored_claim_checks_and_links_findings(tmp
         )
         assert receipt["attempt"].status == AttemptStatus.COMPLETED
         assert receipt["run_status"] == RunStatus.AWAITING_DECISION
-        assert len(service.database.list_findings(run.id)) == 1
+        assert len(service.store.list_findings(run.id)) == 1
         report = service.render_report(run.id, "json")
         assert report["review_claim_checks"][0]["claim_checks"][0]["finding_indices"] == [0]
         assert report["review_claim_checks"][0]["submitted_findings"][0]["title"] == finding["title"]
@@ -84,7 +84,7 @@ def test_unresolved_external_evidence_is_a_limitation_of_a_completed_review(tmp_
         report = service.render_report(run.id, "json")
         assert report["review_claim_checks"][0]["claim_checks"][0]["assessment"] == "unresolved"
         assert report["review_limitations"][0]["limitations"] == [limitation]
-        assert service.database.list_findings(run.id) == []
+        assert service.store.list_findings(run.id) == []
         assert not service.evaluate_gate(run.id)["passed"]
 
 
@@ -104,7 +104,7 @@ def test_finding_indices_follow_published_integer_schema(tmp_path, index, accept
             },
         )
         assert (receipt["attempt"].status == AttemptStatus.COMPLETED) is accepted
-        assert len(service.database.list_findings(run.id)) == int(accepted)
+        assert len(service.store.list_findings(run.id)) == int(accepted)
 
 
 def test_report_indices_refer_to_attempt_submission_order(tmp_path):
@@ -163,7 +163,7 @@ def test_scientific_review_rejects_missing_or_invalid_checks_without_findings(tm
         )
         assert receipt["attempt"].status == AttemptStatus.FAILED
         assert receipt["validation_report"]["issues"]
-        assert service.database.list_findings(run.id) == []
+        assert service.store.list_findings(run.id) == []
         assert not service.evaluate_gate(run.id)["passed"]
 
 

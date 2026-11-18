@@ -25,7 +25,7 @@ def test_second_start_on_the_same_commit_is_refused_and_names_the_active_run(tmp
         assert first.id in str(caught.value)
         assert f"run status {first.id}" in str(caught.value)
         assert "--allow-duplicate" in str(caught.value)
-        assert [run.id for run in service.database.list_runs()] == [first.id]
+        assert [run.id for run in service.store.list_runs()] == [first.id]
 
 
 def test_allow_duplicate_bypasses_the_guard(tmp_path):
@@ -42,7 +42,7 @@ def test_start_is_permitted_once_the_earlier_run_is_terminal(tmp_path):
     with _service(repo) as service:
         first = asyncio.run(service.start_run("HEAD", "quick"))["run"]
         service.cancel_run(first.id, "Superseded")
-        assert service.database.get_run(first.id).status == RunStatus.CANCELLED
+        assert service.store.get_run(first.id).status == RunStatus.CANCELLED
         second = asyncio.run(service.start_run("HEAD", "quick"))["run"]
         assert second.id != first.id
 
@@ -99,14 +99,14 @@ def test_overlapping_starts_on_one_commit_cannot_both_create_a_run(tmp_path):
     assert isinstance(outcomes["second"], DuplicateRunError)
     assert outcomes["first"].id in str(outcomes["second"])
     with _service(repo) as service:
-        assert [run.id for run in service.database.list_runs()] == [outcomes["first"].id]
+        assert [run.id for run in service.store.list_runs()] == [outcomes["first"].id]
 
 
 def test_a_resumable_failed_run_still_blocks_a_replacement(tmp_path):
     repo = make_repository(tmp_path, roles=("substantive_review",))
     with _service(repo) as service:
         first = asyncio.run(service.start_run("HEAD", "quick"))["run"]
-        service.database.update_run(first.id, RunStatus.FAILED, "host crashed")
+        service.store.update_run(first.id, RunStatus.FAILED, "host crashed")
         with pytest.raises(DuplicateRunError, match=first.id) as caught:
             asyncio.run(service.start_run("HEAD", "quick"))
         assert "resume it" in str(caught.value)

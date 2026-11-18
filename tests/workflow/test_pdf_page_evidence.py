@@ -23,7 +23,7 @@ def test_pdf_page_anchor_uses_frozen_page_identity_without_a_quote(tmp_path):
         receipt = submit(service, review, {"summary": "Inspected the rendered page.", "findings": [finding]})
         assert receipt["attempt"].status == AttemptStatus.COMPLETED
         assert service.list_findings(run.id)[0].evidence[0] == finding["evidence"][0]
-        assert any(event.event_type == "tool.page" for event in service.database.list_events(run.id))
+        assert any(event.event_type == "tool.page" for event in service.store.list_events(run.id))
 
 
 def test_corrupt_frozen_page_cannot_be_used_as_evidence(tmp_path):

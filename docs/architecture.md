@@ -1,59 +1,144 @@
 # Architecture
 
-Scriptorium is a single-user modular monolith. It has no server, queue, or model runtime. Codex, Claude Code, and Antigravity CLI operate the same JSON CLI from their own selected model sessions.
+Scriptorium is a single-user modular monolith: one Python package behind one CLI, with no server, queue, or model
+runtime. This page describes which module owns what, how state is stored, what a run freezes, the evidence
+contract, and the gates. Commands and output rules are in [operations](operations.md).
 
-## Authority and flow
+## Module ownership
 
-- A Git commit and tree digest identify manuscript content. A disposable snapshot is scanned and compiled; uncommitted files are excluded.
-- `manuscript.py` creates the frozen source, navigation, source map, PDF, and page-image bundle. Export and page rendering check each file they use against its frozen digest; result submission validates the complete bundle.
-- `workflow.py` prepares review, revision, and verification tasks. It validates whole structured submissions and advances only after the required prior stage and human decision.
-- `storage.py` owns the per-run state files with their tasks, attempts, decisions, and events. Each run's record is one JSON file, `.scriptorium/runs/RUN_ID/state.json`; a mutation takes that run's file lock, loads the state, and replaces the file with a complete fsynced copy, so readers and crashes see the old state or the new one. `artifacts.py` publishes immutable SHA-256 content and keeps each artifact's metadata record beside it.
-- `service.py` serializes per-run mutations, exports, and page renders under an OS file lock. A task claim persists across CLI processes. `cli.py` provides the shared JSON interface.
+| Module | Owns |
+| --- | --- |
+| `cli.py` | Argument parsing and text or JSON presentation; no business rules |
+| `service.py` | Operations shared by entrypoints, the per-run operation lock, exports, page rendering, reports, the release gate |
+| `workflow.py` | Task preparation, output validation, replay and recovery, stage advancement, approval checks |
+| `storage.py` | `RunStore`: the per-run state files, their locking and atomic replacement, and the rules a relational schema would enforce |
+| `artifacts.py` | Atomic, SHA-256-addressed artifact publication |
+| `manuscript.py` | Git snapshots, LaTeX dependency scanning and builds, bundles, navigation, source anchors, exact edits, patch application |
+| `domain.py` | Entities, enums, invariants, and state transitions |
+| `schemas.py`, `prompts/` | Output schemas, the evidence contract, the severity rubric, the brief model, and role prompts |
+| `config.py` | `scriptorium.toml` loading and `init` |
+| `finding_groups.py`, `decision_stats.py`, `tool_output.py`, `examples.py` | Report grouping, decision counts, compact CLI views, task example outputs |
 
-Explicit `manuscript.supplements` add independent LaTeX entrypoints from the same commit. Each entrypoint's
-dependency closure is scanned separately, preserving its graphics and bibliography context; the bundle freezes
-their union. Builds use separate disposable copies so generated files cannot leak between documents. The main
-PDF and each supplement are concatenated in configured order into the existing `manuscript.pdf` evidence space.
-Both the manifest and source map freeze a document index of entrypoint, first global page and page count. Its
-ranges must partition the review PDF and refer to distinct frozen text sources. Export and page rendering check
-this mapping against the immutable bundle metadata. Revision and verification use the same document configuration
-and rebuild the entire set. Any failed document blocks that stage.
+## State layout
 
-`run start` freezes inputs, compiles the base bundle, and creates review tasks. Task preparation stores a content-addressed file index for the bundle. `task claim` records the external client, model, effort, and session ID on a durable attempt and returns a compact overview with the input digest. When a review task is first prepared, it also gets an illustrative output, built from its frozen schema and a line of a frozen source whose bundle and snapshot copies both match the source digest. The example is frozen only if it passes the task's output model and anchor checks. It is published as an artifact, and its digest is stored in a nullable external-task field, outside the input digest. Revision and verification tasks have no example.
+`.scriptorium/` sits in the manuscript repository, ignored by Git, and holds everything Scriptorium writes:
 
-`task export` is how a reviewer reads a task. For any attempt of the run, it copies the attempt's frozen bundle files (sources at their `read_path`, `manifest.json`, `navigation.json`, `source-map.json`, `manuscript.pdf`) and its task inputs (`task/prompt.md`, `task/schema.json`, and, when frozen, `task/brief.json` and `task/example.json`) into a new or empty host directory. Each file is verified against the bundle index or its recorded artifact digest before it is written, written atomically and read-only, and confined to that directory. A bundle path that would collide with a task input is refused before anything is written, and any later failure removes what the call wrote. A `tool.export` event binds the sorted paths and digests to the attempt. `task page` renders frozen pages for an active attempt and records a `tool.page` event. These events record what the CLI wrote, not what the host read. `run status` holds the run lock while collecting a compact overview and current next actions; `run report --part` holds it while rendering one complete report section. Report reads write no workflow events or artifacts.
+```text
+.scriptorium/
+  runs/RUN_ID/
+    state.json            run, tasks, attempts, findings, decisions, patches, verifications, events
+    state.lock            the store's per-run lock
+    snapshot/             the frozen commit's files
+    bundle/               the frozen review bundle a task reads from
+    build/                disposable LaTeX builds
+    manifest.json         the frozen inputs and the bundle digest
+    patched/PATCH_ID/     the snapshot with a patch applied
+    patches/PATCH_ID.json the patch's edits and changed paths
+    verifications/PATCH_ID/bundle/   the patched bundle the verifier reads
+    page-views/           zoomed page views and text layers, named by digest
+  artifacts/sha256/AB/CDEF...        immutable content, with CDEF....json metadata beside it
+  locks/RUN_ID.lock       the service's per-run operation lock
+```
 
-`task submit` stores the raw result, validates it against the frozen schema and evidence map, and records a complete or failed attempt. `task submit --check` runs the same validation under the run lock without storing output, a validation report or attempt status; it appends only a `tool.submit_check` event. An accepted result is replayed into findings, a candidate patch, or verification. Repeating a completed submission returns the same receipt; a different or superseded result is rejected.
+A run exists exactly when its `state.json` exists. Decisions and events are append-only within it. The artifact
+store keeps prompts, schemas, briefs, bundle indexes, submitted outputs, validation reports, examples, diffs, and
+build evidence under their SHA-256 digest.
 
-A CLI process ending does not interrupt an external attempt. Only explicit abandonment, retry, or cancellation changes that claim. An invalid result creates a durable validation report; retry must be requested explicitly. Each attempt binds its own prompt, schema, and bundle digest, including correction prompts. A later finding waiver interrupts an active revision or verification task whose frozen prompt no longer matches the decision context; `run resume` prepares a new task. On recovery, completed output is read from the artifact store and validated again before domain records are materialized. Missing or corrupt frozen material is an infrastructure failure.
+## Atomicity and locking
 
-Every review output carries `limitations`, a possibly empty list of relevant material the reviewer could not check or could not read, including material the manuscript mentions that is absent from the frozen sources. Validation checks only its shape. A review task is complete when its submission is accepted: the accepted output completes the task, satisfies the required-review gate for its role, and is the task's only accepted output. The run advances to human finding decisions once every required role has one. Reports read the accepted output artifacts and list each one's limitations under `review_limitations`.
+- Every change to a run takes `state.lock`, loads `state.json`, changes it in memory, and replaces the file with a
+  complete, fsynced copy. A reader or a crash sees the old state or the new one, never a mix. A command that
+  changes several records, such as a multi-ID `finding decide`, does so in one replacement.
+- Artifacts are written to a temporary file, fsynced, and renamed into place under their digest; publishing the
+  same content again verifies the existing file, so published content never changes.
+- `service.py` serializes each run's operations under `locks/RUN_ID.lock`, which records the holder's operation,
+  process, host, and time. Claims, submissions, decisions, retries, resumes, `run status`, and
+  `run report --part` take it without waiting; `run cancel`, `task export`, `task page`, and `task submit --check`
+  wait for it. Concurrent `run start` calls on one commit wait on a per-commit lock, so the duplicate check sees
+  the earlier run.
+- The store's lock is always taken inside the service lock, never the other way round, so writers that skip the
+  service lock still serialize.
+- Export and page rendering hold the run lock through their event, so a cancellation or submission cannot change
+  the attempt between the checks and the written files.
+- Other reads (`run list`, `run gate`, `run report` without `--part`, `task list`, `task show`, and the `finding`
+  and `patch` reads) take no lock; they read complete state files. Report reads write no events or artifacts.
 
-New substantive-review tasks use a distinct frozen output schema. Their `claim_checks` record anchored evidence, a critical question, a countercheck, an assessment, and links to retained findings by output index. New runs also freeze explicit judgment fields: the claim's stated scope, the check type, the answer to the critical question, the exceptions found, and an optional recomputation. Schema validators reject an assessment that contradicts its declared answer, exceptions, or recomputation outcome. New runs also freeze a claim inventory. Each entry is a central claim, anchored where the authors state it; each claim check names one entry by `claim_index`, and an entry no check names gives a reason it was not checked. Validators require at least one claim check, every index to name an inventoried claim, and a check of every headline claim; one the frozen bundle cannot decide is checked with `question_answer` `not_checkable`. A `blocker` finding must be linked from a check of a headline claim, and the substantive `verdict` must agree with the review's findings: `reject` or `major_revision` needs a `major` or `blocker` finding of that submission, and `accept` or `minor_revision` allows none. Submission validates the anchors, including each claim anchor, and the links before accepting any finding. The report presents the checks alongside the review's limitations; the checks remain model declarations, not proof that the model reasoned correctly.
+## Freezing a run
 
-New review tasks also freeze a consequence-based severity rubric. The workflow adds it once to every review role's frozen prompt template, beside the evidence-anchor and limitations instructions, so the prompt digest and attempt input digest bind it; the role prompts do not repeat it. The output schema publishes the same level definitions on the finding's `severity` and requires a non-blank `consequence` stating what a reader would wrongly believe, or be unable to do, if the problem is not fixed. The rubric also ties consistency-type findings to consequence: a reported value, margin, count, or ranking that disagrees between text, table, figure, or appendix is `moderate` only when a claim rests on it and `major` only when correcting it changes a headline claim, while a mismatch of names, labels, terms, captions, units written two ways, or bibliography fields is `minor` or `suggestion` unless it hides or alters a reported result; the consistency, figure-review, and copyedit role prompts say the same in a sentence or two, and the copyedit and substantive prompts send value disagreements and presentation items to the roles that own them. A `submission_compliance` finding (checklist answers, page or figure limits, anonymity, template rules) must be `minor` or `suggestion`. New copyedit, consistency, and figure-review findings at `moderate` or above name an `affected_claim`. It is stored in a nullable finding field, stays out of the finding fingerprint (a later duplicate that names one fills a missing value, keeping the first); substantive findings read with no affected claim. Severity remains a model declaration: validation checks the compliance ceiling, not whether a level fits. The consequence is stored in a nullable finding field. The release gate is unchanged; its severity check still covers only undecided `blocker` and `major` findings.
+`run start` resolves the revision and copies the commit into a disposable snapshot; uncommitted files never enter
+it. From the snapshot it reads `scriptorium.toml`, scans each entrypoint's LaTeX dependency closure, builds the
+navigation index, compiles, and creates the bundle: the sources at `sources/...`, `manifest.json`,
+`source-map.json`, `navigation.json`, `manuscript.pdf`, and one PNG per page.
 
-An optional review brief, captured by the host agent in a dialogue with the author before `run start`, is
-validated against a strict model, published as a content-addressed artifact, and recorded by digest in the run's nullable
-`brief_digest` field. The workflow renders it deterministically and places it before the severity rubric in every
-review role's frozen prompt template, so the prompt digest binds its rendered text. Every task input digest of a
-briefed run, computed at preparation and recomputed at submission, also includes the brief artifact digest, so fields
-that are not rendered are bound too. A run without a brief keeps the earlier template bytes and input digest formula.
-The brief is immutable for the run. `task export` writes the frozen artifact bytes as
-`task/brief.json` for any attempt of the run, and `run status` and reports summarize it. `doctor` and the `run start`
-overview report a template detected from the entrypoints' class and package names as an intake default only.
+With supplements, each entrypoint's closure is scanned separately, so its graphics and bibliography context is
+kept, and the bundle freezes their union. Each document compiles in its own disposable copy, so generated files
+cannot leak between documents. The PDFs are concatenated in configured order into `manuscript.pdf`, and the
+manifest and source map freeze a document index (entrypoint, first global page, page count) whose ranges partition
+the PDF and name distinct text sources. Revision and verification rebuild every document; any failed build blocks
+that stage.
 
-Export and page operations hold the run lock through their event, so cancellation or submission cannot change an attempt between its checks and the written material. The store takes its own per-run lock inside each mutation, after any service-level run lock and never the other way round, so writers that skip the service lock still serialize.
+The run freezes:
 
-## Evidence and gates
+- the project configuration and `scriptorium.toml` text;
+- the source identities (path, digest, line count) and the navigation index;
+- one prompt template per role: the role prompt, the shared export-reading instructions, the evidence contract,
+  and, for review roles, the limitations instruction and the severity rubric, added once by the workflow (the role
+  prompts do not repeat it);
+- the output schemas, which repeat the severity levels on `severity`;
+- the evidence contract;
+- the review brief, when one is given: validated against a strict model, published as an artifact, recorded by
+  digest on the run, and rendered deterministically before the severity rubric in every review prompt template.
+  Revision and verification prompts do not include it.
 
-Text evidence uses a bare source path, source digest, inclusive line range, and verbatim quote. New runs freeze one line definition as the evidence contract's `line_terminators`, shared by source-map line counts, evidence validation, exact edits and patch diffs: a line ends only at `\n`, `\r\n` or `\r`, so form feeds and Unicode line separators stay inside their line. The source map's `line_count` bounds anchors; the manifest's per-source `lines` value is informational. PDF evidence uses `manuscript.pdf` plus a 1-based page; a page-image path is only a read location.
+A run keeps the prompts it froze; a changed prompt applies only to new runs.
 
-`task page --document ENTRYPOINT --number N` resolves a document-local physical page into that global PDF page.
-The response and event record both coordinates. Zoomed page views and the PDF text layer are derived from the digest-checked frozen PDF and stored outside the bundle under their own digest, never overwritten; the text layer is a reading aid. Neither changes the evidence contract. Evidence continues to use global
-pages, so separate documents' first pages cannot be conflated. The document index is frozen bundle metadata;
-it does not change the submitted result schema or the run state.
+Each task records its prompt, schema, and bundle digests and a content-addressed index of its bundle files. Its
+input digest is the digest of those three digests and, for a run with a brief, the brief's artifact digest, so
+brief fields that are not rendered are bound too. Every attempt binds its own prompt; a correction prompt after a
+rejected submission is a new prompt with a new input digest. A review task also freezes an example output, built
+from its schema and the first non-blank line of a text source (an entrypoint first) whose bundle and snapshot
+copies both match its digest, and kept only if it passes the task's output model and anchor checks. Its digest is
+stored outside the input digest. Revision and verification tasks have no example.
 
-Finding decisions, patch approval, verification, and application are separate stages. The verifier must claim from a new host-reported conversation ID, distinct from review and revision. A declared or reused ID cannot produce a passing verification. This checks recorded provenance; Scriptorium cannot authenticate the external host's claim. Patch application rechecks exact approved edits against the current worktree. Infrastructure failures cannot pass the release gate.
+Export and page rendering check every file they use against the bundle index and the document mapping;
+submission validates the whole bundle. Accepted outputs are replayed into findings, a candidate patch, or a
+verification record.
 
-Scriptorium records no usage or cost. The tool neither invokes providers nor enforces their spending limits.
+## Evidence contract
+
+- A text anchor names a bare source path, the source digest, an inclusive 1-based line range, and a verbatim quote
+  from that range.
+- A line ends only at `\n`, `\r\n`, or `\r`; form feeds and Unicode line separators stay inside their line. The
+  contract freezes this as `line_terminators`, and the same rule counts lines in the source map, validates
+  anchors, applies exact edits, and writes patch diffs.
+- The source map's `line_count` bounds anchors; the manifest's per-source `lines` is informational.
+- A PDF anchor names `manuscript.pdf` and a 1-based global page. A page image path is only a read location; the
+  frozen page digest binds what the page shows.
+- Global pages keep separately compiled documents from being confused. The document index is bundle metadata; it
+  does not change the output schema or the run state.
+- Page views and text layers are rendered from the digest-checked PDF and stored outside the bundle; they are
+  never evidence.
+
+## Gates
+
+Finding decisions, patch approval, verification, patch application, and the release gate are separate stages, each
+with its own command ([procedure](operations.md#patches-verification-and-application)). Scriptorium never infers
+approval from severity.
+
+- On replay, a stored output is read from the artifact store and validated again before its records are created.
+  Missing or corrupt frozen material is an infrastructure failure: it fails the operation visibly and never counts
+  as success.
+
+`run gate` passes only when every condition holds:
+
+| Condition | Holds when |
+| --- | --- |
+| `required_reviews_completed` | Every profile role has an accepted review |
+| `review_artifacts_valid` | Every accepted review output is readable and valid |
+| `all_findings_decided` | No finding is pending |
+| `no_unhandled_blocker_or_major` | No pending finding is `blocker` or `major` |
+| `confirmed_findings_covered` | The applied patch covers every confirmed finding |
+| `patched_build_succeeded` | The applied patch built, when a patch is required |
+| `verifier_passed` | The applied patch has a passing verification, when a patch is required |
+| `patch_applied_when_required` | A patch is applied whenever a finding is confirmed |
+| `run_completed` | The run is `completed` |

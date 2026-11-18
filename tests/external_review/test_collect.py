@@ -77,7 +77,7 @@ def test_collector_rejects_corruption_without_publishing_partial_package(tmp_pat
     run_id, task_id = start(root)
     with ScriptoriumService(root) as service:
         context = submit(service, task_id)
-        attempt = service.database.list_attempts(task_id)[-1]
+        attempt = service.store.list_attempts(task_id)[-1]
         targets = {
             "source": root / ".scriptorium/runs" / run_id / "bundle/sources/main.tex",
             "output": service.artifacts.path_for(attempt.output_artifact_digest),

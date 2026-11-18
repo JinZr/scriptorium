@@ -1,5 +1,5 @@
 from scriptorium.domain import AgentRole, Attempt, AttemptStatus, Run, Task
-from scriptorium.storage import Database
+from scriptorium.storage import RunStore
 
 
 def make_run() -> Run:
@@ -13,8 +13,8 @@ def make_run() -> Run:
     )
 
 
-def create_completed_attempt(database: Database, run: Run) -> tuple[Task, Attempt]:
-    task = database.create_task(
+def create_completed_attempt(store: RunStore, run: Run) -> tuple[Task, Attempt]:
+    task = store.create_task(
         Task(
             run_id=run.id,
             stage="review",
@@ -22,16 +22,16 @@ def create_completed_attempt(database: Database, run: Run) -> tuple[Task, Attemp
             input_digest="d" * 64,
         )
     )
-    attempt = database.create_attempt(
+    attempt = store.create_attempt(
         Attempt(
             task_id=task.id,
             ordinal=1,
             model="test-model",
         )
     )
-    database.finish_attempt(
+    store.finish_attempt(
         attempt.id,
         AttemptStatus.COMPLETED,
         thread_id="thread-1",
     )
-    return task, database.get_attempt(attempt.id)
+    return task, store.get_attempt(attempt.id)

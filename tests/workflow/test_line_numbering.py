@@ -68,7 +68,7 @@ def _revise_verify_apply(service, run, source, line, before, after):
     }
     receipt = submit(service, revision, {"summary": "Capitalized.", "edits": [edit]})
     assert receipt["validation_report"] is None
-    patch = service.database.list_patches(run.id)[-1]
+    patch = service.store.list_patches(run.id)[-1]
     diff = service.artifacts.get_bytes(patch.diff_digest).decode("utf-8")
     service.decide_patch(patch.id, "approve", "Apply the exact edit.")
     asyncio.run(service.resume_run(run.id))

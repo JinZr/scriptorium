@@ -37,9 +37,9 @@ def test_compiler_coverage_gates_each_external_build_stage(tmp_path, fail_at):
         if fail_at == 1:
             with pytest.raises(InfrastructureError, match="hidden.tex"):
                 asyncio.run(service.start_run("HEAD", "quick"))
-            run = service.database.list_runs()[0]
+            run = service.store.list_runs()[0]
             assert run.status == RunStatus.FAILED
-            assert service.database.list_tasks(run.id) == []
+            assert service.store.list_tasks(run.id) == []
             assert service.list_tasks(run.id)["next_actions"] == [{"command": "run resume", "run_id": run.id}]
             manager.fail_at = None
             assert asyncio.run(service.resume_run(run.id))["run"].status == RunStatus.REVIEWING
@@ -48,7 +48,7 @@ def test_compiler_coverage_gates_each_external_build_stage(tmp_path, fail_at):
         if fail_at == 2:
             with pytest.raises(InfrastructureError, match="hidden.tex"):
                 prepare_patch(service, run.id)
-            assert service.database.list_patches(run.id) == []
+            assert service.store.list_patches(run.id) == []
         else:
             patch, _ = prepare_patch(service, run.id)
             service.decide_patch(patch.id, "approve", "Verify the exact edit.")

@@ -1,18 +1,16 @@
 # Scriptorium 实验室上手指南
 
-本页面向第一次使用 Scriptorium 的实验室成员。按顺序做完下面六步，大约需要半小时，
-不包括第一次审稿的模型运行时间。英文的完整契约见 [README](../README.md)、
-[configuration](configuration.md) 和 [operations](operations.md)。
+本页面向第一次使用 Scriptorium 的实验室成员。按顺序做完下面六步，大约需要半小时，不包括模型审稿的时间。
+命令、输出规则和恢复方法以英文文档为准：[README](../README.md)、[configuration](configuration.md)、
+[operations](operations.md)。
 
 ## 它是什么，不是什么
 
-- 它是一个本机命令行工具，把 LaTeX 稿件的某个 Git commit 冻结下来，交给你自己的
-  Codex、Claude Code 或 Antigravity 会话做结构化审稿，再由你逐条决定、批准补丁、
-  独立验证、显式应用。每一步都有人工关卡。
+- 一个本机命令行工具：把 LaTeX 稿件的某个 Git commit 冻结下来，交给你自己的 Codex、Claude Code 或
+  Antigravity 会话做结构化审稿，再由你决定发现、批准补丁、独立验证、显式应用。每一步都有人工关卡。
 - 它不选模型、不调模型、不付费。模型和费用都在你自己的 CLI 订阅或账户上。
-- 它不是自动改稿机。模型声明的 claim check 和 limitations 只是供人检查的记录，不等于科学正确。
-  一次审稿提交被接受，该审稿任务就算完成。
-- 它只读已提交的内容。未提交的改动永远不会进入审稿。
+- 它不是自动改稿机。模型声明的 claim check 和 limitations 是供人检查的记录，不等于科学正确。
+- 它只读已提交的内容，未提交的改动不会进入审稿。
 
 ## 第一步：检查机器
 
@@ -22,31 +20,31 @@
 bash /path/to/scriptorium/utils/preflight.sh
 ```
 
-它检查 Python 3.10+、pip、Git、`latexmk`、`kpsewhich` 及其 TeX 根目录、至少一个 LaTeX 引擎，
-并用 Scriptorium 构建时相同的 `latexmk` 参数真实编译一个小文档。全部 `ok` 再继续。有 `FAIL` 先按提示装齐 TeX Live 或 MacTeX。`warn` 行是提醒，
-不阻塞。Windows 不在脚本覆盖范围内，请在 WSL 里操作。
+它检查 Python 3.10+、pip、Git、`latexmk`、`kpsewhich` 及其 TeX 根目录、至少一个 LaTeX 引擎，并用
+Scriptorium 构建时相同的 `latexmk` 参数真实编译一个小文档。全部 `ok` 再继续；有 `FAIL` 先按提示装齐
+TeX Live 或 MacTeX；`warn` 行只是提醒。Windows 不在脚本覆盖范围内，请在 WSL 里操作。
 
 ## 第二步：安装
 
-把工具装进你的模型 CLI 实际使用的那个 Python 环境里。不确定是哪一个时，
-用 `PYTHON=/path/to/python bash /path/to/scriptorium/utils/preflight.sh` 指定解释器再看结果，
-然后用同一个解释器安装：
+把工具装进模型 CLI 实际使用的那个 Python 环境。不确定是哪一个时，先用 `PYTHON=` 指定解释器跑一次检查，
+再用同一个解释器安装：
 
 ```bash
+PYTHON=/path/to/python bash /path/to/scriptorium/utils/preflight.sh
 /path/to/python -m pip install /path/to/scriptorium
 ```
 
 装完再跑一次 `preflight.sh`，确认 `scriptorium`、`scriptorium_cli` 和 `pdf_rendering` 三行为 `ok`。
-`scriptorium_cli` 失败说明入口不在 PATH 里，按提示把该解释器的 scripts 目录加进 PATH。
+`scriptorium_cli` 失败说明命令不在 PATH 里，按提示把该解释器的 scripts 目录加进 PATH。
 
 ## 第三步：让模型客户端加载 skill
 
 模型按两份 skill 操作 CLI：
 
-- [skills/scriptorium/SKILL.md](../skills/scriptorium/SKILL.md)：操作者，负责开始运行、和你商定审稿 brief、读报告、按你的指示记录决定；
-- [skills/scriptorium-review/SKILL.md](../skills/scriptorium-review/SKILL.md)：审稿者，负责 claim 任务、把冻结的任务导出到目录并阅读、引用证据、提交结果。
+- [skills/scriptorium](../skills/scriptorium/SKILL.md)：操作者，负责和你商定审稿 brief、开始运行、读报告、按你的指示记录决定；
+- [skills/scriptorium-review](../skills/scriptorium-review/SKILL.md)：审稿者，负责 claim 任务、导出并阅读冻结的任务、引用证据、提交结果。
 
-把 `skills/scriptorium/` 和 `skills/scriptorium-review/` 两个目录都复制或软链接到客户端的 skills 目录：
+把这两个目录复制或软链接到客户端的 skills 目录：
 
 - Claude Code：`~/.claude/skills/scriptorium/` 和 `~/.claude/skills/scriptorium-review/`
 - Codex：`~/.codex/skills/scriptorium/` 和 `~/.codex/skills/scriptorium-review/`
@@ -56,8 +54,8 @@ bash /path/to/scriptorium/utils/preflight.sh
 
 ## 第四步：准备稿件仓库
 
-稿件必须在 Git 仓库里。还没有的话先 `git init` 并提交全部源文件。然后在仓库根目录运行下面的命令，
-把 `--engine` 换成 preflight `compile` 一行里报告可用的引擎（`pdflatex`、`xelatex` 或 `lualatex`）：
+稿件必须在 Git 仓库里，还没有的话先 `git init` 并提交全部源文件。在仓库根目录运行下面的命令，
+`--engine` 用 preflight `compile` 一行报告可用的引擎（`pdflatex`、`xelatex` 或 `lualatex`）：
 
 ```bash
 scriptorium init . --main main.tex --engine pdflatex
@@ -66,48 +64,47 @@ git commit -m "Add Scriptorium configuration"
 scriptorium --json doctor --revision HEAD --profile quick
 ```
 
-`doctor` 会用冻结的 commit 真实编译一次。常见失败原因：主文件名不对、图片或参考文献
-文件没有提交、引擎不匹配。改好后重新提交再跑，直到 `ok` 为 `true`。
-有独立的补充材料时，在 `scriptorium.toml` 的 `[manuscript]` 下加 `supplements`，见
-[configuration](configuration.md)。
+`doctor` 会用已提交的版本真实编译一次，全部检查通过时返回 `ok: true`。常见失败原因：主文件名不对、
+图片或参考文献文件没有提交、引擎没装。改好后重新提交再跑。有独立编译的补充材料时，在 `scriptorium.toml`
+的 `[manuscript]` 下加 `supplements`，见 [configuration](configuration.md#supplements)。
 
 ## 第五步：第一次审稿
 
-先用 `quick` profile，任务少、花费低：
+先用 `quick` profile，任务少、花费低。想让审稿有针对性时，先在模型客户端里按操作者 skill 和你商定一份审稿
+brief，保存为 `brief.json`，在下面的 `run start` 后加 `--brief brief.json`（格式见
+[configuration](configuration.md#review-brief)）。运行开始后 brief 不能再改。
 
 ```bash
 scriptorium --json run start --revision HEAD --profile quick
 scriptorium --json run status RUN_ID
 ```
 
-然后打开你的模型客户端，在稿件仓库目录里开一个新对话，告诉它 run ID，让它按 skill
-执行 `run status` 给出的 `next_actions`。模型会 claim 任务，用 `task export` 把冻结的稿件和任务说明导出到一个目录，
-用自己的工具阅读，再提交结构化结果。
-你只需要在它停下时回到终端：
+然后在稿件仓库目录里打开模型客户端，开一个新对话，告诉它 run ID，让它按 skill 执行 `run status` 给出的
+`next_actions`。模型会 claim 任务，用 `task export` 把冻结的稿件和任务说明导出到一个目录，用自己的工具阅读，
+再检查并提交结构化结果。
 
-- `finding decide` 确认、拒绝或豁免发现（可一次列出同一次运行的多个发现 ID，共用同一决定与理由）；
-- `run resume`：至少有一条确认的发现时进入修订任务，模型产出候选补丁；
-  一条都没有确认时运行直接完成，后面的补丁和验证步骤不会出现；
-- `patch decide` 批准或拒绝补丁，然后 `run resume`：批准会生成验证任务，
-  拒绝会带着你的理由回到修订任务，模型重新产出补丁；
-- 验证任务必须在一个全新的对话里做，否则结果记为 inconclusive；
+## 第六步：做决定
+
+模型在人工关卡停下时，由你决定：
+
+- `finding decide`：确认、拒绝或豁免发现。可以一次列出同一运行的多个发现 ID，共用同一个决定和理由。
+  之后运行 `run resume`：至少有一条确认的发现时进入修订任务，模型产出候选补丁；一条都没有确认时运行直接完成。
+- `patch decide`：批准或拒绝补丁，然后 `run resume`。批准会生成验证任务；拒绝会带着你的理由回到修订任务。
+- 验证任务必须在一个全新的对话里做。用做过审稿或修订的对话提交验证，或没有宿主会话 ID 时，提交会被拒绝。
 - `patch apply` 把验证通过的补丁写入工作区，`run gate` 查看放行结论。
 
 随时用 `scriptorium --json run status RUN_ID` 看当前位置，用
 `scriptorium run report RUN_ID --format markdown > review.md` 导出可读报告。
 
-## 预期与注意事项
+## 注意事项
 
-- 时间和费用：以 `quick` profile 审一篇 10 页左右的稿件为参考，填入试点实测数据后更新本节。
-- 运行记录在仓库的 `.scriptorium/` 下（每个运行一个状态文件 `runs/RUN_ID/state.json`），已被 `.gitignore` 忽略，只存在于你的机器上。
-  需要和导师或合作者分享时，导出 Markdown 报告放到约定位置。
-- 不要手动编辑 `.scriptorium/` 里的任何文件。出错时修好外部原因，再用 `run retry`
-  或 `run resume` 继续。
-- 模型提交被拒会附带校验报告。`run retry RUN_ID --task TASK_ID` 让任务可以重新 claim，
-  新一轮会把诊断信息冻结进提示里。
-- 同一个 clone 不要多人同时操作。合作者各自在自己的 clone 上运行。
+- 运行记录在仓库的 `.scriptorium/` 下（每个运行一个状态文件 `runs/RUN_ID/state.json`），已被 `.gitignore`
+  忽略，只存在于你的机器上。需要和导师或合作者分享时，导出 Markdown 报告放到约定位置。
+- 不要手动编辑 `.scriptorium/` 里的任何文件。出错时修好外部原因，再用 `run retry` 或 `run resume` 继续。
+- 模型提交被拒会附带校验报告。`run retry RUN_ID --task TASK_ID` 让任务可以重新 claim，新一轮会把诊断信息冻结进提示里。
+- 同一个 clone 不要多人同时操作，合作者各自在自己的 clone 上运行。
 
 ## 反馈
 
-遇到 `doctor` 失败、编译问题或提交被反复拒绝，把 `run status` 和 `run report` 的输出一起发给
-维护者。记录下来的摩擦点会用于更新本页。
+遇到 `doctor` 失败、编译问题或提交被反复拒绝，把 `run status` 和 `run report` 的输出一起发给维护者。
+记录下来的摩擦点会用于更新本页。

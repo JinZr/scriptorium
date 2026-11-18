@@ -1,110 +1,217 @@
-# Operations and recovery
+# Operations
 
-Run commands from the manuscript Git repository and use `--json` for machine-readable output. The JSON envelope has `ok` and either `data` or a stable error `code` and `message`.
+The command reference, the run lifecycle, the rules a submitted output must meet, how findings are grouped and
+decided, the report sections, and recovery. Settings are in [configuration](configuration.md); storage, freezing,
+and gates are in [architecture](architecture.md).
 
-```bash
-scriptorium --json doctor --revision COMMIT --profile full
-scriptorium --json run start --revision COMMIT --profile full
-scriptorium --json run list
-scriptorium --json run status RUN_ID
-scriptorium --json task claim TASK_ID --client codex --model MODEL --effort EFFORT \
-  --session-id SESSION_ID --session-source host
-scriptorium --json task export ATTEMPT_ID --dir DIR
-```
+## Conventions
 
-## Review brief
+- Run commands from the manuscript's Git repository, with the global `--json` flag before the command name.
+  `scriptorium COMMAND -h` lists a command's options.
+- Success prints `{"ok": true, "data": ...}`; failure prints `{"ok": false, "error": {"code": ..., "message": ...}}`.
+- Use the IDs and digests the CLI returns rather than reading `.scriptorium/`.
 
-Before starting a run, the host agent drafts a review brief with the author. It reads `detected_template` from
-`doctor`, infers the venue family, and asks only for what it cannot infer: the stage, the two or three claims to
-check first, what earlier reviewers said, and what to ignore this round. The author confirms the draft, edits it,
-or accepts the defaults; the agent writes `brief.json` (format in [configuration](configuration.md#review-brief)) and
-starts the run with it:
+| Error code | Exit | Meaning |
+| --- | --- | --- |
+| `invalid_arguments` | 2 | The command line did not parse |
+| `configuration_error` | 2 | Bad input, configuration, or option value |
+| `not_found` | 2 | No object with that ID |
+| `invalid_state`, `duplicate_run` | 1 | The run or task does not allow the command now |
+| `infrastructure_error` | 3 | A tool, build, or frozen file failed; the outcome is inconclusive |
+| `interrupted` | 3 | The command was interrupted |
 
-```bash
-scriptorium --json run start --revision COMMIT --profile full --brief brief.json
-```
+`run gate` also exits 1 when the gate does not pass, and `patch apply` exits 1 when the patch is stale.
 
-The brief is validated, published as a content-addressed artifact, and recorded on the run by digest. Its rendered
-text (venue family, stage, and the author's lists) precedes the severity rubric in every review role's frozen prompt.
-Revision and verification prompts do not include it. Every attempt's export includes the exact frozen brief as
-`task/brief.json`. `run start` and `run status` show a compact summary
-(`review_brief`: digest, venue family, venue, stage, and list counts), and the `run` report section includes the
-brief itself. The brief cannot be changed after the run starts; to review under a
-different brief, start a new run. A run without a brief exports no `task/brief.json`.
-
-## Task command reference
-
-Every command accepts the global `--json` flag before the command name. `scriptorium task COMMAND -h` lists each
-option.
+## Commands
 
 | Command | Use | Main response fields |
 | --- | --- | --- |
-| `task claim TASK_ID ...` | Start or reconnect to this session's attempt | `run_id`, `task`, `attempt`, `input_digest`, `bundle_digest`, `navigation_digest`, `export_command` |
-| `task show ATTEMPT_ID` | Attempt overview, any status | same as claim |
-| `task export ATTEMPT_ID --dir DIR` | Write the frozen bundle and task inputs (no page images) to disk | `attempt_id`, `directory`, `file_count`, `total_bytes`, `files_digest`, `task_inputs[]` with `path`, `digest` |
-| `task page ATTEMPT_ID --number N` | Rendered page image, zoomed view, or text-layer file | `source_path`, `page`, `document`, `document_page`, `path`, `digest`; `view`; with `--text`, `text_layer`, `evidence: false`, `bytes`, `note` |
-| `task submit ATTEMPT_ID ... --check` | Validate without recording | `valid`, `recorded: false`, `output_digest`, `validation_report` |
-| `task submit ATTEMPT_ID ...` | Validate one output | `attempt`, `validation_report`, `run_status`, `next_actions` |
-| `run list [--status S] [--limit N]` | This project's runs, newest first | `total`, `limit`, `returned`, `truncated`, `runs[]` with `run_id`, `status`, `commit_sha`, `profile`, `created_at`, `updated_at`, `task_counts`, and `venue_family`, `venue`, `stage` when the run has a brief |
-| `run status RUN_ID` | Overview and next actions | `task_counts`, `next_actions`, `report_parts` |
-| `run report RUN_ID --part P` | One whole report section | the section's JSON value |
+| `init [PATH] [--main FILE] [--engine ENGINE]` | Write `scriptorium.toml`, ignore `.scriptorium/` | `repository`, `initialized` |
+| `doctor [--revision REV] [--profile P]` | Check a commit is ready | `ok`, `profile`, `checks`, `detected_template` |
+| `run start [--revision REV] [--profile P] [--brief FILE] [--allow-duplicate]` | Freeze a commit, prepare review tasks | overview, `detected_template` |
+| `run list [--status S] [--limit N]` | Runs, newest first | `total`, `limit`, `returned`, `truncated`, `runs` |
+| `run status RUN_ID` | Where the run stands | overview |
+| `run resume RUN_ID` | Replay accepted work, prepare the next stage | overview |
+| `run retry RUN_ID --task TASK_ID [--abandon-attempt ATTEMPT_ID --reason TEXT]` | Make a task claimable again | overview |
+| `run cancel RUN_ID --reason TEXT` | End the run | overview |
+| `run report RUN_ID [--format markdown\|json \| --part PART]` | Full report or one section | report |
+| `run gate RUN_ID` | Release gate | `passed`, `conditions`, `reasons`, `errors` |
+| `task list RUN_ID` | Tasks with all attempts | `run_status`, `tasks`, `next_actions` |
+| `task claim TASK_ID --client C --model M --effort E --session-id S --session-source host\|declared` | Start or rejoin this session's attempt | `run_id`, `task`, `attempt`, `input_digest`, `bundle_digest`, `navigation_digest`, `export_command` |
+| `task show ATTEMPT_ID` | Overview of any attempt | as `task claim` |
+| `task export ATTEMPT_ID --dir DIR` | Write the frozen task to disk | `directory`, `file_count`, `total_bytes`, `files_digest`, `task_inputs` |
+| `task page ATTEMPT_ID --number N [--document E] [--scale S] [--crop x0,y0,x1,y1 \| --text]` | Render a page, a view, or its text layer | `source_path`, `page`, `document`, `document_page`, `path`, `digest`, `view`; `text_layer`, `evidence`, `bytes` |
+| `task submit ATTEMPT_ID --input-digest D --file F --check` | Validate without recording | `valid`, `recorded`, `output_digest`, `validation_report` |
+| `task submit ATTEMPT_ID --input-digest D --file F` | Submit one output | `attempt`, `output_digest`, `validation_report`, `run_status`, `next_actions` |
+| `finding list RUN_ID` | All findings | findings |
+| `finding show FINDING_ID` | One finding | `finding`, `decisions` |
+| `finding decide ID [ID ...] --confirm\|--reject\|--waive --reason TEXT` | Decide findings | `finding_ids`; `decision`, `finding` or `decisions`, `findings` |
+| `patch show PATCH_ID` | A patch | `patch`, `decisions`, `verifications`, `diff` |
+| `patch decide PATCH_ID --approve\|--reject --reason TEXT` | Decide the patch | `decision`, `patch` |
+| `patch apply PATCH_ID` | Write a verified patch to the worktree | the patch |
 
-Errors use `{"ok": false, "error": {"code", "message"}}` with `--json`. `task page` needs an active attempt;
-`task show` and `task export` work for any attempt of the run and do not reactivate it.
+The overview has `run` (`id`, `status`, `commit_sha`), `task_counts`, `finding_count`, `patch_count`, `has_error`,
+`next_actions`, `report_parts` (one `run report --part` command per section), and, for a run with a brief,
+`review_brief`: its `digest`, `venue_family`, `venue`, `stage`, list counts, and whether `prior_reviews` and
+`severity_notes` are set. It leaves out the frozen configuration and attempt history, which the `run` and `tasks`
+report sections hold. `task list` gives the detail; the normal loop uses `run status`.
 
-`run list` is how to find a `RUN_ID`; do not read `.scriptorium/` by hand. It reads the run state files without taking a run lock and makes no model call. `--status` takes a run status value (`preparing`, `reviewing`, `awaiting_decision`, `revising`, `awaiting_patch_approval`, `verifying`, `ready_to_apply`, `completed`, `failed`, `cancelled`); `--limit` defaults to 20 and is at most 100. Bad values return `configuration_error`. `truncated` is true when more runs match than `--limit` returned; `total` counts every matching run. A run whose frozen brief cannot be read omits the brief fields; `run status` reports that failure.
+### Starting and listing runs
 
-`run status` returns a compact run identity and status, task counts, finding/patch counts, `has_error`, current `next_actions`, and `report_parts` commands. It omits frozen configuration and attempt history; these remain available through the `run` and `tasks` report sections. Scriptorium records no usage or cost.
+- `run start` freezes the commit and prepares one review task per role of the profile (default `full`). It calls
+  no model.
+- It refuses with `duplicate_run`, naming the other run, while a run on the same resolved commit is neither
+  `completed` nor `cancelled`; a `failed` run counts because it can be resumed. Inspect that run, resume it if it
+  failed or cancel it otherwise, or pass `--allow-duplicate` to start a second run on purpose.
+- `run list` finds a `RUN_ID`. `--status` takes a run status, `--limit` defaults to 20 and is at most 100, and other
+  values return `configuration_error`. `total` counts every match; `truncated` is true when more match than were
+  returned. Each entry has `run_id`, `status`, `commit_sha`, `profile`, `created_at`, `updated_at` (the last
+  status change or finished attempt), `task_counts`, and `venue_family`, `venue`, `stage` for a briefed run. A run
+  whose brief cannot be read is listed without those fields; `run status` reports the failure.
 
-The CLI responses for `run start/resume/retry/cancel` summarize the state returned by that mutation and direct the client to `run status` for current actions. They do not include the full run configuration. `run start` refuses with error code `duplicate_run`, naming the existing run, when a run on the same resolved commit is not `completed` or `cancelled` (a `failed` run can still be resumed, so it counts); inspect it with `run status`, cancel it (resume it if it failed; a failed run cannot be cancelled), or pass `--allow-duplicate` to start another deliberately. After submission, use `run status` to discover continuation or human gates; `task list` retains its detailed output for explicit inspection.
+### Next actions
 
-`run report RUN_ID --part PART` prints one whole report section as JSON: the value under that top-level key of the complete JSON report (under `data` with `--json`). Available parts are listed in `run status` under `report_parts`: `run`, `tasks`, `finding_ids`, `patch_ids`, `findings`, `patches`, `events`, `validation_reports`, `review_limitations`, `review_claim_checks`, `findings_grouped`, `decision_stats`, and `gate`. A section can be large, so redirect it to a file and read the file. `--part` cannot be combined with `--format`; `scriptorium run report RUN_ID --format json > report.json` or `--format markdown > report.md` writes the complete report. Report reads hold the run lock while building the report and do not append events or change workflow state. Corrupt artifacts still fail validation. Use `has_error` and the `run`, `validation_reports`, and `gate` sections to inspect failures. At a human gate, inspect findings through the report sections before asking for a decision.
+`run status` returns the current `next_actions`; responses to `run start`, `resume`, `retry`, and `cancel` point
+to it. Reread it after every change. Each entry names a command and its IDs:
 
-`decision_stats` counts the run's findings by current human decision (`confirmed`, `rejected`, `waived`, or `pending` when undecided) overall and by producing role, category, and severity, and lists the latest rejection and waiver reasons (first 200 characters, newest first, at most 50). A finding decided more than once counts once under its latest decision; the append-only decision records are unchanged. Group rows are lists because canonical report JSON sorts object keys: roles and categories alphabetically, severities from blocker to suggestion. The counts are a calibration input for the next review and prompt maintenance, not a quality metric by themselves, and they do not affect the release gate. The complete JSON and Markdown exports include the same section.
+| Command | Offered when |
+| --- | --- |
+| `task claim` | A task of the current stage is pending |
+| `task show` | An attempt is running |
+| `run retry` | A task failed or was interrupted |
+| `run resume` | The run can advance or recover |
+| `finding list` | Findings await a decision |
+| `patch show` | A patch awaits approval |
+| `patch apply` | A verified patch is ready |
 
-`findings_grouped` groups all of the run's findings, across roles and attempts, for triage. Two findings share evidence when more than half of either finding's distinct anchors overlap an anchor of the other. Two line anchors overlap when they name the same frozen source path and their inclusive ranges share at least half of the shorter range. Line anchors decide whenever either finding has one, so a finding with line anchors never matches one with only PDF pages; between two findings with only PDF page anchors, a page overlaps only the same page, and the two must also share a linked claim, because a page is too coarse to identify an issue alone. Two findings also share evidence, whatever their line anchors, when they share a linked claim and both cite the same table or figure object of the run's frozen navigation index: a line anchor lies inside the float (`table`, `table*`, `sidewaystable`, `longtable`, `figure`, or `figure*`) or covers a `ref`, `cref`, `Cref`, `autoref`, `eqref`, or `pageref` whose key is a `label` inside it, so a table row, its caption, and the sentence that cites `Table~\ref{tab:main}` can group. Two findings that cite one such object also share evidence, with or without a shared claim, when a line anchor of one overlaps a line anchor of the other, so findings from different roles that quote the same rows of one table group even when exactly half of their anchors overlap. A label defined more than once, inside a float or not, as when a supplement reuses a main-paper label, is ambiguous and names no float. Because the index is line-granular, content confined to a float's `\begin` or `\end` line is treated as outside it. A run frozen without a navigation index, or without figure entries, never groups by that object. Groups do not chain: in primary order, each finding not yet grouped starts a group and gathers every later ungrouped finding that shares evidence with it, so every member shares evidence with its group's primary, and a finding that matches nothing forms its own group. The section has a `verdict` (the latest substantive output's `attempt_id`, `recommendation`, and `decisive_questions`, or null), `counts` of groups and findings per tier, and `groups`. Each group lists `group_id` (derived from its sorted member IDs), `primary_finding_id` (highest severity, then `substantive_review`, then earliest), sorted `finding_ids`, `roles` (including roles whose identical finding was recorded as a duplicate of a stored member), `max_severity`, `categories`, merged `evidence` spans and pages, `claim`, the primary finding's `consequence`, `tier`, `decision_state`, `pending_finding_ids` (the undecided members), `members` (each member's `finding_id`, `role`, `severity`, and current `status`), and one of `titles` per member in `finding_ids` order. `claim` is the most prominent linked claim (`text`, `prominence`, and the linking `finding_id`): a substantive finding links through its claim check to an inventoried claim, a detail-role finding through its `affected_claim` with null prominence; a claim check whose finding was stored under an earlier task's identical finding links to that stored finding through its duplicate record. `tier` is `headline` when a member links to a headline claim, `supporting` for any other link, `compliance` when every member is `submission_compliance`, and otherwise `other`. Groups are ordered by tier (headline, supporting, other, compliance), then severity, then primary finding ID. `decision_state` is the members' shared status (`pending`, `confirmed`, `rejected`, or `waived`), or `mixed` when they differ; read `members` for each status. Grouping is a reading aid: findings, decisions, and the release gate are unchanged. The Markdown export lists the groups before the individual findings.
+Entries marked `requires_human_decision` are human gates: stop and hand them to the author.
 
-A claimed attempt remains active when the CLI exits. Claim and `task show` return a compact overview; `data.input_digest` is the digest to submit and `data.export_command` names the export. `task export ATTEMPT_ID --dir DIR` writes the attempt's frozen material into `DIR`, which must not exist or must be an empty directory; otherwise the command fails with `configuration_error` and writes nothing:
+## Run lifecycle
 
-- every manuscript source at the `read_path` the source map lists (under `sources/`), `manifest.json`, `navigation.json`, `source-map.json`, and `manuscript.pdf`;
-- `task/prompt.md`, the attempt's frozen prompt, which includes the correction feedback on a retry; `task/schema.json`, the frozen output schema, whose required fields an output must supply; `task/brief.json` when the run has a brief; and, for a review task, `task/example.json`, a complete placeholder output built from the frozen schema that passed the task's output model and anchor checks when the task was prepared. Revision and verification tasks have no example.
+| Status | Meaning | Next step |
+| --- | --- | --- |
+| `preparing` | Snapshot, build, and bundle in progress | `run resume` if it stopped |
+| `reviewing` | Review tasks are open | Work each task |
+| `awaiting_decision` | Every profile role has an accepted review | `finding decide`, `run resume` |
+| `revising` | A revision task is open | Work the task |
+| `awaiting_patch_approval` | A patch was proposed, or its verification failed | `patch show`, `patch decide`, `run resume` |
+| `verifying` | A verification task is open | Work it from a new conversation |
+| `ready_to_apply` | Verification passed | `patch apply` |
+| `completed` | The patch was applied, or nothing was confirmed | `run gate`, `run report` |
+| `failed` | An operation failed; `has_error` is true | Repair, then `run resume` if offered |
+| `cancelled` | Ended by `run cancel` | None |
 
-Each file holds the exact frozen bytes: bundle files are checked against the bundle index and task inputs against their recorded artifact digests before anything is written. Each is written to a temporary file, renamed into place, and made read-only (`0444`). Every destination is resolved and refused if it would leave `DIR`, and a bundle path that would collide with a task input under `task/` is refused before anything is written. If any file or the event fails, every file written by that call is removed again. Rendered page images are not exported. The host owns `DIR`; Scriptorium never cleans it up. The response gives the directory, the file count, the total bytes, `files_digest` over the sorted exported listing, and the paths and digests of the task inputs; `source-map.json` and `manifest.json` list the sources. Each successful export appends one `tool.export` event bound to the attempt with the sorted paths and digests. Export works for completed, failed, and interrupted attempts too; it changes no workflow state.
+After the decisions, `run resume` prepares a revision task if any finding is confirmed and completes the run if
+none is. After the patch decision, it prepares a verification task for an approved patch, or a new revision task
+carrying the rejection reason. A failing verification returns the run to `awaiting_patch_approval`; reject the
+patch there to request a new revision. `completed` and `cancelled` runs cannot be reopened.
 
-Read the exported files with the host's own tools. Evidence is unchanged by an export: anchors cite the frozen `source_path`, `source_digest` from `source-map.json`, and lines, and are verified at submission; `task submit --check` verifies them without recording anything. Exports and events do not prove that anything was read.
+## Working a task
+
+### Claiming
 
 ```bash
-scriptorium --json task export ATTEMPT_ID --dir review-export
-scriptorium --json task page ATTEMPT_ID --number 1
-scriptorium --json task page ATTEMPT_ID --document supplement.tex --number 1
-scriptorium --json task submit ATTEMPT_ID --input-digest DIGEST --file answer.json --check
-scriptorium --json task submit ATTEMPT_ID --input-digest DIGEST --file answer.json
+scriptorium --json task claim TASK_ID --client claude_code --model MODEL --effort EFFORT \
+  --session-id SESSION_ID --session-source host
 ```
 
-For explicitly configured independent supplements, inventory `compiled_pdf.documents` in the exported
-`source-map.json`. Each record identifies a LaTeX entrypoint and its contiguous range in the assembled review PDF.
-Without `--document`, `--number` is the global review-PDF page. With `--document`, it is the 1-based physical
-page within that entrypoint's compiled document. The response's `source_path` and `page` are the evidence
-coordinates; `document` and `document_page` describe their origin. Use the returned global `page` in findings
-and claim checks, never the document-local number. The `tool.page` event records both coordinates but does
-not prove the model opened the image. Missing entrypoints and out-of-range local pages are rejected.
+The host owns model choice, effort, authentication, and spending. Claim with the model and effort the host actually
+selected; Scriptorium records them with the client and session as reported provenance and cannot verify them. Use
+`--session-source host` only for an ID from the host's own state, otherwise `declared`. The same client, model,
+effort, and session claiming again get the same running attempt; another session cannot take it. The response
+gives `input_digest` to submit with and `export_command`.
 
-Configure and commit independent `.tex` entrypoints using `manuscript.supplements` before starting a run.
-`doctor` and run preparation compile every declared document. A supplement failure cannot produce a main-only
-review task. Fix an external prerequisite and resume when possible; if the committed inputs or configuration
-need changing, commit them and start a new run. Revisions and verification rebuild all the frozen entrypoints.
+### Export
 
-`navigation.json` indexes literal source locations. Each entry has a `command`, the LaTeX command or environment name (such as `section`, `ref`, `cite`, `label`, `caption`, `includegraphics`, `table`, `figure`, `equation`) or `quantity`, its `source_path`, inclusive `start_line`/`end_line`, and literal `value` (at most the first 2000 characters of a long environment body); graphics entries add candidate paths. Table, figure, and equation entries span their environment from `\begin` to `\end` in the typeset document body, and a `\[ ... \]` display is a `displaymath` entry. Quantity entries locate `siunitx` commands and numbers in document text that carry a decimal point, uncertainty, exponent, `\pm`, or percent sign, with an adjacent unit when one follows; integers, versions, labels, lengths, macro definitions, comments, and the preamble are skipped. They are heuristic locations for checking reported values, not an exhaustive or interpreted list. Navigation entries are not evidence or an interpretation of TeX; read the source range before relying on one.
+`task export ATTEMPT_ID --dir DIR` writes into a directory that does not exist or is empty; otherwise it fails with
+`configuration_error` and writes nothing.
 
-`task page` returns the exact rendered image path and digest; the host must actually open the image for a visual review. `--scale S` (0.5-4.0; frozen page images use 1.5) and `--crop x0,y0,x1,y1` (fractions of the page width and height) render a zoomed view from the digest-checked frozen `manuscript.pdf` into the run's `page-views/` directory; a view larger than 40 megapixels is rejected, so lower the scale or crop a smaller region. The response keeps the frozen page `digest` and adds `view` with the scale, crop and rendered image digest; evidence still cites the global page. `--text` writes the page's PDF text layer to `page-views/DIGEST.txt` and returns its `path`, `digest`, and size in `bytes` with `evidence: false`. Each view and text file is named by its own digest and never overwritten, so a returned path keeps its bytes. A run keeps at most 512 MiB of distinct views and text files; after that, reuse an earlier one. Extraction can reorder or drop text: the text layer is a reading aid to locate material, never evidence, so quote manuscript text from frozen sources.
+| Path | Content |
+| --- | --- |
+| `sources/...` | Every frozen source at its `read_path` |
+| `source-map.json` | Per source: `source_path`, `read_path`, `source_digest`, `line_count`, `text_anchorable`; the PDF's pages and `compiled_pdf.documents` |
+| `manifest.json` | Commit, tree, sources with digests and line counts, PDF and page digests, documents |
+| `navigation.json` | An index of literal source locations (below) |
+| `manuscript.pdf` | The review PDF |
+| `task/prompt.md` | This attempt's prompt, with correction feedback after a retry |
+| `task/schema.json` | The output schema |
+| `task/brief.json` | The review brief, when the run has one |
+| `task/example.json` | Review tasks: a complete output that passed this task's checks |
 
-External review sessions have no wall-clock deadline by default. For AGY print-mode validation, use `--print-timeout 0` and wait without a subprocess timeout. A host process exit or a success message is not review completion: inspect the accepted submission receipt and `run status`, and stop at an explicit human gate. If the host disconnects, inspect the durable attempt and reconnect to the same session before deciding whether explicit abandonment is needed. Paid-call and correction allowances remain separate from elapsed time.
+- Files hold the exact frozen bytes, checked against the bundle index or their recorded digest, and are written
+  atomically and read-only (`0444`). A path that would leave `DIR` or collide with `task/` is refused before
+  anything is written, and a failure removes everything the call wrote.
+- Page images are not exported; use `task page`. The host owns `DIR`; Scriptorium never cleans it up.
+- Export works for any attempt of the run, including finished ones, changes no workflow state, and appends one
+  `tool.export` event with the sorted paths and digests.
 
-`task submit --file` accepts UTF-8 JSON up to 2 MB from a file or stdin. The CLI rejects larger input before decoding or passing it to the workflow.
+Read the files with the host's own tools. A search hit can be a comment or inactive text; check that it belongs to
+the compiled manuscript.
 
-`task submit --check` validates the same input against the attempt's frozen schema, evidence map, task context and verifier-session rule without storing it. It requires an active attempt and the attempt's input digest, records no output or validation-report artifact, findings or attempt status, and leaves the attempt claimable for submission. It appends one `tool.submit_check` event with the input and output digests, the outcome and the issue codes. `data.valid` reports that this file would currently be accepted, not that a later submission was made; workflow state can still change before the real submission, which validates again.
+`navigation.json` entries have a `command` (such as `section`, `ref`, `cite`, `label`, `caption`,
+`includegraphics`, `table`, `figure`, `equation`, `displaymath` for `\[ ... \]`, or `quantity`), `source_path`,
+inclusive `start_line` and `end_line`, and the literal `value` (at most 2000 characters); graphics entries add
+candidate paths. Environments span `\begin` to `\end` in the document body. Quantity entries mark `siunitx`
+commands and numbers with a decimal point, uncertainty, exponent, `\pm`, or percent sign, with an adjacent unit;
+integers, versions, labels, lengths, macro definitions, comments, and the preamble are skipped. Entries are
+heuristic locations, not evidence: read the source range before relying on one.
 
-For a new review task, include `limitations` alongside `summary` and `findings`: a list, possibly empty, of the relevant material you could not check or could not read, including material the manuscript mentions that is absent from the frozen sources. This minimal output illustrates the shape only; a new `substantive_review` also requires `claim_checks`, `claim_inventory`, and `verdict`. The exported `task/example.json` of a review task is a complete output with a finding, its exact text anchor, and its zero-based claim-check link. The frozen `task/schema.json` takes precedence over either example:
+### Pages
+
+`task page` needs an active attempt and returns the path and digest of a rendered page. Open the image; a path is
+not an inspection.
+
+- `--number` is the 1-based global page of `manuscript.pdf`. With `--document ENTRYPOINT` it is the physical page
+  within that document (`compiled_pdf.documents` gives each `entrypoint`, `start_page`, and `page_count`). Unknown
+  entrypoints and out-of-range pages are rejected.
+- `source_path` and `page` in the response are the evidence coordinates; `document` and `document_page` say where
+  the page came from. Cite the global page, never a local number or a printed page label.
+- `--scale` (0.5 to 4.0; frozen pages use 1.5) and `--crop x0,y0,x1,y1` (page fractions) render a view from the
+  frozen PDF. The response keeps the frozen page `digest` and adds `view`. Views over 40 megapixels are rejected.
+- `--text` writes the page's PDF text layer to a file and returns `path`, `digest`, `bytes`, and `evidence: false`.
+  Extraction can reorder or drop text: use it to find material, and quote from the sources.
+- Views and text files are kept in the run's `page-views/`, named by digest and never overwritten, up to 512 MiB
+  per run; after that, reuse an earlier one.
+- Each call appends a `tool.page` event with both coordinates. It shows what was rendered, not what was opened.
+
+A non-text source, such as a figure PDF or PNG, takes no line anchor. Its `includegraphics` entry gives the TeX
+location, not the page: find the page from the caption (the text layer helps), open it, zoom with
+`--scale 3 --crop ...`, and cite the global page.
+
+### Submitting
+
+- `--file` takes one UTF-8 JSON object of at most 2 MB, or `-` for stdin; larger input is rejected before it is
+  decoded.
+- `--check` runs the full validation (schema, evidence, task context, verification session rule) under the run
+  lock, for an active attempt and its input digest. It stores nothing but one `tool.submit_check` event (input and
+  output digests, outcome, issue codes) and leaves the attempt claimable. `valid: true` means the file would be
+  accepted now; it is not a receipt, and the submission validates again.
+- A submission stores the raw output and validates it. A valid output completes the attempt and its task; an
+  invalid one fails the attempt with a validation report, and nothing is taken from it.
+- An accepted review completes its task and satisfies the review condition for its role; the task takes no
+  further submission.
+- Resubmitting the same output to the latest completed or failed attempt returns the same receipt. Other output
+  for a finished attempt, and any output for a superseded, interrupted, or cancelled one, is rejected.
+
+## Output rules
+
+`task/schema.json` is authoritative: supply every required field and nothing else. `task/example.json` shows the
+shape of a complete review output; do not copy its content.
+
+### Evidence anchors
+
+| Kind | Fields | Rule |
+| --- | --- | --- |
+| Source text | `source_path`, `start_line`, `end_line`, `source_digest`, `quoted_text` | The bare `source_path` from `source-map.json` (not the `read_path`) of a `text_anchorable` source, its digest, an inclusive range within `line_count`, and a quote found verbatim in that range |
+| PDF page | `source_path: "manuscript.pdf"`, `page` | A global page; no line, digest, or quote fields |
+
+Lines are counted by the [evidence contract](architecture.md#evidence-contract). Use page anchors only for what
+text cannot show: layout, graphics, colours, markings, rendering. Anchors are checked at submission against the
+frozen sources, whatever the reviewer read.
+
+### Review output
+
+Every review role returns `summary`, `findings` (possibly empty), and `limitations`:
 
 ```json
 {
@@ -114,29 +221,210 @@ For a new review task, include `limitations` alongside `summary` and `findings`:
 }
 ```
 
-An accepted submission completes its review task and satisfies the required-review gate for that role; the task takes no further submission. Validation checks only the shape of `limitations`. Neither the list nor the recorded export and page events prove that the host opened or understood material.
+- `limitations` lists relevant material the reviewer could not check or read, including material the manuscript
+  mentions that is absent from the frozen sources; it may be empty. Only its shape is validated.
+- A finding has `category`, `severity`, `title`, `claim`, `evidence` (at least one anchor), `explanation`,
+  `suggested_action`, `confidence` (0 to 1), and `consequence`: what a reader would wrongly believe, or be unable
+  to do, if it is not fixed.
+- `copyedit`, `consistency`, and `figure_review` findings at `moderate` or above name an `affected_claim`, the claim
+  or result whose reading changes. It is stored outside the finding's identity, so a later duplicate can fill a
+  missing value; the first stays. `finding show` and `run report` show it. Substantive findings link claims
+  through claim checks instead.
 
-A frozen source that is not text, such as a figure PDF or PNG listed in the source map, takes no line anchor. Inspect it as rendered where the manuscript places it: its `includegraphics` entry in `navigation.json` gives the TeX location but not the page, so locate the page from the nearby caption (the `--text` layer can help find it), open the rendered image, and use `--scale 3 --crop` for detail. Cite those global pages as evidence.
+### Severity
 
-For a new `substantive_review` task, also include `claim_checks`. Each entry has `claim_index`, `evidence` (the same exact source or PDF anchors used by findings), `critical_question`, `countercheck`, `assessment` (`supported`, `unresolved`, or `finding`), and `finding_indices`. Each entry also requires `stated_scope`, `check_type` (`reporting_consistency`, `recomputation`, `design_and_analysis`, `alternative_explanation`, or `scope_and_generality`), `question_answer` (`yes`, `partly`, `no`, or `not_checkable`), and `exceptions`. A `recomputation` check, and only that type, includes a `recomputation` object with `inputs`, `calculation`, `result`, `reported`, and `outcome` (`matches` or `differs`). `supported` goes with `yes` and only with it, `yes` lists no exceptions and `partly` at least one, a differing recomputation cannot answer `yes` and a matching one cannot answer `no`, and `not_checkable` requires `unresolved`. These rules check internal consistency only; the judgments remain model declarations. New runs also require `claim_inventory`. Each entry has `claim`, `claim_anchor` (validated like evidence), `prominence` (`headline` for claims in the abstract, stated contributions, or conclusions; `supporting` for claims they depend on), and, when no claim check names it by `claim_index` (a zero-based position in `claim_inventory`), a `not_checked_reason`. Every headline claim must be checked, with `question_answer` `not_checkable` when the frozen bundle cannot decide it, and a `blocker` finding must be linked from a check of a headline claim; a supporting claim may stay unchecked with its reason. New runs also require `verdict` with `recommendation` (`accept`, `minor_revision`, `major_revision`, or `reject`) and one to three `decisive_questions`; `reject` or `major_revision` needs a `major` or `blocker` finding in the submission, and `accept` or `minor_revision` allows none. A claim check's `finding_indices` are zero-based positions in the submitted `findings` array. Use an empty index list for supported or unresolved checks; a finding check must link at least one finding, and every finding must be linked. A substantive review requires at least one claim check. The frozen schema in `task/schema.json` is authoritative.
+| Level | Meaning |
+| --- | --- |
+| `blocker` | A headline claim is false as stated, or the manuscript cannot be evaluated |
+| `major` | A headline claim needs substantive qualification, or a key result cannot be reproduced or traced |
+| `moderate` | A supporting claim is affected, or a reader would misread a specific result or comparison |
+| `minor` | A presentation, consistency, or compliance problem that does not change how any claim should be read |
+| `suggestion` | An optional improvement |
 
-Before submitting a substantive review, follow its frozen prompt's conclusion-consistency instructions. A
-`supported` assessment needs evidence for the stated claim and critical question at the same scope; resolving one
-candidate criticism does not establish a broader conclusion. Carry material counterexamples and uncertainty into
-the assessment and summary, and anchor the evidence that determines the judgment. The current model performs
-this step from its frozen prompt; it does not start another model or add a submission field. The CLI validates the
-schema, anchors and finding links, not the scientific meaning of this comparison.
+- A value, margin, count, or ranking that disagrees between text, table, figure, or appendix is `moderate` only
+  when a claim rests on it and `major` only when correcting it changes a headline claim. Mismatched names, labels,
+  terms, captions, units, or bibliography fields are `minor` or `suggestion` unless they hide or alter a result.
+  The consistency, figure-review, and copyedit prompts restate this; the copyedit and substantive prompts send
+  value disagreements and presentation items to the roles that own them.
+- Checklist answers, page or figure limits, anonymity, and template rules use category `submission_compliance`,
+  accepted only at `minor` or `suggestion`.
+- Severity is the model's declaration. Validation enforces the compliance ceiling and the required fields, not
+  whether a level fits.
 
-Keep work completion separate from scientific certainty. An `unresolved` claim may remain in an accepted review;
-describe missing external evidence in `limitations`. That alone does not turn the unresolved question into a
-finding. Existing runs keep their frozen prompts; use a new run to evaluate an updated review procedure.
+### Substantive review output
 
-Each report entry for claim checks includes `submitted_findings` in that attempt's original order and the `verdict`, which the Markdown report shows first. Its `finding_indices` refer to this list, not the report-wide findings, which may be severity-sorted or deduplicated across attempts.
+A `substantive_review` output adds three fields:
 
-After each `task submit`, use `run status RUN_ID` and follow `next_actions`. The run advances to human finding decisions once every required role has an accepted review. Repeating a superseded attempt's submission is rejected. Completed or cancelled runs cannot be reopened. If an accepted output awaits replay after a process exit, `run status` suggests `run resume`. A `next_actions` entry marked `requires_human_decision` identifies a finding decision, patch approval, or explicit patch application gate.
+| Field | Content |
+| --- | --- |
+| `claim_inventory` | Each central claim: `claim`, `claim_anchor` (where the authors state it), `prominence` (`headline` for the abstract, contributions, or conclusions; `supporting` for claims they rest on), and `not_checked_reason` exactly when no check names it |
+| `claim_checks` | `claim_index` (zero-based in `claim_inventory`), `evidence`, `critical_question`, `countercheck`, `stated_scope`, `check_type`, `question_answer`, `exceptions`, `recomputation`, `assessment`, `finding_indices` |
+| `verdict` | `recommendation` (`accept`, `minor_revision`, `major_revision`, `reject`) and one to three `decisive_questions` |
 
-When output is invalid, inspect every issue in `data.validation_report.issues`. No findings, patch, or verification are accepted from that attempt. Correct the output against the same frozen schema and source map, then explicitly run `scriptorium --json run retry RUN_ID --task TASK_ID`. Claim again, export the new attempt, and submit with the **new attempt ID and input digest**; the failed attempt cannot accept a corrected output. The next prompt includes the durable diagnostics. If an active external conversation was abandoned, run `scriptorium --json run retry RUN_ID --task TASK_ID --abandon-attempt ATTEMPT_ID --reason TEXT` to interrupt only that attempt and make the task claimable again. Its late submission is rejected. Repeated identical submissions are idempotent. Different output for a terminal attempt and output for a superseded or cancelled attempt are rejected.
+`check_type` is `reporting_consistency`, `recomputation`, `design_and_analysis`, `alternative_explanation`, or
+`scope_and_generality`; a `recomputation` object (`inputs`, `calculation`, `result`, `reported`, `outcome`
+`matches` or `differs`) appears exactly for that type. Validation requires:
 
-After review tasks complete, read `run report RUN_ID --part findings_grouped`, present the groups to the author in tier order with a one-line judgement of whether each changes how a headline claim reads, and record only the decisions the author gives, per group or per tier, with `finding decide` on the group's `pending_finding_ids` only, never IDs already decided; then `run resume`. `finding decide FINDING_ID [FINDING_ID ...] --confirm|--reject|--waive --reason TEXT` applies one decision and reason to each listed finding. All IDs must exist, belong to one run, and be decidable, or nothing is recorded; otherwise each finding receives its own decision record and event in order, in one replacement of the run's state file. The response lists `finding_ids`; a single ID also returns `decision` and `finding`, and several return `decisions` and `findings`. A confirmed finding prepares a revision task. After submitting revision output, inspect the patch and decide it explicitly; `run status` then suggests `run resume` to advance an approved or rejected decision. An approved patch prepares a verification task. Use a new external conversation and the host's session ID for verification; `--session-source declared` marks identity as unconfirmed and cannot pass the gate. Apply only a verified patch, then inspect `run gate` and `run report`. A failed run suggests `run resume` only when its recorded pre-failure stage is recoverable; repair the prerequisite first.
+- at least one claim check, and a check of every headline claim (`question_answer` `not_checkable` when the bundle
+  cannot decide it); a supporting claim may stay unchecked with its reason;
+- `supported` exactly with `yes`; no `exceptions` with `yes` and at least one with `partly`; `unresolved` with
+  `not_checkable`; no `yes` after a differing recomputation and no `no` after a matching one;
+- `finding_indices` as zero-based positions in this output's `findings`: a `finding` check links at least one,
+  `supported` and `unresolved` checks link none, and every finding is linked;
+- every `blocker` linked from a check of a headline claim;
+- `reject` or `major_revision` with at least one `major` or `blocker` finding of this output, and `accept` or
+  `minor_revision` with none (`verdict.inconsistent`).
 
-`run cancel RUN_ID --reason TEXT` waits for any current run operation to release the lock, then durably cancels pending tasks and invalidates active attempts. It does not terminate an external client conversation. A later waiver that changes an active revision or verification task interrupts that attempt; run `run resume` to prepare the replacement task. Do not edit `.scriptorium/` or its run state files, artifacts, snapshots, or bundles to repair a run. Fix the prerequisite and use the CLI.
+Every anchor, including claim anchors, and every link is validated before any finding is accepted. The prompt also
+asks the reviewer to keep each claim's scope, counterevidence, assessment, and summary consistent: answering one
+criticism does not support a broader claim, and exceptions and open questions stay visible. That judgment is the
+model's; validation does not perform it. An `unresolved` claim may stand in an accepted review, with missing
+evidence in `limitations`; that alone is not a finding. Claim checks are declarations shown for inspection, not
+proof of scientific correctness.
+
+### Revision output
+
+`summary` and `edits`. An edit has `finding_ids`, `path` (a bare text-anchorable `source_path`), `source_digest`,
+inclusive `start_line` and `end_line`, `before` (the current text of that range, with or without its final line
+terminator), a different `after`, and `rationale`. Edits must not overlap and must cover every confirmed finding.
+Codes: `revision.edits_required`, `revision.unknown_finding_ids`, `revision.findings_uncovered`,
+`revision.edit_path_unknown`, `revision.edit_path_not_editable`, `revision.source_digest_mismatch`,
+`revision.range_out_of_bounds`, `revision.before_mismatch`, `revision.edits_overlap`. The accepted edits are applied
+to a copy of the snapshot and compiled before the patch is proposed; a build failure fails the run.
+
+### Verification output
+
+`verdict` (`pass` or `fail`), `summary`, `resolved_finding_ids`, and `issues` (`title`, `explanation`, optional
+`evidence` against the patched sources). A `pass` resolves every confirmed finding and has no issues. The attempt
+must be claimed with `--session-source host` from a session that did no review or revision work in this run;
+otherwise the submission is rejected with `verification.session_unconfirmed`.
+
+### Validation report
+
+`validation_report.issues` lists each problem with a `code`, a JSON-pointer `path`, a `message`, often `expected`
+and `actual`, and a `diff` for a `before` mismatch. Code prefixes: `json.` (invalid JSON, often an unescaped LaTeX
+backslash), `schema.` (shape), `evidence.` (for example `evidence.source_quote_mismatch`,
+`evidence.source_digest_mismatch`, `evidence.range_out_of_bounds`, `evidence.page_out_of_bounds`), `verdict.`,
+`revision.`, and `verification.`.
+
+## Deciding findings
+
+At `awaiting_decision`:
+
+1. Write `run report RUN_ID --part findings_grouped` to a file and read it.
+2. Present the `verdict`, then the groups in tier order. For each, say in one line whether it changes how a headline
+   claim reads, using its `claim` and `consequence`, and propose confirm, reject, or waive.
+3. Record only the author's decisions, per group or per tier, with one `finding decide` over the group's
+   `pending_finding_ids`, never IDs already decided. Then `run resume`.
+
+Confirm sends a finding to revision, reject dismisses it, and waive accepts it without revision. Never infer a
+decision from severity or tier. `finding decide` applies one decision and reason to each listed finding: all IDs
+must exist, without repeats, and belong to one run that accepts the decision, or nothing is recorded; otherwise
+each gets its own decision record and event, in one replacement of the run state. Outside `awaiting_decision` only
+a waiver is accepted, and nothing once the run is completed, failed, or cancelled.
+
+### How findings are grouped
+
+`findings_grouped` groups the run's findings across roles and attempts. Two findings share evidence when:
+
+- both have line anchors and more than half of either one's distinct line anchors overlap a line anchor of the
+  other (same source, inclusive ranges sharing at least half of the shorter); when either has a line anchor, line
+  anchors decide;
+- both have only page anchors, share a linked claim, and more than half of either one's pages appear in the other;
+- they share a linked claim and cite the same table or figure; or
+- they cite the same table or figure and a line anchor of one overlaps a line anchor of the other.
+
+A finding cites a table or figure when a line anchor lies inside a `table`, `table*`, `sidewaystable`,
+`longtable`, `figure`, or `figure*` environment, or covers a `ref`, `cref`, `Cref`, `autoref`, `eqref`, or
+`pageref` to a `label` inside one. A label defined more than once names nothing, and text only on an environment's
+`\begin` or `\end` line counts as outside it.
+
+Groups do not chain. In primary order (highest severity, then `substantive_review`, then earliest), each ungrouped
+finding starts a group and takes every later ungrouped finding that shares evidence with it. Linked claims come
+from claim checks (with prominence) and from `affected_claim` (without); a finding repeated by a later task
+resolves to the stored one through its duplicate record.
+
+The section has `verdict` (the latest substantive `attempt_id`, `recommendation`, and `decisive_questions`, or
+null), `counts` of groups and findings per tier, and `groups`. Each group has `group_id` (from its sorted member
+IDs), `primary_finding_id`, sorted `finding_ids`, `members` (`finding_id`, `role`, `severity`, `status`),
+`titles`, `roles` (including roles whose identical finding was stored as a duplicate), `max_severity`,
+`categories`, merged `evidence`, `claim` (the most prominent linked claim: `text`, `prominence`, `finding_id`), the
+primary's `consequence`, `tier`, `decision_state` (the shared status, or `mixed`), and `pending_finding_ids`.
+
+`tier` is `headline` when a member links to a headline claim, `supporting` for any other link, `compliance` when
+every member is `submission_compliance`, and otherwise `other`. Groups are ordered by tier (headline, supporting,
+other, compliance), then severity, then primary ID. Grouping is a reading aid and changes no finding, decision, or
+gate.
+
+### Decision statistics
+
+`decision_stats` counts findings by current decision (`confirmed`, `rejected`, `waived`, `pending`) in total and by
+role, category, severity, and role with severity, and lists the latest rejection and waiver reasons (first 200
+characters, newest first, at most 50). A finding decided twice counts once, under its latest decision. Rows are
+lists, sorted by name and from `blocker` to `suggestion`. Use it to calibrate the next brief's `severity_notes`; it
+is not a quality metric and does not affect the gate.
+
+## Patches, verification, and application
+
+1. After the revision, read the patch with `patch show`, record the author's decision with `patch decide` (only the
+   latest patch can be decided), and `run resume`.
+2. Work the verification task from a new host session ([verification output](#verification-output)).
+3. Apply the verified patch with `patch apply`. It writes only the files the patch edits, after checking that each
+   still matches the frozen revision; if one does not, the patch becomes `stale`, the run fails, and nothing is
+   written.
+4. Read `run gate` ([conditions](architecture.md#gates)) and `run report`.
+
+## Report sections
+
+`run report RUN_ID --part PART` prints the value under that key of the JSON report (inside `data` with `--json`);
+it cannot be combined with `--format`, which prints the whole report as `markdown` (default) or `json`. Redirect
+large output to a file:
+
+```bash
+scriptorium run report RUN_ID --part findings_grouped > findings_grouped.json
+scriptorium run report RUN_ID --format markdown > report.md
+```
+
+| Part | Content |
+| --- | --- |
+| `run` | The run record: frozen configuration, error, and the full brief |
+| `tasks` | Each task with its attempts |
+| `finding_ids`, `patch_ids` | IDs in order |
+| `findings` | Each finding with its decisions; status follows the latest decision |
+| `findings_grouped` | [Groups](#how-findings-are-grouped) |
+| `decision_stats` | [Decision counts](#decision-statistics) |
+| `patches` | Each patch with its decisions and verifications |
+| `events` | The append-only event log, including `tool.*` events |
+| `validation_reports` | Every validation report, oldest first |
+| `review_limitations` | Each accepted review's `limitations`, with task, attempt, and role |
+| `review_claim_checks` | Each accepted substantive output's `submitted_findings` (in submitted order, which `finding_indices` refer to), `claim_checks`, `claim_inventory`, `verdict` |
+| `gate` | The release gate result |
+
+The Markdown report has the run header, tasks, reviewer limitations, claim checks (verdict first), validation
+failures, findings by group, findings, decision statistics, patches, and open gate conditions. Reports validate
+stored outputs again, so a corrupt artifact fails the report. When `has_error` is true, read `run`,
+`validation_reports`, and `gate`.
+
+## Recovery
+
+- **Rejected submission.** Read every issue. Fix the output, run `run retry RUN_ID --task TASK_ID`, claim again,
+  export the new attempt, and submit with its new ID and input digest; its prompt carries the frozen diagnostics.
+  A failed attempt never accepts a correction. Retries are explicit and unlimited.
+- **Long or lost sessions.** A claim survives CLI exit and has no time limit. A host exiting or printing success is
+  not completion: check the receipt and `run status`. After a disconnect, read the attempt with `task show` and
+  rejoin from the same session before abandoning it.
+- **Abandoned attempt.** `run retry RUN_ID --task TASK_ID --abandon-attempt ATTEMPT_ID --reason TEXT` interrupts
+  only the running attempt and reopens the task; a late submission to it is rejected. Only abandonment, retry, or
+  cancellation ends a claim.
+- **Accepted work not replayed.** If a process stopped after accepting an output, `run status` offers `run resume`.
+- **Waiver after confirmation.** Waiving a confirmed finding interrupts an open revision or verification task whose
+  prompt no longer matches; `run resume` prepares its replacement.
+- **Failed run.** Repair the cause, such as a missing tool or a failed build. `run status` offers `run resume` only
+  when the stage before the failure can be recovered. A failed run cannot be cancelled. If committed inputs or
+  configuration must change, commit them and start a new run.
+- **Busy run.** A command needing the run lock while another holds it fails with `invalid_state` naming the holder;
+  `run cancel`, `task export`, `task page`, and `task submit --check` wait instead.
+- **Cancel.** `run cancel` waits for the current operation, cancels pending tasks, and interrupts active attempts.
+  It does not stop the host conversation.
+
+Never repair a run by editing `.scriptorium/`; fix the prerequisite and use the CLI.

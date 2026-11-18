@@ -1,14 +1,14 @@
 from scriptorium.domain import AgentRole, Finding, FindingSeverity, FindingStatus
-from scriptorium.storage import Database
+from scriptorium.storage import RunStore
 
 from ._factories import create_completed_attempt, make_run
 
 
 def test_finding_decision_is_atomic_and_history_is_immutable(tmp_path) -> None:
-    with Database(tmp_path) as database:
-        run = database.create_run(make_run())
-        task, attempt = create_completed_attempt(database, run)
-        finding = database.create_finding(
+    with RunStore(tmp_path) as store:
+        run = store.create_run(make_run())
+        task, attempt = create_completed_attempt(store, run)
+        finding = store.create_finding(
             Finding(
                 run_id=run.id,
                 task_id=task.id,
@@ -27,21 +27,21 @@ def test_finding_decision_is_atomic_and_history_is_immutable(tmp_path) -> None:
             )
         )
 
-        decision = database.decide_finding(finding.id, "confirm", "The ambiguity is real.")
+        decision = store.decide_finding(finding.id, "confirm", "The ambiguity is real.")
 
-        assert database.get_finding(finding.id).status == FindingStatus.CONFIRMED
-        assert database.list_decisions("finding", finding.id) == [decision]
-        later = database.decide_finding(finding.id, "waive", "Out of scope for this draft.")
+        assert store.get_finding(finding.id).status == FindingStatus.CONFIRMED
+        assert store.list_decisions("finding", finding.id) == [decision]
+        later = store.decide_finding(finding.id, "waive", "Out of scope for this draft.")
 
-        assert database.get_finding(finding.id).status == FindingStatus.WAIVED
-        assert database.list_decisions("finding", finding.id) == [decision, later]
-        assert [event.event_type for event in database.list_events(run.id)].count("finding.decided") == 2
+        assert store.get_finding(finding.id).status == FindingStatus.WAIVED
+        assert store.list_decisions("finding", finding.id) == [decision, later]
+        assert [event.event_type for event in store.list_events(run.id)].count("finding.decided") == 2
 
 
 def test_findings_deduplicate_only_by_exact_fingerprint(tmp_path) -> None:
-    with Database(tmp_path) as database:
-        run = database.create_run(make_run())
-        task, attempt = create_completed_attempt(database, run)
+    with RunStore(tmp_path) as store:
+        run = store.create_run(make_run())
+        task, attempt = create_completed_attempt(store, run)
 
         def finding(fingerprint: str, title: str) -> Finding:
             return Finding(
@@ -61,10 +61,10 @@ def test_findings_deduplicate_only_by_exact_fingerprint(tmp_path) -> None:
                 consequence="A reader cannot tell which reading is meant.",
             )
 
-        first = database.get_or_create_finding(finding("a" * 64, "Ambiguous wording"))
-        duplicate = database.get_or_create_finding(finding("a" * 64, "Ambiguous wording"))
-        similar = database.get_or_create_finding(finding("b" * 64, "Slightly ambiguous wording"))
+        first = store.get_or_create_finding(finding("a" * 64, "Ambiguous wording"))
+        duplicate = store.get_or_create_finding(finding("a" * 64, "Ambiguous wording"))
+        similar = store.get_or_create_finding(finding("b" * 64, "Slightly ambiguous wording"))
 
         assert duplicate.id == first.id
         assert similar.id != first.id
-        assert len(database.list_findings(run.id)) == 2
+        assert len(store.list_findings(run.id)) == 2

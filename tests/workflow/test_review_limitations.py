@@ -73,12 +73,12 @@ def test_accepted_review_completes_the_task_and_the_required_review_gate(tmp_pat
         review = claim(service, run.id, AgentRole.SUBSTANTIVE_REVIEW)
         receipt = submit(service, review, {"summary": "Reviewed.", "findings": [], "limitations": LIMITATIONS})
         assert receipt["attempt"].status == AttemptStatus.COMPLETED
-        assert service.database.get_run(run.id).status == RunStatus.AWAITING_DECISION
+        assert service.store.get_run(run.id).status == RunStatus.AWAITING_DECISION
         assert service.list_tasks(run.id)["next_actions"] == [{"command": "run resume", "run_id": run.id}]
         assert service.evaluate_gate(run.id)["conditions"]["required_reviews_completed"]
 
         asyncio.run(service.resume_run(run.id))
-        assert service.database.get_run(run.id).status == RunStatus.COMPLETED
+        assert service.store.get_run(run.id).status == RunStatus.COMPLETED
         assert service.evaluate_gate(run.id)["passed"]
 
         output = service.artifacts.path_for(receipt["output_digest"])
