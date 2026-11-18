@@ -88,6 +88,7 @@ def _finding(identifier):
         explanation="Explanation",
         suggested_action="Fix it",
         confidence=0.9,
+        consequence="A reader misreads the claim.",
     )
 
 
@@ -122,9 +123,11 @@ def test_invalid_json_and_schema_errors_are_normalized_without_pydantic_noise(tm
                     "explanation": "Explanation",
                     "suggested_action": "Fix",
                     "confidence": "high",
+                    "consequence": "A reader misreads the claim.",
                     "unexpected": True,
                 }
-            ]
+            ],
+            "scope": {"completion": "complete", "checked": [], "outstanding": [], "limitations": []},
         }
         output, issues = service.armarius._parse_and_validate_output(
             ReviewOutput,
@@ -191,8 +194,11 @@ def test_review_semantic_validation_reports_all_independent_anchor_failures(tmp_
                     "explanation": "Explanation",
                     "suggested_action": "Fix",
                     "confidence": 0.9,
+                    "consequence": "A reader misreads the claim.",
+                    "affected_claim": "The reported result holds.",
                 }
             ],
+            "scope": {"completion": "complete", "checked": [], "outstanding": [], "limitations": []},
         }
     )
     with service:
@@ -234,8 +240,11 @@ def test_deepseek_anchor_regressions_have_consistent_schema_and_semantic_feedbac
                         "explanation": "Explanation",
                         "suggested_action": "Fix",
                         "confidence": 0.9,
+                        "consequence": "A reader misreads the claim.",
+                        "affected_claim": "The reported result holds.",
                     }
                 ],
+                "scope": {"completion": "complete", "checked": [], "outstanding": [], "limitations": []},
             }
         )
 
@@ -343,8 +352,11 @@ def test_non_text_source_paths_are_diagnostic_reads_not_durable_anchors(tmp_path
                         "explanation": "Explanation",
                         "suggested_action": "Fix",
                         "confidence": 0.9,
+                        "consequence": "A reader misreads the claim.",
+                        "affected_claim": "The reported result holds.",
                     }
                 ],
+                "scope": {"completion": "complete", "checked": [], "outstanding": [], "limitations": []},
             }
         )
     )

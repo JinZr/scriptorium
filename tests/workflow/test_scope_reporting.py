@@ -4,10 +4,9 @@ import subprocess
 
 import pytest
 
-from scriptorium.domain import AgentRole, AttemptStatus, Event, RunStatus, digest_json
-from scriptorium.schemas import SourceAnchorRecord, output_schema
+from scriptorium.domain import AgentRole, AttemptStatus, Event, RunStatus
+from scriptorium.schemas import SourceAnchorRecord
 from scriptorium.service import ScriptoriumService
-from scriptorium.workflow import Armarius
 
 from ._support import MANUSCRIPT, PdfBuildingManuscriptManager, claim, make_repository, submit
 
@@ -390,45 +389,6 @@ def test_finalized_scoped_run_keeps_prior_gate_result(tmp_path, monkeypatch, com
         gate = service.evaluate_gate(run.id)
         assert not gate["passed"]
         assert not gate["conditions"]["review_artifacts_valid"]
-
-
-def test_old_review_report_marks_scope_as_unreported(tmp_path, monkeypatch):
-    repo = make_repository(tmp_path, roles=("substantive_review",))
-    original = Armarius._freeze_config
-
-    def old_freeze(self, *args, **kwargs):
-        frozen = original(self, *args, **kwargs)
-        schema = output_schema("review", legacy_review=True)
-        frozen["schemas"]["review"] = {"digest": digest_json(schema), "content": schema}
-        frozen["schemas"].pop("scientific_review")
-        return frozen
-
-    with monkeypatch.context() as patch:
-        patch.setattr(Armarius, "_freeze_config", old_freeze)
-        with ScriptoriumService(repo, manuscript_manager=PdfBuildingManuscriptManager(repo)) as service:
-            run = asyncio.run(service.start_run("HEAD", "quick"))["run"]
-
-    with ScriptoriumService(repo, manuscript_manager=PdfBuildingManuscriptManager(repo)) as service:
-        review = claim(service, run.id, AgentRole.SUBSTANTIVE_REVIEW)
-        service.read_task(review["attempt"].id, "main.tex", 1, 1, 0, 8000)
-        asyncio.run(
-            service.submit_task(
-                review["attempt"].id,
-                review["input_digest"],
-                json.dumps({"summary": "Old review output.", "findings": []}),
-            )
-        )
-        report = service.render_report(run.id, "json")
-        assert report["review_scopes"][0]["scope"] is None
-        assert report["review_tool_access"][0]["returns"] == {
-            "read": 1,
-            "search": 0,
-            "page": 0,
-            "nav": 0,
-            "page_text": 0,
-        }
-        assert "scope not reported by frozen contract" in service.render_report(run.id, "markdown")
-        assert "read 1, search 0, page 0" in service.render_report(run.id, "markdown")
 
 
 def test_failed_review_still_reports_tool_returns(tmp_path):

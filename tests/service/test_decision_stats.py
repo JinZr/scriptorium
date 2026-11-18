@@ -23,6 +23,7 @@ def _finding(index, role=AgentRole.SUBSTANTIVE_REVIEW, severity=FindingSeverity.
         explanation="Explanation.",
         suggested_action="Act.",
         confidence=0.5,
+        consequence="Consequence.",
         id=f"finding_{index:03d}",
     )
 

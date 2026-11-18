@@ -6,10 +6,8 @@ from scriptorium.schemas import (
     SEVERITY_DEFINITIONS,
     SEVERITY_RUBRIC,
     SEVERITY_RULES,
-    InventoriedScientificReviewOutput,
     RatedFinding,
     ReviewScope,
-    ScopedReviewOutput,
     Severity,
     output_schema,
 )
@@ -62,18 +60,6 @@ def test_rated_finding_rejects_a_missing_or_blank_consequence() -> None:
     assert [error["type"] for error in _errors(RatedFinding, _finding(consequence=""))] == ["string_too_short"]
     blank = _errors(RatedFinding, _finding(consequence="  "))
     assert "consequence must state what a reader would wrongly believe" in blank[0]["msg"]
-
-
-def test_outputs_frozen_before_the_rubric_keep_findings_without_a_consequence() -> None:
-    legacy = _finding(consequence=None)
-    scoped = ScopedReviewOutput.model_validate({"summary": "Checked.", "findings": [legacy], "scope": _SCOPE})
-    assert not hasattr(scoped.findings[0], "consequence")
-    assert (
-        "consequence"
-        not in InventoriedScientificReviewOutput.model_json_schema()["$defs"]["FindingCandidate"]["properties"]
-    )
-    with pytest.raises(ValidationError, match="consequence"):
-        SCHEMA_MODELS["review"].model_validate({"summary": "Checked.", "findings": [legacy], "scope": _SCOPE})
 
 
 @pytest.mark.parametrize("severity", ["blocker", "major", "moderate"])

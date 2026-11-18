@@ -233,8 +233,8 @@ def task_view(context, part, offset):
         raise ConfigurationError("this run was started without a review brief")
     if part == "example" and context.get("example") is None:
         raise ExampleUnavailableError(
-            "no example was frozen with this attempt's task: revision and verification tasks, tasks prepared before "
-            "examples existed, and frozen schema shapes the example builder cannot fill have none"
+            "no example was frozen with this attempt's task: revision and verification tasks, and review tasks whose "
+            "example does not pass validation against the frozen bundle, have none"
         )
     if part not in digests:
         raise ConfigurationError("part must be prompt, schema, source-map, brief, or example")
@@ -287,7 +287,7 @@ def read_anchor(response, pieces, next_line):
     }
 
 
-def bound_read(response, attempt_id, max_lines, max_chars, end_line=None, anchor=False, anchor_lines_match=True):
+def bound_read(response, attempt_id, max_lines, max_chars, end_line=None, anchor=False):
     def build(pieces, line, offset):
         arguments = [
             "read",
@@ -314,7 +314,7 @@ def bound_read(response, attempt_id, max_lines, max_chars, end_line=None, anchor
             "next_command": tool_command(*arguments) if line is not None else None,
         }
         if anchor:
-            result["anchor"] = read_anchor(response, pieces, line) if anchor_lines_match else None
+            result["anchor"] = read_anchor(response, pieces, line)
         return result
 
     pieces = response["lines"]

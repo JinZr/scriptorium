@@ -27,6 +27,7 @@ def test_finding_decision_is_atomic_and_history_is_immutable(tmp_path) -> None:
                 explanation="Two readings are possible.",
                 suggested_action="Rewrite the sentence.",
                 confidence=0.9,
+                consequence="A reader cannot tell which reading is meant.",
             )
         )
 
@@ -61,6 +62,7 @@ def test_findings_deduplicate_only_by_exact_fingerprint(tmp_path) -> None:
                 explanation="Two readings are possible.",
                 suggested_action="Rewrite the sentence.",
                 confidence=0.9,
+                consequence="A reader cannot tell which reading is meant.",
             )
 
         first = database.get_or_create_finding(finding("a" * 64, "Ambiguous wording"))

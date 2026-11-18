@@ -5,9 +5,8 @@ import subprocess
 
 import pytest
 
-from scriptorium import cli, workflow
+from scriptorium import cli
 from scriptorium.errors import ConfigurationError
-from scriptorium.schemas import DEFAULT_EVIDENCE_ANCHOR_CONTRACT
 from scriptorium.service import ScriptoriumService
 from scriptorium.tool_output import MAX_TOOL_RESPONSE_BYTES
 
@@ -139,34 +138,16 @@ def test_unknown_path_lists_closest_read_paths(reader, operation):
 
 
 FORM_FEED_SOURCE = "\\documentclass{article}\n\\begin{document}\nalpha\fbeta\ngamma delta\n\\end{document}\n"
-PLAIN_SOURCE = "\\documentclass{article}\n\\begin{document}\nalpha beta\ngamma delta\n\\end{document}\n"
 
 
-@pytest.mark.parametrize(
-    ("legacy", "text", "anchored"),
-    [(False, FORM_FEED_SOURCE, True), (True, PLAIN_SOURCE, True), (True, FORM_FEED_SOURCE, False)],
-    ids=["current-form-feed", "earlier-plain", "earlier-form-feed"],
-)
-def test_anchor_follows_the_runs_frozen_line_rule(tmp_path, monkeypatch, legacy, text, anchored):
+def test_anchor_follows_the_runs_frozen_line_rule(tmp_path):
     repo = make_repository(tmp_path, roles=("copyedit",))
-    (repo / "main.tex").write_text(text, encoding="utf-8")
+    (repo / "main.tex").write_text(FORM_FEED_SOURCE, encoding="utf-8")
     subprocess.run(["git", "-C", str(repo), "commit", "-qam", "Line rule"], check=True)
     with ScriptoriumService(repo, manuscript_manager=PdfBuildingManuscriptManager(repo)) as service:
-        if legacy:
-            # Freeze the run as an earlier version did: its contract names no line terminators.
-            monkeypatch.setattr(
-                workflow,
-                "DEFAULT_EVIDENCE_ANCHOR_CONTRACT",
-                DEFAULT_EVIDENCE_ANCHOR_CONTRACT.model_copy(update={"line_terminators": None}),
-            )
         run = asyncio.run(service.start_run("HEAD", "quick"))["run"]
-        monkeypatch.undo()
         context = claim(service, run.id, "copyedit")
         response = service.read_task(context["attempt"].id, "main.tex", 3, 2, 0, 8000, anchor=True)
-        if not anchored:
-            # The earlier rule splits "alpha\fbeta" in two, so retrieval's line 4 is not the frozen line 4.
-            assert response["anchor"] is None
-            return
         anchor = response["anchor"]
         assert (anchor["start_line"], anchor["end_line"]) == (3, 4)
         finding = {

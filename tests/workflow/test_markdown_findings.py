@@ -46,18 +46,15 @@ def test_markdown_report_renders_every_finding_field_and_evidence_anchor(tmp_pat
     expected = [f"- `{ids['Typo obscures the claim']}` — major / pending: Typo obscures the claim"]
     expected.append("  - category: clarity; role: copyedit; confidence: 0.99")
     expected.append("  - claim: The main result sentence contains a typo.")
-    if "affected_claim" in line_finding:
-        expected.append(f"  - affected claim: {line_finding['affected_claim']}")
-    if "consequence" in line_finding:
-        expected.append(f"  - consequence: {line_finding['consequence']}")
+    expected.append(f"  - affected claim: {line_finding['affected_claim']}")
+    expected.append(f"  - consequence: {line_finding['consequence']}")
     expected.append("  - explanation: The typo makes the result sentence harder to read.")
     expected.append("  - suggested action: Replace the sentence with the corrected wording.")
     expected.append("  - evidence: `main.tex:2-3`: `\\begin{document} ⏎ The result is teh clear.`")
     expected.append(f"- `{ids['Rendered page lacks a caption']}` — minor / pending: Rendered page lacks a caption")
     expected.append("  - category: figure; role: copyedit; confidence: 0.6")
     expected.append("  - claim: The rendered page shows the result without a caption.")
-    if "consequence" in page_finding:
-        expected.append(f"  - consequence: {page_finding['consequence']}")
+    expected.append(f"  - consequence: {page_finding['consequence']}")
     # A continuation line never reaches column zero, so "## Patches" cannot become a heading.
     expected.append("  - explanation: A reader of the PDF cannot tell which result the page reports. ⏎  ⏎ ## Patches")
     expected.append("  - suggested action: Add a caption naming the result.")
@@ -84,6 +81,7 @@ def _finding_record(**overrides):
         "role": "copyedit",
         "confidence": 0.5,
         "claim": "Line one.\r\nLine two.\rLine three.",
+        "consequence": "A reader misreads the line.",
         "explanation": "Form feed\x0cand U+2028\u2028inside a line.",
         "suggested_action": "Trailing break keeps its mark.\n",
         "evidence": [
@@ -99,43 +97,30 @@ def _finding_record(**overrides):
     return {"finding": {**finding, **overrides}, "decisions": []}
 
 
-def test_markdown_findings_mark_only_the_frozen_contract_line_terminators():
-    lines = ScriptoriumService._markdown_findings([_finding_record()], ("\r\n", "\r", "\n"))
+def test_markdown_findings_mark_only_the_contract_line_terminators():
+    lines = ScriptoriumService._markdown_findings([_finding_record()])
 
     assert lines[3:] == [
         "- `finding-1` — minor / pending: Quote",
         "  - category: style; role: copyedit; confidence: 0.5",
         "  - claim: Line one. ⏎ Line two. ⏎ Line three.",
+        "  - consequence: A reader misreads the line.",
         "  - explanation: Form feed\x0cand U+2028\u2028inside a line.",
         "  - suggested action: Trailing break keeps its mark. ⏎",
         "  - evidence: `main.tex:3-3`: `The result\x0cis\u2028clear. ⏎`",
     ]
 
 
-def test_markdown_findings_mark_every_line_break_of_a_legacy_contract():
-    # Contracts frozen without line terminators numbered lines with str.splitlines().
-    lines = ScriptoriumService._markdown_findings([_finding_record()], None)
-
-    assert lines[5:] == [
-        "  - claim: Line one. ⏎ Line two. ⏎ Line three.",
-        "  - explanation: Form feed ⏎ and U+2028 ⏎ inside a line.",
-        "  - suggested action: Trailing break keeps its mark. ⏎",
-        "  - evidence: `main.tex:3-3`: `The result ⏎ is ⏎ clear. ⏎`",
-    ]
-
-
-def test_markdown_findings_keep_a_multiline_category_and_historical_anchors_on_their_items():
-    # A historical schema could accept a page beside a validated line range; the range is the anchor. Older
-    # page anchors were stored with null line keys and stay page anchors.
+def test_markdown_findings_keep_a_multiline_category_on_its_item():
     record = _finding_record(
         category="style\n\n## Patches",
         suggested_action="A literal marker ⏎ ",
         evidence=[
-            {"source_path": "main.tex", "start_line": 3, "end_line": 4, "page": 1, "quoted_text": "x"},
-            {"source_path": "manuscript.pdf", "page": 2, "start_line": None, "end_line": None, "quoted_text": None},
+            {"source_path": "main.tex", "start_line": 3, "end_line": 4, "source_digest": "0" * 64, "quoted_text": "x"},
+            {"source_path": "manuscript.pdf", "page": 2},
         ],
     )
-    lines = ScriptoriumService._markdown_findings([record], ("\r\n", "\r", "\n"))
+    lines = ScriptoriumService._markdown_findings([record])
 
     assert lines[4] == "  - category: style ⏎  ⏎ ## Patches; role: copyedit; confidence: 0.5"
     assert lines[-3] == "  - suggested action: A literal marker ⏎ "
@@ -152,7 +137,7 @@ def test_markdown_findings_quote_evidence_as_literal_code_spans():
         "  ",
     ]
     evidence = [{"source_path": "main.tex", "start_line": 1, "end_line": 1, "quoted_text": quote} for quote in quotes]
-    lines = ScriptoriumService._markdown_findings([_finding_record(evidence=evidence)], ("\r\n", "\r", "\n"))
+    lines = ScriptoriumService._markdown_findings([_finding_record(evidence=evidence)])
 
     assert lines[-6:] == [
         "  - evidence: `main.tex:1-1`: `a\\_b $x$ <!-- hidden -->`",

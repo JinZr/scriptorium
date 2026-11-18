@@ -31,17 +31,6 @@ def _submitted_identity(task_id: str, finding: Mapping[str, Any]) -> tuple:
     return _identity(task_id, *fields)
 
 
-def _claim_checks(entry: Mapping[str, Any]) -> Iterable[tuple[Mapping[str, Any], Mapping[str, Any] | None]]:
-    """Yield each claim check with its inventoried claim, or None when the output has no inventory link."""
-    inventory = entry.get("claim_inventory", [])
-    for index, check in enumerate(entry["claim_checks"]):
-        if "claim_index" in check:
-            yield check, inventory[check["claim_index"]]
-        else:
-            # Outputs frozen before claim_index restate the claim; an inventory, if any, lists its checks.
-            yield check, next((claim for claim in inventory if index in claim.get("check_indices", ())), None)
-
-
 def _claim_links(
     findings: Sequence[Finding],
     claim_reports: Iterable[Mapping[str, Any]],
@@ -50,8 +39,8 @@ def _claim_links(
     """Return, by finding ID, every claim a stored finding is linked to, in link order.
 
     Substantive findings link through their claim checks to inventoried claims; detail-role findings through
-    their stored affected_claim. Findings and outputs recorded before either link yield none. A submission that
-    repeated a finding stored under another task resolves to that row through its duplicate attribution.
+    their stored affected_claim. A submission that repeated a finding stored under another task resolves to that
+    row through its duplicate attribution.
     """
     by_id = {item.id: item for item in findings}
     reporters = [(item.task_id, item) for item in findings] + [
@@ -70,8 +59,9 @@ def _claim_links(
             linked.setdefault(finding_id, []).append({"text": text, "prominence": prominence})
 
     for entry in claim_reports:
-        for check, claim in _claim_checks(entry):
-            for index in check["finding_indices"] if claim is not None else ():
+        for check in entry["claim_checks"]:
+            claim = entry["claim_inventory"][check["claim_index"]]
+            for index in check["finding_indices"]:
                 submitted = _submitted_identity(entry["task_id"], entry["submitted_findings"][index])
                 link(stored.get(submitted), claim["claim"], claim["prominence"])
     for finding in findings:
@@ -319,11 +309,10 @@ def _group(
 
 
 def _verdict(claim_reports: Iterable[Mapping[str, Any]]) -> dict[str, Any] | None:
-    """Return the verdict of the latest substantive output that recorded one."""
+    """Return the verdict of the latest substantive output."""
     latest = None
     for entry in claim_reports:
-        if entry.get("verdict") is not None:
-            latest = {"attempt_id": entry["attempt_id"], **entry["verdict"]}
+        latest = {"attempt_id": entry["attempt_id"], **entry["verdict"]}
     return latest
 
 

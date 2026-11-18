@@ -8,10 +8,8 @@ from scriptorium.schemas import (
     SEVERITY_RUBRIC,
     SEVERITY_RULES,
     ClaimedFinding,
-    ClaimedReviewOutput,
-    LinkedScientificReviewOutput,
-    RatedReviewOutput,
-    RatedScientificReviewOutput,
+    ReviewOutput,
+    ScientificReviewOutput,
     output_schema,
 )
 
@@ -71,8 +69,8 @@ def _output(*, findings=(), checks=None, inventory=None, recommendation=None, co
 
 
 def test_new_schemas_link_checks_to_the_inventory_and_require_a_verdict() -> None:
-    assert SCHEMA_MODELS["review"] is ClaimedReviewOutput
-    assert SCHEMA_MODELS["scientific_review"] is LinkedScientificReviewOutput
+    assert SCHEMA_MODELS["review"] is ReviewOutput
+    assert SCHEMA_MODELS["scientific_review"] is ScientificReviewOutput
     schema = output_schema("scientific_review")
     assert "verdict" in schema["required"]
     assert "claim_index" in schema["$defs"]["LinkedClaimCheck"]["required"]
@@ -99,19 +97,10 @@ def test_minor_findings_need_no_affected_claim(severity) -> None:
     assert ClaimedFinding.model_validate(_finding(severity)).affected_claim is None
 
 
-def test_outputs_frozen_before_affected_claim_keep_their_finding_shape() -> None:
-    legacy = {"summary": "Checked.", "findings": [_finding("major")], "scope": _SCOPE}
-    assert RatedReviewOutput.model_validate(legacy).findings[0].severity.value == "major"
-    with pytest.raises(ValidationError, match="affected_claim"):
-        ClaimedReviewOutput.model_validate(legacy)
-    with pytest.raises(ValidationError, match="Extra inputs"):
-        RatedReviewOutput.model_validate({**legacy, "findings": [_finding("major", affected_claim="A claim.")]})
-
-
 def test_linked_output_accepts_indexed_checks_and_explained_unchecked_claims() -> None:
     output = _output(inventory=[_claim(), _claim("It transfers.", "supporting", "Outstanding page.")])
     output["claim_checks"][0]["claim_index"] = Decimal("0")
-    parsed = LinkedScientificReviewOutput.model_validate(output)
+    parsed = ScientificReviewOutput.model_validate(output)
     assert parsed.claim_checks[0].claim_index == 0
     assert parsed.claim_inventory[1].not_checked_reason == "Outstanding page."
 
@@ -142,11 +131,11 @@ def test_linked_output_accepts_indexed_checks_and_explained_unchecked_claims() -
 )
 def test_linked_output_rejects_broken_links_and_unsupported_severity(changes, message) -> None:
     with pytest.raises(ValidationError, match=message):
-        LinkedScientificReviewOutput.model_validate(_output(**changes))
+        ScientificReviewOutput.model_validate(_output(**changes))
 
 
 def test_blocker_linked_from_a_headline_check_is_accepted() -> None:
-    parsed = LinkedScientificReviewOutput.model_validate(_output(findings=[_finding("blocker")]))
+    parsed = ScientificReviewOutput.model_validate(_output(findings=[_finding("blocker")]))
     assert parsed.verdict.recommendation == "major_revision"
 
 
@@ -161,18 +150,4 @@ def test_blocker_linked_from_a_headline_check_is_accepted() -> None:
 )
 def test_verdict_has_a_known_recommendation_and_one_to_three_questions(verdict) -> None:
     with pytest.raises(ValidationError):
-        LinkedScientificReviewOutput.model_validate({**_output(), "verdict": verdict})
-
-
-def test_outputs_frozen_before_the_verdict_keep_restated_claim_checks() -> None:
-    check = {key: value for key, value in _check().items() if key != "claim_index"}
-    legacy = {
-        "summary": "Checked the central claim.",
-        "findings": [],
-        "scope": _SCOPE,
-        "claim_checks": [{**check, "claim": "The method is accurate.", "claim_anchor": _PAGE}],
-        "claim_inventory": [{**_claim(), "check_indices": [0]}],
-    }
-    assert RatedScientificReviewOutput.model_validate(legacy).claim_inventory[0].check_indices == [0]
-    with pytest.raises(ValidationError):
-        LinkedScientificReviewOutput.model_validate(legacy)
+        ScientificReviewOutput.model_validate({**_output(), "verdict": verdict})

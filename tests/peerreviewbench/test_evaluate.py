@@ -63,6 +63,7 @@ def _finding(
         explanation=f"{role.value} explanation {ordinal}",
         suggested_action=f"private suggested action {ordinal}",
         confidence=0.8,
+        consequence=f"{role.value} consequence {ordinal}",
         id=f"finding_{role.value}_{ordinal}",
     )
 

@@ -49,22 +49,13 @@ from .schemas import (
     SCHEMA_MODELS,
     SEVERITY_RUBRIC,
     ClaimedFinding,
-    ClaimedReviewOutput,
     EvidenceAnchorContract,
     EvidenceAnchorMap,
     ExactEdit,
-    InventoriedScientificReviewOutput,
-    JudgedClaimCheck,
-    JudgedScientificReviewOutput,
-    LinkedScientificReviewOutput,
-    RatedFinding,
-    RatedReviewOutput,
-    RatedScientificReviewOutput,
     ReviewBrief,
     ReviewOutput,
     RevisionOutput,
     ScientificReviewOutput,
-    ScopedReviewOutput,
     SourceAnchorRecord,
     StrictModel,
     ValidationIssue,
@@ -91,7 +82,7 @@ _APPROVED_DIFF_SLOT = "{{SCRIPTORIUM_APPROVED_DIFF_JSON}}"
 class TaskOutcome:
     task: Task
     attempt: Attempt
-    output: ReviewOutput | RevisionOutput | VerificationOutput
+    output: ReviewOutput | ScientificReviewOutput | RevisionOutput | VerificationOutput
 
 
 def task_input_digest(run: Run, prompt_digest: str, schema_digest: str, bundle_digest: str) -> str:
@@ -336,16 +327,9 @@ class Armarius:
         return contract
 
     def _evidence_anchor_contract_for_run(self, run: Run) -> EvidenceAnchorContract:
-        if "evidence_anchor_contract" not in run.frozen_config:
-            # An old prompt cannot prove which path aliases its validator accepted, so synthesis is unsafe.
-            raise InfrastructureError(f"run {run.id} predates the frozen evidence anchor contract; start a new run")
-        record = run.frozen_config["evidence_anchor_contract"]
         try:
-            content = record["content"]
-            if content.get("pdf_page", {}).get("required_fields") == ["source_path", "page", "quoted_text"]:
-                # Reinterpreting a frozen quote contract as a page anchor would rewrite historical evidence.
-                raise InfrastructureError(f"run {run.id} predates page-level PDF evidence anchors; start a new run")
-            contract = EvidenceAnchorContract.model_validate(content)
+            record = run.frozen_config["evidence_anchor_contract"]
+            contract = EvidenceAnchorContract.model_validate(record["content"])
             if record["digest"] != evidence_anchor_contract_digest(contract):
                 raise ValueError("contract digest mismatch")
             templates = record["prompt_templates"]
@@ -360,8 +344,6 @@ class Armarius:
                     template["content"].encode("utf-8")
                 ):
                     raise ValueError(f"prompt template digest mismatch for {role}")
-        except InfrastructureError:
-            raise
         except (KeyError, TypeError, ValidationError, ValueError) as exc:
             raise InfrastructureError(f"run {run.id} has a corrupt frozen evidence anchor contract") from exc
         return contract
@@ -434,11 +416,7 @@ class Armarius:
             stage="review",
             role=role,
             prompt=prompt,
-            schema_kind=(
-                "scientific_review"
-                if role == AgentRole.SUBSTANTIVE_REVIEW and "scientific_review" in run.frozen_config["schemas"]
-                else "review"
-            ),
+            schema_kind="scientific_review" if role == AgentRole.SUBSTANTIVE_REVIEW else "review",
             base_bundle=bundle,
             validator=lambda output: self._validate_review_output(
                 output,
@@ -450,7 +428,7 @@ class Armarius:
         if outcome is None:
             return None
         output = outcome.output
-        assert isinstance(output, ReviewOutput)
+        assert isinstance(output, (ReviewOutput, ScientificReviewOutput))
         all_findings = self.database.list_findings(run.id)
         has_prior_review = any(
             attempt.status == AttemptStatus.COMPLETED and attempt.ordinal < outcome.attempt.ordinal
@@ -462,8 +440,6 @@ class Armarius:
         for candidate in output.findings:
             evidence = tuple(item.model_dump(mode="json", exclude_none=True) for item in candidate.evidence)
             canonical_evidence = sorted(canonical_json(anchor) for anchor in evidence)
-            # Outputs frozen before the consequence field keep their original fingerprint.
-            consequence = candidate.consequence if isinstance(candidate, RatedFinding) else None
             fingerprint = digest_json(
                 {
                     "category": candidate.category,
@@ -474,7 +450,7 @@ class Armarius:
                     "explanation": candidate.explanation,
                     "suggested_action": candidate.suggested_action,
                     "confidence": candidate.confidence,
-                    **({} if consequence is None else {"consequence": consequence}),
+                    "consequence": candidate.consequence,
                 }
             )
             finding = Finding(
@@ -491,7 +467,7 @@ class Armarius:
                 explanation=candidate.explanation,
                 suggested_action=candidate.suggested_action,
                 confidence=candidate.confidence,
-                consequence=consequence,
+                consequence=candidate.consequence,
                 # The affected claim describes the concern; it stays out of the fingerprint so identity is unchanged.
                 affected_claim=candidate.affected_claim if isinstance(candidate, ClaimedFinding) else None,
             )
@@ -549,7 +525,7 @@ class Armarius:
             for task in self.database.list_tasks(run.id)
             if task.stage == "review"
             and task.status == TaskStatus.COMPLETED
-            and self.review_completion(task) in {"complete", "unreported"}
+            and self.review_completion(task) == "complete"
         }
         if roles.issubset(completed_roles):
             self.database.update_run(run.id, RunStatus.AWAITING_DECISION)
@@ -809,7 +785,7 @@ class Armarius:
         value: str | None,
         validator: Callable[[Any], list[ValidationIssue]],
     ) -> tuple[
-        ReviewOutput | RevisionOutput | VerificationOutput | None,
+        ReviewOutput | ScientificReviewOutput | RevisionOutput | VerificationOutput | None,
         list[ValidationIssue],
     ]:
         if value is None:
@@ -823,7 +799,9 @@ class Armarius:
                 )
             ]
         try:
-            data = json.loads(value, parse_float=Decimal if issubclass(model, ScopedReviewOutput) else float)
+            data = json.loads(
+                value, parse_float=Decimal if issubclass(model, (ReviewOutput, ScientificReviewOutput)) else float
+            )
         except json.JSONDecodeError as exc:
             start = max(0, exc.pos - 120)
             end = min(len(value), exc.pos + 120)
@@ -1039,56 +1017,25 @@ class Armarius:
         except (ArtifactError, StorageError, KeyError, TypeError) as exc:
             raise InfrastructureError(f"attempt schema artifact is missing or corrupt: {digest}") from exc
 
-    def _output_model_for_schema(self, run: Run, schema_kind: str, schema: dict[str, Any]) -> type[StrictModel]:
-        if schema_kind == "scientific_review":
-            # Runs frozen before the verdict, claim-check judgments, or the claim inventory keep the shape they were
-            # given.
-            definitions = schema.get("$defs", {})
-            if "verdict" in schema.get("properties", {}):
-                return LinkedScientificReviewOutput
-            if "InventoriedClaim" in definitions:
-                return (
-                    RatedScientificReviewOutput
-                    if "consequence" in self._finding_definition(schema).get("required", [])
-                    else InventoriedScientificReviewOutput
-                )
-            return JudgedScientificReviewOutput if "JudgedClaimCheck" in definitions else ScientificReviewOutput
-        if schema_kind != "review":
-            return SCHEMA_MODELS[schema_kind]
-        properties = schema.get("properties", {})
-        required = schema.get("required", [])
-        if schema.get("type") != "object" or schema.get("additionalProperties") is not False:
-            raise InfrastructureError(f"run {run.id} has an unsupported frozen review output schema")
-        if set(properties) == set(required) == {"summary", "findings", "scope"}:
-            finding = self._finding_definition(schema)
-            if "affected_claim" in finding.get("properties", {}):
-                return ClaimedReviewOutput
-            return RatedReviewOutput if "consequence" in finding.get("required", []) else ScopedReviewOutput
-        if set(properties) == set(required) == {"summary", "findings"}:
-            return ReviewOutput
-        raise InfrastructureError(f"run {run.id} has an unsupported frozen review output schema")
-
     def _output_example(
         self,
         run: Run,
         role: AgentRole,
         schema_kind: str,
-        schema: dict[str, Any],
-        output_model: type[StrictModel],
         bundle: ManuscriptBundle,
     ) -> str | None:
-        """Build an output that parses under the task's frozen model and cites frozen anchors, when one fits."""
+        """Build an output that parses under the task's output model and cites frozen anchors, when one fits."""
         contract = self._evidence_anchor_contract_for_run(run)
         if schema_kind not in {"review", "scientific_review"} or role.value not in EXAMPLE_ROLES:
             return None
         snapshot = self._run_dir(run.id) / "snapshot"
         source_anchor, source_area = self._example_source(bundle, snapshot, contract)
         text = json.dumps(
-            build_review_example(schema, role.value, source_anchor, source_area), ensure_ascii=False, indent=2
+            build_review_example(schema_kind, role.value, source_anchor, source_area), ensure_ascii=False, indent=2
         )
         # An example is frozen only when it passes the same parse and anchor checks a submission would.
         parsed, issues = self._parse_and_validate_output(
-            output_model,
+            SCHEMA_MODELS[schema_kind],
             text,
             lambda output: self._validate_review_output(output, bundle.anchor_map, snapshot, contract),
         )
@@ -1133,7 +1080,7 @@ class Armarius:
         return None, None
 
     def frozen_output_example(self, metadata: dict[str, Any]) -> str | None:
-        """Return the example frozen with a task; tasks prepared before examples, or without one, have none."""
+        """Return the example frozen with a task, or None when the task has none."""
         digest = metadata.get("example_digest")
         if digest is None:
             return None
@@ -1141,12 +1088,6 @@ class Armarius:
             return self.artifacts.get_bytes(digest).decode("utf-8")
         except (ArtifactError, UnicodeDecodeError) as exc:
             raise InfrastructureError(f"frozen output example is unreadable: {digest}") from exc
-
-    @staticmethod
-    def _finding_definition(schema: dict[str, Any]) -> dict[str, Any]:
-        # Runs frozen before the severity rubric or affected_claim published findings without those fields.
-        reference = schema.get("properties", {}).get("findings", {}).get("items", {}).get("$ref", "")
-        return schema.get("$defs", {}).get(reference.rpartition("/")[2], {})
 
     @staticmethod
     def _validation_error_summary(report: ValidationReport) -> str:
@@ -1212,7 +1153,7 @@ class Armarius:
         validator: Callable[[Any], list[ValidationIssue]],
     ) -> TaskOutcome | None:
         schema = dict(run.frozen_config["schemas"][schema_kind]["content"])
-        output_model = self._output_model_for_schema(run, schema_kind, schema)
+        output_model = SCHEMA_MODELS[schema_kind]
         prompt_artifact = self._record_text(prompt, "text/markdown; charset=utf-8")
         schema_artifact = self._record_text(canonical_json(schema), "application/schema+json")
         files = self._directory_records(base_bundle.workspace)
@@ -1225,7 +1166,7 @@ class Armarius:
         example_digest = None
         if not self.database.has_external_task(task.id):
             # The example is frozen once with the task, outside its input digest, so earlier tasks keep theirs.
-            example = self._output_example(run, role, schema_kind, schema, output_model, base_bundle)
+            example = self._output_example(run, role, schema_kind, base_bundle)
             example_digest = None if example is None else self._record_text(example, "application/json").digest
         self.database.record_external_task(
             task.id,
@@ -1251,11 +1192,11 @@ class Armarius:
             raise InfrastructureError(f"completed attempt {completed.id} is incompatible with its validator")
         return TaskOutcome(task, completed, output)
 
-    def completed_review_output(self, task: Task) -> tuple[Attempt, ReviewOutput] | None:
+    def completed_review_output(self, task: Task) -> tuple[Attempt, ReviewOutput | ScientificReviewOutput] | None:
         accepted = self.completed_review_outputs(task)
         return accepted[-1] if accepted else None
 
-    def completed_review_outputs(self, task: Task) -> list[tuple[Attempt, ReviewOutput]]:
+    def completed_review_outputs(self, task: Task) -> list[tuple[Attempt, ReviewOutput | ScientificReviewOutput]]:
         """Every accepted output of a review task, in attempt order."""
         completed_attempts = [
             item for item in self.database.list_attempts(task.id) if item.status == AttemptStatus.COMPLETED
@@ -1266,8 +1207,8 @@ class Armarius:
         accepted = []
         for completed in completed_attempts:
             schema_kind = self.database.get_external_task(task.id)["schema_kind"]
-            schema = self._load_schema_artifact(run, schema_kind, completed.schema_digest)
-            model = self._output_model_for_schema(run, schema_kind, schema)
+            self._load_schema_artifact(run, schema_kind, completed.schema_digest)
+            model = SCHEMA_MODELS[schema_kind]
             if completed.output_artifact_digest is None:
                 raise InfrastructureError(f"completed review attempt {completed.id} has no output artifact")
             try:
@@ -1284,8 +1225,7 @@ class Armarius:
         accepted = self.completed_review_output(task)
         if accepted is None:
             return None
-        output = accepted[1]
-        return output.scope.completion if isinstance(output, ScopedReviewOutput) else "unreported"
+        return accepted[1].scope.completion
 
     def claim_task(
         self,
@@ -1329,8 +1269,6 @@ class Armarius:
         accepted = self.completed_review_output(task) if task.stage == "review" else None
         if accepted is not None:
             prior_attempt, prior_output = accepted
-            if not isinstance(prior_output, ScopedReviewOutput):
-                raise StateError("a review without scope cannot be continued")
             recorded_findings = [
                 finding for finding in self.database.list_findings(run.id) if finding.task_id == task.id
             ]
@@ -1351,7 +1289,7 @@ class Armarius:
                         "explanation": finding.explanation,
                         "suggested_action": finding.suggested_action,
                         "confidence": finding.confidence,
-                        **({} if finding.consequence is None else {"consequence": finding.consequence}),
+                        "consequence": finding.consequence,
                         **({} if finding.affected_claim is None else {"affected_claim": finding.affected_claim}),
                         "status": finding.status.value,
                     }
@@ -1362,11 +1300,9 @@ class Armarius:
                 context["claim_checks"] = [
                     check.model_dump(mode="json", exclude_none=True) for check in prior_output.claim_checks
                 ]
-            if isinstance(prior_output, InventoriedScientificReviewOutput):
                 context["claim_inventory"] = [
                     entry.model_dump(mode="json", exclude_none=True) for entry in prior_output.claim_inventory
                 ]
-            if isinstance(prior_output, LinkedScientificReviewOutput):
                 context["verdict"] = prior_output.verdict.model_dump(mode="json")
             prompt_digest = self._record_text(
                 self._load_prompt_artifact(prompt_digest)
@@ -1568,8 +1504,8 @@ class Armarius:
         metadata = self.database.get_external_task(task.id)
         if attempt.bundle_digest != metadata["bundle_digest"] or attempt.schema_digest != metadata["schema_digest"]:
             raise InfrastructureError("attempt is not bound to its frozen task")
-        schema = self._load_schema_artifact(run, metadata["schema_kind"], attempt.schema_digest)
-        output_model = self._output_model_for_schema(run, metadata["schema_kind"], schema)
+        self._load_schema_artifact(run, metadata["schema_kind"], attempt.schema_digest)
+        output_model = SCHEMA_MODELS[metadata["schema_kind"]]
         if run.status == RunStatus.CANCELLED:
             raise StateError(f"attempt {attempt_id} is no longer active")
         expected_status = {
@@ -1670,11 +1606,13 @@ class Armarius:
             raise InfrastructureError(f"unsupported external task stage: {task.stage}")
         return validator
 
-    def _continued_inventory_issues(self, output: ReviewOutput, prior: ReviewOutput | None) -> list[ValidationIssue]:
+    def _continued_inventory_issues(
+        self,
+        output: ReviewOutput | ScientificReviewOutput,
+        prior: ReviewOutput | ScientificReviewOutput | None,
+    ) -> list[ValidationIssue]:
         """A continuation keeps listing every claim the accepted inventory left unchecked, at its prominence."""
-        if not isinstance(output, InventoriedScientificReviewOutput) or not isinstance(
-            prior, InventoriedScientificReviewOutput
-        ):
+        if not isinstance(output, ScientificReviewOutput) or not isinstance(prior, ScientificReviewOutput):
             return []
         # A claim is identified by its statement, anchor, and prominence; each listed claim carries forward at most
         # one prior claim, so a repeated open claim needs as many entries.
@@ -1700,9 +1638,11 @@ class Armarius:
             for entry in dropped
         ]
 
-    def _verdict_issues(self, output: ReviewOutput, recorded: list[str]) -> list[ValidationIssue]:
+    def _verdict_issues(
+        self, output: ReviewOutput | ScientificReviewOutput, recorded: list[str]
+    ) -> list[ValidationIssue]:
         """A substantive verdict agrees with the major and blocker findings this review submitted or recorded."""
-        if not isinstance(output, LinkedScientificReviewOutput):
+        if not isinstance(output, ScientificReviewOutput):
             return []
         high = {FindingSeverity.BLOCKER.value, FindingSeverity.MAJOR.value}
         severities = [finding.severity.value for finding in output.findings] + recorded
@@ -1728,7 +1668,7 @@ class Armarius:
 
     def _validate_review_output(
         self,
-        output: ReviewOutput,
+        output: ReviewOutput | ScientificReviewOutput,
         anchor_map: EvidenceAnchorMap,
         source_root: Path,
         contract: EvidenceAnchorContract,
@@ -1749,21 +1689,17 @@ class Armarius:
                 )
         if isinstance(output, ScientificReviewOutput):
             for check_index, check in enumerate(output.claim_checks):
-                anchors = [(f"evidence/{index}", evidence) for index, evidence in enumerate(check.evidence)]
-                if isinstance(check, JudgedClaimCheck):
-                    anchors.insert(0, ("claim_anchor", check.claim_anchor))
-                for pointer, evidence in anchors:
+                for evidence_index, evidence in enumerate(check.evidence):
                     issues.extend(
                         self._validate_evidence(
                             evidence,
                             source_index,
                             anchor_map,
                             source_root,
-                            f"/claim_checks/{check_index}/{pointer}",
+                            f"/claim_checks/{check_index}/evidence/{evidence_index}",
                             contract=contract,
                         )
                     )
-        if isinstance(output, InventoriedScientificReviewOutput):
             for entry_index, entry in enumerate(output.claim_inventory):
                 issues.extend(
                     self._validate_evidence(
@@ -1775,44 +1711,41 @@ class Armarius:
                         contract=contract,
                     )
                 )
-        if isinstance(output, ScopedReviewOutput):
-            for group in ("checked", "outstanding"):
-                for index, area in enumerate(getattr(output.scope, group)):
-                    path = f"/scope/{group}/{index}"
-                    if area.source_path == "manuscript.pdf":
-                        if area.page > anchor_map.compiled_pdf.page_count:
-                            issues.append(
-                                self._issue(
-                                    "scope.page_out_of_range",
-                                    f"{path}/page",
-                                    "Declared page is outside the frozen PDF.",
-                                    expected={"page_count": anchor_map.compiled_pdf.page_count},
-                                    actual=area.page,
-                                )
-                            )
-                        continue
-                    source = source_index.get(area.source_path)
-                    if source is None:
+        for group in ("checked", "outstanding"):
+            for index, area in enumerate(getattr(output.scope, group)):
+                path = f"/scope/{group}/{index}"
+                if area.source_path == "manuscript.pdf":
+                    if area.page > anchor_map.compiled_pdf.page_count:
                         issues.append(
                             self._issue(
-                                "scope.path_unknown",
-                                f"{path}/source_path",
-                                "Declared path is outside the frozen source map.",
-                                actual=area.source_path,
+                                "scope.page_out_of_range",
+                                f"{path}/page",
+                                "Declared page is outside the frozen PDF.",
+                                expected={"page_count": anchor_map.compiled_pdf.page_count},
+                                actual=area.page,
                             )
                         )
-                    elif area.start_line is not None and (
-                        source.line_count is None or area.end_line > source.line_count
-                    ):
-                        issues.append(
-                            self._issue(
-                                "scope.line_out_of_range",
-                                path,
-                                "Declared line range is outside the frozen text source.",
-                                expected={"line_count": source.line_count},
-                                actual={"start_line": area.start_line, "end_line": area.end_line},
-                            )
+                    continue
+                source = source_index.get(area.source_path)
+                if source is None:
+                    issues.append(
+                        self._issue(
+                            "scope.path_unknown",
+                            f"{path}/source_path",
+                            "Declared path is outside the frozen source map.",
+                            actual=area.source_path,
                         )
+                    )
+                elif area.start_line is not None and (source.line_count is None or area.end_line > source.line_count):
+                    issues.append(
+                        self._issue(
+                            "scope.line_out_of_range",
+                            path,
+                            "Declared line range is outside the frozen text source.",
+                            expected={"line_count": source.line_count},
+                            actual={"start_line": area.start_line, "end_line": area.end_line},
+                        )
+                    )
         return issues
 
     def _validate_revision_output(
@@ -2246,7 +2179,7 @@ class Armarius:
                 "evidence": list(finding.evidence),
                 "explanation": finding.explanation,
                 "suggested_action": finding.suggested_action,
-                **({} if finding.consequence is None else {"consequence": finding.consequence}),
+                "consequence": finding.consequence,
             }
             for finding in findings
         ]

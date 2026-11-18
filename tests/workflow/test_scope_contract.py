@@ -3,11 +3,8 @@ import json
 
 import pytest
 
-from scriptorium.domain import AgentRole, AttemptStatus, digest_json
-from scriptorium.errors import InfrastructureError
-from scriptorium.schemas import ReviewOutput, RevisionOutput, output_schema
+from scriptorium.domain import AgentRole, AttemptStatus
 from scriptorium.service import ScriptoriumService
-from scriptorium.workflow import Armarius
 
 from ._support import PdfBuildingManuscriptManager, claim, link_claims, make_repository, submit
 
@@ -203,52 +200,6 @@ def test_unparseable_json_number_creates_validation_report(tmp_path, number):
         assert result["attempt"].status == AttemptStatus.FAILED
         assert result["validation_report"]["issues"][0]["code"] == "json.invalid"
         assert service.list_findings(run.id) == []
-
-
-def test_old_frozen_review_schema_replays_without_scope(tmp_path, monkeypatch):
-    repo = make_repository(tmp_path, roles=("substantive_review",))
-    original = Armarius._freeze_config
-
-    def old_freeze(self, *args, **kwargs):
-        frozen = original(self, *args, **kwargs)
-        schema = output_schema("review", legacy_review=True)
-        frozen["schemas"]["review"] = {"digest": digest_json(schema), "content": schema}
-        frozen["schemas"].pop("scientific_review")
-        return frozen
-
-    with monkeypatch.context() as patch:
-        patch.setattr(Armarius, "_freeze_config", old_freeze)
-        with ScriptoriumService(repo, manuscript_manager=PdfBuildingManuscriptManager(repo)) as service:
-            run = asyncio.run(service.start_run("HEAD", "quick"))["run"]
-
-    with ScriptoriumService(repo, manuscript_manager=PdfBuildingManuscriptManager(repo)) as service:
-        review = claim(service, run.id, AgentRole.SUBSTANTIVE_REVIEW)
-        assert "scope" not in review["schema"]["properties"]
-        monkeypatch.setattr(
-            "scriptorium.workflow.output_schema",
-            lambda *args, **kwargs: pytest.fail("frozen output must not depend on the installed schema generator"),
-        )
-        result = asyncio.run(
-            service.submit_task(
-                review["attempt"].id,
-                review["input_digest"],
-                json.dumps({"summary": "Reviewed the old contract.", "findings": []}),
-            )
-        )
-        assert result["attempt"].status == AttemptStatus.COMPLETED
-
-    with ScriptoriumService(repo, manuscript_manager=PdfBuildingManuscriptManager(repo)) as service:
-        asyncio.run(service.resume_run(run.id))
-        frozen = service.database.get_run(run.id)
-        changed_title = {**frozen.frozen_config["schemas"]["review"]["content"], "title": "OtherReviewOutput"}
-        assert service.armarius._output_model_for_schema(frozen, "review", changed_title) is ReviewOutput
-        assert (
-            service.armarius._output_model_for_schema(frozen, "revision", {"title": "OtherRevisionOutput"})
-            is RevisionOutput
-        )
-        unsupported = {**changed_title, "required": ["summary"]}
-        with pytest.raises(InfrastructureError, match="unsupported frozen review output schema"):
-            service.armarius._output_model_for_schema(frozen, "review", unsupported)
 
 
 def test_new_frozen_review_schema_survives_generator_drift(tmp_path, monkeypatch):
