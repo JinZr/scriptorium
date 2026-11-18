@@ -2,7 +2,7 @@
 
 ![Scriptorium manuscript review workflow](docs/assets/scriptorium-banner.png)
 
-Scriptorium is a local, Git-native CLI for reviewing and revising LaTeX manuscripts. Codex, Claude Code, and Antigravity CLI can each use the same JSON commands from their current model session. Scriptorium freezes the manuscript and task instructions, serves bounded retrieval, validates structured results, and records decisions. It does not select or start a model.
+Scriptorium is a local, Git-native CLI for reviewing and revising LaTeX manuscripts. Codex, Claude Code, and Antigravity CLI can each use the same JSON commands from their current model session. Scriptorium freezes the manuscript and task instructions, exports them for the host to read, validates structured results, and records decisions. It does not select or start a model.
 
 ```text
 frozen review tasks → human finding decisions → revision task → human patch approval
@@ -28,7 +28,7 @@ For development:
 python -m pip install -e '.[dev]'
 ```
 
-The model client supplies its own authentication and model selection. Scriptorium has no provider SDK or credentials. Client instructions come as two skills, split by audience. [`skills/scriptorium`](skills/scriptorium/SKILL.md) is for the operator, who starts runs, agrees the review brief, reads reports, and records the author's decisions. [`skills/scriptorium-review`](skills/scriptorium-review/SKILL.md) is for the reviewer, who claims a task, retrieves evidence, and submits. Link both directories into the client's skills directory, for example `~/.claude/skills/` for Claude Code or `~/.codex/skills/` for Codex.
+The model client supplies its own authentication and model selection. Scriptorium has no provider SDK or credentials. Client instructions come as two skills, split by audience. [`skills/scriptorium`](skills/scriptorium/SKILL.md) is for the operator, who starts runs, agrees the review brief, reads reports, and records the author's decisions. [`skills/scriptorium-review`](skills/scriptorium-review/SKILL.md) is for the reviewer, who claims a task, exports and reads it, and submits. Link both directories into the client's skills directory, for example `~/.claude/skills/` for Claude Code or `~/.codex/skills/` for Codex.
 
 ## Start and review
 
@@ -45,7 +45,7 @@ scriptorium --json run status RUN_ID
 
 Before starting, the host agent can agree a short review brief with the author (venue family, stage, the claims
 to check first, earlier reviews, what to ignore) and pass it with `run start --brief brief.json`. The brief is frozen
-into every review prompt and readable by any reviewer through `task show ATTEMPT_ID --part brief`; see
+into every review prompt and exported to every reviewer as `task/brief.json`; see
 [configuration](docs/configuration.md#review-brief). `doctor` reports a `detected_template` to suggest its venue family.
 
 `run start` compiles and freezes the selected commit, then returns a compact acknowledgement. It refuses a second non-terminal run on the same commit unless `--allow-duplicate` is passed. `run list` shows this project's runs, newest first (default 20, at most 100). Read `run status RUN_ID` for task counts, current `next_actions`, and commands for report sections. It makes no model call. For each pending task offered by `next_actions`, the current Codex, Claude Code, or Antigravity session uses its selected model:
@@ -53,16 +53,8 @@ into every review prompt and readable by any reviewer through `task show ATTEMPT
 ```bash
 scriptorium --json task claim TASK_ID --client codex --model MODEL --effort EFFORT \
   --session-id SESSION_ID --session-source host
-scriptorium --json task show ATTEMPT_ID
-scriptorium --json task show ATTEMPT_ID --part prompt
-scriptorium --json task show ATTEMPT_ID --part schema
-scriptorium --json task show ATTEMPT_ID --part brief
-scriptorium --json task show ATTEMPT_ID --part example
-scriptorium --json task nav ATTEMPT_ID --command heading
-scriptorium --json task search ATTEMPT_ID --query TERM
-scriptorium --json task read ATTEMPT_ID --path main.tex --start-line 1 --end-line 40 --anchor
-scriptorium --json task page ATTEMPT_ID --number 1
 scriptorium --json task export ATTEMPT_ID --dir DIR
+scriptorium --json task page ATTEMPT_ID --number 1
 scriptorium --json task submit ATTEMPT_ID --input-digest INPUT_DIGEST --file output.json --check
 scriptorium --json task submit ATTEMPT_ID --input-digest INPUT_DIGEST --file output.json
 ```
@@ -74,11 +66,17 @@ and assembles a review PDF with an explicit document/page index. Use
 global `page` in `manuscript.pdf` is the evidence coordinate. See [configuration](docs/configuration.md)
 for the supported inputs and limits.
 
-`task claim` and plain `task show` return a compact overview with `input_digest` and commands for the frozen inputs. `--part prompt` and `--part schema` return text fragments: follow `next_command` until null, concatenate `text` in offset order, and parse the complete schema text as JSON. Use `source_map_command` or `task show ATTEMPT_ID --part source-map` for evidence paths and digests, including after the attempt finishes. This reconstructs the frozen JSON file using the same fragment protocol. `--part example` returns, through the same protocol, a complete illustrative output for a review attempt. It is generated from the task's frozen schema when the task is prepared, checked against its frozen output model, cites the task's real frozen sources, and is stored as a content-addressed artifact, so every show serves the same bytes. Revision and verification attempts return an `example_unavailable` error instead.
-
-Successful JSON responses for claim, show, read, search, nav, page, and export are at most 7,000 UTF-8 bytes including the envelope and newline. Reads and searches may return fewer characters, lines, or matches than requested. Follow their `next_command` until null to finish the requested traversal; a long line can require multiple reads of the **same line** with increasing `--offset`. Use `task nav` to filter literal headings, labels, references, citations, captions, figure paths, tables, equations, and reported numbers, then inspect the relevant source and rendered page. The CLI records what it returned, not what a host displayed or understood. A page path alone does not prove that the client opened the image. `--file -` reads one output JSON object from stdin.
-
-For a long source, `task export ATTEMPT_ID --dir DIR` writes the active attempt's frozen bundle files into a directory that does not exist or is empty: every manuscript source at its `read_path`, plus `manifest.json`, `navigation.json`, `source-map.json`, and `manuscript.pdf`, byte-for-byte and read-only. Rendered page images are not exported; inspect them with `task page`. It is the only `task` command whose output is a side effect on disk, and its bounded response lists the exported paths and digests (shortened if the list is long). The export is recorded as an access event of the attempt. An export is for reading convenience: findings still need frozen `source_path`, `source_digest`, and line anchors, and `task read --anchor` remains the way to obtain a verified anchor.
+`task claim` and `task show ATTEMPT_ID` return a compact overview: run, task, attempt identity, the `input_digest` to
+submit, the bundle and navigation digests, and the export command. `task export ATTEMPT_ID --dir DIR` writes the
+attempt's frozen material into a new or empty directory, byte-for-byte and read-only: every source at its
+`read_path` under `sources/`, `manifest.json`, `navigation.json`, `source-map.json`, `manuscript.pdf`, and this
+attempt's task inputs under `task/`: `prompt.md` (including correction feedback on a retry), `schema.json`,
+`brief.json` when the run has a brief, and `example.json`, a complete illustrative output checked against the
+task's frozen output model, for review tasks. The reviewer reads these files with its own tools. Export works for
+any attempt of the run, including finished ones. `task page` renders a page image, optionally zoomed or cropped;
+`--text` writes the page's PDF text layer to a file as a reading aid, never evidence. Evidence is verified at
+submission against the frozen sources, whatever the reviewer read. `--file -` reads one output JSON object from
+stdin.
 
 Every review output carries a `limitations` list, which may be empty: the relevant material the reviewer could not check or could not read, including material the manuscript mentions that is absent from the frozen sources. A review task is complete when its submission is accepted. That accepted output satisfies the required-review gate for its role, and the task takes no further submission. `run report` lists each accepted review's limitations in `review_limitations`.
 
@@ -95,23 +93,22 @@ After each submission, inspect `scriptorium --json run status RUN_ID`. It return
 
 A rejected submission includes a validation report. `run retry RUN_ID --task TASK_ID` explicitly makes the task claimable again; the next attempt includes the frozen diagnostic feedback and has a new attempt input digest. An active claim survives CLI exit. To replace an abandoned active claim, use `run retry RUN_ID --task TASK_ID --abandon-attempt ATTEMPT_ID --reason TEXT`. `run resume RUN_ID` replays accepted work and prepares the next stage after human decisions. `run cancel RUN_ID --reason TEXT` waits for the current run operation, then invalidates active attempts.
 
-`run status` and the CLI acknowledgements for start, resume, retry, and cancel are bounded to 7,000 UTF-8 bytes. Mutation acknowledgements direct the client to `run status` for fresh next actions. Use its `report_parts` commands to inspect findings, limitations, claim checks, validation reports, and other sections without receiving the whole report at once:
+`run status` and the CLI acknowledgements for start, resume, retry, and cancel are compact. Mutation acknowledgements direct the client to `run status` for fresh next actions. Its `report_parts` name the report sections; each prints as one complete JSON value, best redirected to a file:
 
 ```bash
-scriptorium --json run report RUN_ID --part findings
-scriptorium --json run report RUN_ID --part review_limitations
-scriptorium --json run report RUN_ID --part findings_grouped
-scriptorium --json run report RUN_ID --part decision_stats
+scriptorium run report RUN_ID --part findings_grouped > findings_grouped.json
+scriptorium run report RUN_ID --part review_limitations > review_limitations.json
 scriptorium run report RUN_ID --format json > report.json
+scriptorium run report RUN_ID --format markdown > report.md
 ```
 
-Report parts use the same bounded `text`/`offset`/`next_command` traversal as frozen task inputs. The byte bound applies both to the compact `--json` envelope and to ordinary indented output for all bounded commands. Concatenate the fragments and parse the complete JSON value. Each `next_command` preserves the current output mode. Continuations include `--report-digest` for the entire report; a changed report is rejected rather than mixed with previous fragments. Restart the report traversal at offset zero if it changes. Full JSON and Markdown report exports remain unbounded and are intended for files or human inspection. The detailed `task list` command also remains available; use `run status` for the model's normal workflow. `decision_stats` counts findings by human decision, role, category, and severity and lists recent rejection and waiver reasons, as calibration input for the next review rather than a quality metric by itself. `findings_grouped` groups findings that cite mostly the same evidence, or the same table or figure with a shared linked claim or an overlapping line anchor, across roles, links each group to the claim it affects, and orders the groups headline, supporting, other, then compliance, so the author can decide them in batches with a multi-ID `finding decide`.
+The detailed `task list` command also remains available; use `run status` for the model's normal workflow. `decision_stats` counts findings by human decision, role, category, and severity and lists recent rejection and waiver reasons, as calibration input for the next review rather than a quality metric by itself. `findings_grouped` groups findings that cite mostly the same evidence, or the same table or figure with a shared linked claim or an overlapping line anchor, across roles, links each group to the claim it affects, and orders the groups headline, supporting, other, then compliance, so the author can decide them in batches with a multi-ID `finding decide`.
 
 Human finding decisions, patch approval, and patch application remain separate operations. A verifier must use a new external conversation; use the host's actual session ID and `--session-source host` when available. Self-declared or reused identity leaves verification inconclusive. Scriptorium records the host report but cannot cryptographically prove what the host displayed or read.
 
 ## Safety and limits
 
-- Task tools read only paths in the frozen bundle. Text anchors use source path, digest, line range, and exact quotation. Visual evidence uses a compiled PDF page and its immutable page digest.
+- Task exports and page renders come only from the frozen bundle. Text anchors use source path, digest, line range, and exact quotation. Visual evidence uses a compiled PDF page and its immutable page digest.
 - Source text, navigation entries, and model output are data, not instructions to the host.
 - Scriptorium never switches branches, commits, pushes, approves its own patch, or silently changes models.
 - Patch application checks the approved base and worktree again; stale edits are rejected.
