@@ -34,7 +34,7 @@ starting the run; changing the working configuration cannot add materials to an 
 `source-map.json` lists `compiled_pdf.documents`: each entry has an `entrypoint` (the resolved frozen source path), `start_page` in the review PDF,
 and `page_count`. `task page --document supplement.tex --number 1` selects the first physical page of that
 document. Its response includes the corresponding global `page` in `manuscript.pdf`; use that global page in
-evidence and scope. These numbers are physical page positions, not printed page labels.
+evidence. These numbers are physical page positions, not printed page labels.
 
 The selected Codex, Claude Code, or Antigravity CLI session owns model choice, effort, authentication, and spending. Supply its actual selection when claiming a task. Scriptorium stores this as external provenance; it cannot verify provider billing.
 

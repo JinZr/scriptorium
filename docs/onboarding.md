@@ -10,7 +10,8 @@
   Codex、Claude Code 或 Antigravity 会话做结构化审稿，再由你逐条决定、批准补丁、
   独立验证、显式应用。每一步都有人工关卡。
 - 它不选模型、不调模型、不付费。模型和费用都在你自己的 CLI 订阅或账户上。
-- 它不是自动改稿机。模型声明的 claim check 和 scope 只是供人检查的记录，不等于科学正确。
+- 它不是自动改稿机。模型声明的 claim check 和 limitations 只是供人检查的记录，不等于科学正确。
+  一次审稿提交被接受，该审稿任务就算完成。
 - 它只读已提交的内容。未提交的改动永远不会进入审稿。
 
 ## 第一步：检查机器
@@ -99,8 +100,8 @@ scriptorium --json run status RUN_ID
 - 时间和费用：以 `quick` profile 审一篇 10 页左右的稿件为参考，填入试点实测数据后更新本节。
 - 运行记录在仓库的 `.scriptorium/` 下，已被 `.gitignore` 忽略，只存在于你的机器上。
   需要和导师或合作者分享时，导出 Markdown 报告放到约定位置。
-- 不要手动编辑 `.scriptorium/` 里的任何文件。出错时修好外部原因，再用 `run retry`、
-  `run resume` 或 `run continue` 继续。
+- 不要手动编辑 `.scriptorium/` 里的任何文件。出错时修好外部原因，再用 `run retry`
+  或 `run resume` 继续。
 - 模型提交被拒会附带校验报告。`run retry RUN_ID --task TASK_ID` 让任务可以重新 claim，
   新一轮会把诊断信息冻结进提示里。
 - 同一个 clone 不要多人同时操作。合作者各自在自己的 clone 上运行。
