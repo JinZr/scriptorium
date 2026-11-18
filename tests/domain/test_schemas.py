@@ -15,7 +15,6 @@ from scriptorium.schemas import (
     JudgedScientificReviewOutput,
     ReviewOutput,
     ReviewScopeArea,
-    VisualTranscriptionOutput,
     evidence_anchor_contract_content,
     evidence_anchor_contract_digest,
     output_schema,
@@ -171,10 +170,6 @@ def test_output_schema_uses_the_supplied_frozen_contract() -> None:
     assert edit["properties"]["path"]["description"] == "frozen edit path"
 
 
-def test_visual_transcription_schema_is_unchanged_by_anchor_contract() -> None:
-    assert "oneOf" not in output_schema("visual_transcription").get("$defs", {}).get("Evidence", {})
-
-
 def test_source_map_models_enforce_canonical_paths_and_page_order() -> None:
     digest = "a" * 64
     source_map = EvidenceAnchorMap.model_validate(
@@ -224,19 +219,6 @@ def test_review_output_schema_forbids_unknown_fields() -> None:
     with pytest.raises(ValidationError):
         ReviewOutput.model_validate(payload)
     assert output_schema("review")["additionalProperties"] is False
-
-
-def test_visual_transcription_schema_accepts_empty_page_text() -> None:
-    digest = "a" * 64
-    output = VisualTranscriptionOutput.model_validate(
-        {
-            "pdf_digest": digest,
-            "pages": [{"page": 1, "page_digest": digest, "text": ""}],
-        }
-    )
-
-    assert output.pages[0].text == ""
-    assert output_schema("visual_transcription")["additionalProperties"] is False
 
 
 def _judged_check(**changes):

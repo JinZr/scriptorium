@@ -644,7 +644,7 @@ def test_corrupt_completed_output_cannot_be_replayed_or_pass_the_gate(tmp_path: 
         assert not service.evaluate_gate(run_id)["passed"]
 
 
-def test_historical_sdk_run_stays_readable_but_cannot_resume(tmp_path: Path) -> None:
+def test_a_run_not_prepared_for_external_hosts_is_rejected(tmp_path: Path) -> None:
     repo = _repo(tmp_path / "paper")
     run_id, _ = _start(repo)
     with ScriptoriumService(repo) as service:
@@ -659,15 +659,15 @@ def test_historical_sdk_run_stays_readable_but_cannot_resume(tmp_path: Path) -> 
                 (json.dumps(config), run_id),
             )
     with ScriptoriumService(repo) as service:
-        assert service.get_run(run_id)["run"].id == run_id
-        assert service.render_report(run_id, "json")["run"]["id"] == run_id
-        status = service.run_status(run_id)
-        assert status["execution"] == "legacy_read_only"
-        assert status["next_actions"] == []
-        assert json.loads(service.read_report(run_id, "gate")["text"])["passed"] is False
-        assert not service.evaluate_gate(run_id)["passed"]
-        with pytest.raises(StateError, match="retired SDK execution contract"):
-            asyncio.run(service.resume_run(run_id))
+        for inspect in (
+            lambda: service.run_status(run_id),
+            lambda: service.render_report(run_id, "json"),
+            lambda: service.read_report(run_id, "gate"),
+            lambda: service.evaluate_gate(run_id),
+            lambda: asyncio.run(service.resume_run(run_id)),
+        ):
+            with pytest.raises(StateError, match="not prepared for external hosts"):
+                inspect()
 
 
 def test_json_cli_freezes_a_review_brief_and_detects_a_committed_template(tmp_path: Path) -> None:

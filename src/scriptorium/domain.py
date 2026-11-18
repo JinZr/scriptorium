@@ -34,7 +34,6 @@ class RunStatus(str, Enum):
     VERIFYING = "verifying"
     READY_TO_APPLY = "ready_to_apply"
     COMPLETED = "completed"
-    WAITING_BUDGET = "waiting_budget"
     FAILED = "failed"
     CANCELLED = "cancelled"
 
@@ -99,7 +98,6 @@ class ReviewStage(str, Enum):
 
 class AgentRole(str, Enum):
     WORKFLOW = "workflow"
-    VISUAL_TRANSCRIPTION = "visual_transcription"
     SUBSTANTIVE_REVIEW = "substantive_review"
     COPYEDIT = "copyedit"
     CONSISTENCY = "consistency"
@@ -122,11 +120,6 @@ ROLE_CATALOG: Mapping[AgentRole, RoleSpec] = {
         display_name="Armarius",
         description="Deterministic workflow coordinator",
         model_backed=False,
-    ),
-    AgentRole.VISUAL_TRANSCRIPTION: RoleSpec(
-        key=AgentRole.VISUAL_TRANSCRIPTION,
-        display_name="Visual Transcriber",
-        description="Historical visual-transcription task retained for persisted run decoding",
     ),
     AgentRole.SUBSTANTIVE_REVIEW: RoleSpec(
         key=AgentRole.SUBSTANTIVE_REVIEW,
@@ -163,9 +156,7 @@ ROLE_CATALOG: Mapping[AgentRole, RoleSpec] = {
 
 RUN_TRANSITIONS: Mapping[RunStatus, frozenset[RunStatus]] = {
     RunStatus.PREPARING: frozenset({RunStatus.REVIEWING, RunStatus.FAILED, RunStatus.CANCELLED}),
-    RunStatus.REVIEWING: frozenset(
-        {RunStatus.AWAITING_DECISION, RunStatus.WAITING_BUDGET, RunStatus.FAILED, RunStatus.CANCELLED}
-    ),
+    RunStatus.REVIEWING: frozenset({RunStatus.AWAITING_DECISION, RunStatus.FAILED, RunStatus.CANCELLED}),
     RunStatus.AWAITING_DECISION: frozenset(
         {RunStatus.REVIEWING, RunStatus.REVISING, RunStatus.COMPLETED, RunStatus.CANCELLED}
     ),
@@ -173,7 +164,6 @@ RUN_TRANSITIONS: Mapping[RunStatus, frozenset[RunStatus]] = {
         {
             RunStatus.AWAITING_PATCH_APPROVAL,
             RunStatus.COMPLETED,
-            RunStatus.WAITING_BUDGET,
             RunStatus.FAILED,
             RunStatus.CANCELLED,
         }
@@ -186,15 +176,11 @@ RUN_TRANSITIONS: Mapping[RunStatus, frozenset[RunStatus]] = {
             RunStatus.AWAITING_PATCH_APPROVAL,
             RunStatus.READY_TO_APPLY,
             RunStatus.COMPLETED,
-            RunStatus.WAITING_BUDGET,
             RunStatus.FAILED,
             RunStatus.CANCELLED,
         }
     ),
     RunStatus.READY_TO_APPLY: frozenset({RunStatus.COMPLETED, RunStatus.FAILED, RunStatus.CANCELLED}),
-    RunStatus.WAITING_BUDGET: frozenset(
-        {RunStatus.REVIEWING, RunStatus.REVISING, RunStatus.VERIFYING, RunStatus.COMPLETED, RunStatus.CANCELLED}
-    ),
     RunStatus.COMPLETED: frozenset(),
     RunStatus.FAILED: frozenset({RunStatus.PREPARING, RunStatus.REVIEWING, RunStatus.REVISING, RunStatus.VERIFYING}),
     RunStatus.CANCELLED: frozenset(),

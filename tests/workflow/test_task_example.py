@@ -177,7 +177,7 @@ def test_a_task_prepared_without_a_stored_example_reports_none(tmp_path):
     with ScriptoriumService(repo, manuscript_manager=PdfBuildingManuscriptManager(repo)) as service:
         run = asyncio.run(service.start_run("HEAD", "quick"))["run"]
         context = claim(service, run.id, "copyedit")
-        # A task recorded before examples existed reads a null example digest after the migration.
+        # A task recorded before examples existed reads a null example digest.
         service.database.connection.execute(
             "UPDATE external_tasks SET example_digest = NULL WHERE task_id = ?", (context["task"].id,)
         )

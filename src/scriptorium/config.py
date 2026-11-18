@@ -97,14 +97,6 @@ def load_project_config(repo: Path) -> ProjectConfig:
     return ProjectConfig(ManuscriptConfig(main, engine, tuple(normalized)), profiles)
 
 
-def reject_legacy_local_config(repo: Path) -> None:
-    path = repo / ".scriptorium" / "config.toml"
-    if path.is_file():
-        raise ConfigurationError(
-            f"{path} configures removed internal model routes; remove it before starting an external run"
-        )
-
-
 def validate_ready(project: ProjectConfig, profile: str) -> None:
     if profile not in project.profiles:
         raise ConfigurationError(f"Unknown review profile {profile!r}")

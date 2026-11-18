@@ -31,13 +31,10 @@ from scriptorium.domain import (
     validate_task_transition,
 )
 
-SCHEMA_VERSION = 8
-
-
-_MIGRATION_1 = """
+_SCHEMA = """
 BEGIN IMMEDIATE;
 
-CREATE TABLE runs (
+CREATE TABLE IF NOT EXISTS runs (
     id TEXT PRIMARY KEY,
     repository TEXT NOT NULL,
     commit_sha TEXT NOT NULL,
@@ -50,10 +47,11 @@ CREATE TABLE runs (
     estimated_cost_usd REAL NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
-    error TEXT
+    error TEXT,
+    brief_digest TEXT REFERENCES artifacts(digest) ON DELETE RESTRICT
 );
 
-CREATE TABLE tasks (
+CREATE TABLE IF NOT EXISTS tasks (
     id TEXT PRIMARY KEY,
     run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE RESTRICT,
     stage TEXT NOT NULL,
@@ -66,7 +64,7 @@ CREATE TABLE tasks (
     UNIQUE (run_id, stage, role, route, input_digest)
 );
 
-CREATE TABLE artifacts (
+CREATE TABLE IF NOT EXISTS artifacts (
     digest TEXT PRIMARY KEY,
     relative_path TEXT NOT NULL,
     size INTEGER NOT NULL,
@@ -74,7 +72,7 @@ CREATE TABLE artifacts (
     created_at TEXT NOT NULL
 );
 
-CREATE TABLE attempts (
+CREATE TABLE IF NOT EXISTS attempts (
     id TEXT PRIMARY KEY,
     task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE RESTRICT,
     ordinal INTEGER NOT NULL,
@@ -98,10 +96,14 @@ CREATE TABLE attempts (
     error TEXT,
     created_at TEXT NOT NULL,
     completed_at TEXT,
+    validation_report_artifact_digest TEXT REFERENCES artifacts(digest) ON DELETE RESTRICT,
+    external_client TEXT,
+    effort TEXT,
+    session_source TEXT,
     UNIQUE (task_id, ordinal)
 );
 
-CREATE TABLE findings (
+CREATE TABLE IF NOT EXISTS findings (
     id TEXT PRIMARY KEY,
     run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE RESTRICT,
     task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE RESTRICT,
@@ -119,10 +121,12 @@ CREATE TABLE findings (
     status TEXT NOT NULL,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
+    consequence TEXT,
+    affected_claim TEXT,
     UNIQUE (run_id, fingerprint)
 );
 
-CREATE TABLE decisions (
+CREATE TABLE IF NOT EXISTS decisions (
     id TEXT PRIMARY KEY,
     target_type TEXT NOT NULL,
     target_id TEXT NOT NULL,
@@ -132,7 +136,7 @@ CREATE TABLE decisions (
     created_at TEXT NOT NULL
 );
 
-CREATE TABLE patches (
+CREATE TABLE IF NOT EXISTS patches (
     id TEXT PRIMARY KEY,
     run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE RESTRICT,
     base_commit TEXT NOT NULL,
@@ -144,10 +148,11 @@ CREATE TABLE patches (
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
     applied_at TEXT,
+    attempt_id TEXT REFERENCES attempts(id) ON DELETE RESTRICT,
     UNIQUE (run_id, base_commit, diff_digest)
 );
 
-CREATE TABLE verifications (
+CREATE TABLE IF NOT EXISTS verifications (
     id TEXT PRIMARY KEY,
     patch_id TEXT NOT NULL REFERENCES patches(id) ON DELETE RESTRICT,
     attempt_id TEXT REFERENCES attempts(id) ON DELETE RESTRICT,
@@ -157,7 +162,7 @@ CREATE TABLE verifications (
     created_at TEXT NOT NULL
 );
 
-CREATE TABLE events (
+CREATE TABLE IF NOT EXISTS events (
     id TEXT PRIMARY KEY,
     run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE RESTRICT,
     event_type TEXT NOT NULL,
@@ -167,123 +172,65 @@ CREATE TABLE events (
     created_at TEXT NOT NULL
 );
 
-CREATE TRIGGER artifacts_no_update
+CREATE TABLE IF NOT EXISTS external_tasks (
+    task_id TEXT PRIMARY KEY REFERENCES tasks(id) ON DELETE RESTRICT,
+    prompt_digest TEXT NOT NULL REFERENCES artifacts(digest) ON DELETE RESTRICT,
+    schema_digest TEXT NOT NULL REFERENCES artifacts(digest) ON DELETE RESTRICT,
+    bundle_digest TEXT NOT NULL,
+    bundle_path TEXT NOT NULL,
+    schema_kind TEXT NOT NULL,
+    example_digest TEXT REFERENCES artifacts(digest) ON DELETE RESTRICT
+);
+
+CREATE TRIGGER IF NOT EXISTS artifacts_no_update
 BEFORE UPDATE ON artifacts
 BEGIN
     SELECT RAISE(ABORT, 'artifacts are immutable');
 END;
 
-CREATE TRIGGER artifacts_no_delete
+CREATE TRIGGER IF NOT EXISTS artifacts_no_delete
 BEFORE DELETE ON artifacts
 BEGIN
     SELECT RAISE(ABORT, 'artifacts are immutable');
 END;
 
-CREATE TRIGGER attempts_no_delete
+CREATE TRIGGER IF NOT EXISTS attempts_no_delete
 BEFORE DELETE ON attempts
 BEGIN
     SELECT RAISE(ABORT, 'attempts are append-only');
 END;
 
-CREATE TRIGGER attempts_no_terminal_update
+CREATE TRIGGER IF NOT EXISTS attempts_no_terminal_update
 BEFORE UPDATE ON attempts
 WHEN OLD.status <> 'running'
 BEGIN
     SELECT RAISE(ABORT, 'terminal attempts are immutable');
 END;
 
-CREATE TRIGGER decisions_no_update
+CREATE TRIGGER IF NOT EXISTS decisions_no_update
 BEFORE UPDATE ON decisions
 BEGIN
     SELECT RAISE(ABORT, 'decisions are append-only');
 END;
 
-CREATE TRIGGER decisions_no_delete
+CREATE TRIGGER IF NOT EXISTS decisions_no_delete
 BEFORE DELETE ON decisions
 BEGIN
     SELECT RAISE(ABORT, 'decisions are append-only');
 END;
 
-CREATE TRIGGER events_no_update
+CREATE TRIGGER IF NOT EXISTS events_no_update
 BEFORE UPDATE ON events
 BEGIN
     SELECT RAISE(ABORT, 'events are append-only');
 END;
 
-CREATE TRIGGER events_no_delete
+CREATE TRIGGER IF NOT EXISTS events_no_delete
 BEFORE DELETE ON events
 BEGIN
     SELECT RAISE(ABORT, 'events are append-only');
 END;
 
-INSERT INTO schema_migrations (version, applied_at) VALUES (1, CURRENT_TIMESTAMP);
-COMMIT;
-"""
-
-
-_MIGRATION_2 = """
-BEGIN IMMEDIATE;
-ALTER TABLE patches ADD COLUMN attempt_id TEXT REFERENCES attempts(id) ON DELETE RESTRICT;
-INSERT INTO schema_migrations (version, applied_at) VALUES (2, CURRENT_TIMESTAMP);
-COMMIT;
-"""
-
-
-_MIGRATION_3 = """
-BEGIN IMMEDIATE;
-ALTER TABLE attempts
-ADD COLUMN validation_report_artifact_digest TEXT
-REFERENCES artifacts(digest) ON DELETE RESTRICT;
-INSERT INTO schema_migrations (version, applied_at) VALUES (3, CURRENT_TIMESTAMP);
-COMMIT;
-"""
-
-_MIGRATION_4 = """
-BEGIN IMMEDIATE;
-CREATE TABLE external_tasks (
-    task_id TEXT PRIMARY KEY REFERENCES tasks(id) ON DELETE RESTRICT,
-    prompt_digest TEXT NOT NULL REFERENCES artifacts(digest) ON DELETE RESTRICT,
-    schema_digest TEXT NOT NULL REFERENCES artifacts(digest) ON DELETE RESTRICT,
-    bundle_digest TEXT NOT NULL,
-    bundle_path TEXT NOT NULL,
-    schema_kind TEXT NOT NULL
-);
-ALTER TABLE attempts ADD COLUMN external_client TEXT;
-ALTER TABLE attempts ADD COLUMN effort TEXT;
-ALTER TABLE attempts ADD COLUMN session_source TEXT;
-INSERT INTO schema_migrations (version, applied_at) VALUES (4, CURRENT_TIMESTAMP);
-COMMIT;
-"""
-
-# Findings recorded before the severity rubric keep a null consequence.
-_MIGRATION_5 = """
-BEGIN IMMEDIATE;
-ALTER TABLE findings ADD COLUMN consequence TEXT;
-INSERT INTO schema_migrations (version, applied_at) VALUES (5, CURRENT_TIMESTAMP);
-COMMIT;
-"""
-
-# Runs started without a review brief, including every run recorded before it existed, keep a null digest.
-_MIGRATION_6 = """
-BEGIN IMMEDIATE;
-ALTER TABLE runs ADD COLUMN brief_digest TEXT REFERENCES artifacts(digest) ON DELETE RESTRICT;
-INSERT INTO schema_migrations (version, applied_at) VALUES (6, CURRENT_TIMESTAMP);
-COMMIT;
-"""
-
-# Findings recorded before affected_claim, and substantive findings, keep a null affected claim.
-_MIGRATION_7 = """
-BEGIN IMMEDIATE;
-ALTER TABLE findings ADD COLUMN affected_claim TEXT;
-INSERT INTO schema_migrations (version, applied_at) VALUES (7, CURRENT_TIMESTAMP);
-COMMIT;
-"""
-
-# Tasks prepared before output examples, and tasks without one, keep a null example digest.
-_MIGRATION_8 = """
-BEGIN IMMEDIATE;
-ALTER TABLE external_tasks ADD COLUMN example_digest TEXT REFERENCES artifacts(digest) ON DELETE RESTRICT;
-INSERT INTO schema_migrations (version, applied_at) VALUES (8, CURRENT_TIMESTAMP);
 COMMIT;
 """
 
@@ -310,74 +257,11 @@ class Database:
         self.connection.row_factory = sqlite3.Row
         self.connection.execute("PRAGMA foreign_keys = ON")
         self.connection.execute("PRAGMA busy_timeout = 5000")
+        # One write transaction makes a concurrent first open wait, then find every object already created. It runs
+        # before the WAL switch, which needs an exclusive lock that a racing first open could otherwise refuse.
+        self.connection.executescript(_SCHEMA)
         self.connection.execute("PRAGMA journal_mode = WAL")
         self.connection.execute("PRAGMA synchronous = NORMAL")
-        self._migrate()
-
-    def _migrate(self) -> None:
-        with self._lock:
-            self.connection.execute(
-                "CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)"
-            )
-            row = self.connection.execute(
-                "SELECT COALESCE(MAX(version), 0) AS version FROM schema_migrations"
-            ).fetchone()
-            version = int(row["version"])
-            new_database = version == 0
-            if version > SCHEMA_VERSION:
-                raise StorageError(
-                    f"database schema version {version} is newer than supported version {SCHEMA_VERSION}"
-                )
-            if version == 0:
-                self.connection.executescript(_MIGRATION_1)
-                version = 1
-            if version == 1:
-                self.connection.executescript(_MIGRATION_2)
-                version = 2
-            if version == 2:
-                self.connection.executescript(_MIGRATION_3)
-                version = 3
-            if version == 3 and new_database:
-                self.connection.executescript(_MIGRATION_4)
-                version = 4
-            if 4 <= version < SCHEMA_VERSION:
-                with self.transaction() as connection:
-                    self._apply_external_migrations(connection)
-
-    def ensure_external_schema(self) -> None:
-        with self.transaction() as connection:
-            version = connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0]
-            if version == SCHEMA_VERSION:
-                return
-            active = connection.execute(
-                "SELECT id FROM runs WHERE status NOT IN (?, ?) LIMIT 1",
-                (RunStatus.COMPLETED.value, RunStatus.CANCELLED.value),
-            ).fetchone()
-            if active is not None:
-                raise ConflictError(
-                    f"historical SDK run {active['id']} must finish in its original version "
-                    "before starting an external run"
-                )
-            self._apply_external_migrations(connection)
-
-    @staticmethod
-    def _apply_external_migrations(connection: sqlite3.Connection) -> None:
-        # executescript commits an open transaction, so run each fixed migration statement inside the caller's
-        # write transaction, after rechecking a version that another process may already have advanced.
-        version = connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0]
-        for target, migration in (
-            (4, _MIGRATION_4),
-            (5, _MIGRATION_5),
-            (6, _MIGRATION_6),
-            (7, _MIGRATION_7),
-            (8, _MIGRATION_8),
-        ):
-            if version >= target:
-                continue
-            for statement in migration.split(";"):
-                statement = statement.strip()
-                if statement and statement not in {"BEGIN IMMEDIATE", "COMMIT"}:
-                    connection.execute(statement)
 
     @contextmanager
     def transaction(self) -> Iterator[sqlite3.Connection]:
@@ -1741,9 +1625,8 @@ class Database:
             explanation=row["explanation"],
             suggested_action=row["suggested_action"],
             confidence=row["confidence"],
-            # Historical SDK databases stay at their original schema without this column.
-            consequence=row["consequence"] if "consequence" in row.keys() else None,
-            affected_claim=row["affected_claim"] if "affected_claim" in row.keys() else None,
+            consequence=row["consequence"],
+            affected_claim=row["affected_claim"],
             status=FindingStatus(row["status"]),
             created_at=row["created_at"],
             updated_at=row["updated_at"],
