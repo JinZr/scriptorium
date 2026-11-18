@@ -70,7 +70,6 @@ from .schemas import (
     ValidationIssue,
     ValidationReport,
     VerificationOutput,
-    VisualTranscriptionOutput,
     evidence_anchor_contract_content,
     evidence_anchor_contract_digest,
     output_schema,
@@ -92,7 +91,7 @@ _APPROVED_DIFF_SLOT = "{{SCRIPTORIUM_APPROVED_DIFF_JSON}}"
 class TaskOutcome:
     task: Task
     attempt: Attempt
-    output: ReviewOutput | VisualTranscriptionOutput | RevisionOutput | VerificationOutput
+    output: ReviewOutput | RevisionOutput | VerificationOutput
 
 
 def task_input_digest(run: Run, prompt_digest: str, schema_digest: str, bundle_digest: str) -> str:
@@ -328,24 +327,16 @@ class Armarius:
     @staticmethod
     def require_external_run(run: Run) -> None:
         if run.frozen_config.get("execution") != "external":
-            raise StateError(f"run {run.id} uses the retired SDK execution contract; use its original version")
+            raise StateError(f"run {run.id} was not prepared for external hosts; start a new run")
 
     def require_evidence_anchor_contract(self, run_id: str) -> EvidenceAnchorContract:
         run = self.database.get_run(run_id)
-        contract = self._evidence_anchor_contract_for_run(run, allow_missing=False)
-        assert contract is not None
+        contract = self._evidence_anchor_contract_for_run(run)
         self._navigation_for_run(run)
         return contract
 
-    def _evidence_anchor_contract_for_run(
-        self,
-        run: Run,
-        *,
-        allow_missing: bool,
-    ) -> EvidenceAnchorContract | None:
+    def _evidence_anchor_contract_for_run(self, run: Run) -> EvidenceAnchorContract:
         if "evidence_anchor_contract" not in run.frozen_config:
-            if allow_missing:
-                return None
             # An old prompt cannot prove which path aliases its validator accepted, so synthesis is unsafe.
             raise InfrastructureError(f"run {run.id} predates the frozen evidence anchor contract; start a new run")
         record = run.frozen_config["evidence_anchor_contract"]
@@ -818,7 +809,7 @@ class Armarius:
         value: str | None,
         validator: Callable[[Any], list[ValidationIssue]],
     ) -> tuple[
-        ReviewOutput | VisualTranscriptionOutput | RevisionOutput | VerificationOutput | None,
+        ReviewOutput | RevisionOutput | VerificationOutput | None,
         list[ValidationIssue],
     ]:
         if value is None:
@@ -1087,9 +1078,8 @@ class Armarius:
         bundle: ManuscriptBundle,
     ) -> str | None:
         """Build an output that parses under the task's frozen model and cites frozen anchors, when one fits."""
-        # Runs frozen before the evidence-anchor contract have no anchors an example could demonstrate.
-        contract = self._evidence_anchor_contract_for_run(run, allow_missing=True)
-        if schema_kind not in {"review", "scientific_review"} or role.value not in EXAMPLE_ROLES or contract is None:
+        contract = self._evidence_anchor_contract_for_run(run)
+        if schema_kind not in {"review", "scientific_review"} or role.value not in EXAMPLE_ROLES:
             return None
         snapshot = self._run_dir(run.id) / "snapshot"
         source_anchor, source_area = self._example_source(bundle, snapshot, contract)
@@ -1193,7 +1183,6 @@ class Armarius:
         output_kind = {
             "review": "ReviewOutput",
             "scientific_review": "ReviewOutput",
-            "visual_transcription": "VisualTranscriptionOutput",
             "revision": "RevisionOutput",
             "verification": "VerificationOutput",
         }[schema_kind]
@@ -1209,13 +1198,6 @@ class Armarius:
             "Validation diagnostics:\n"
             f"{projection}\n\n"
             "Return only one JSON object matching the original output schema."
-        )
-
-    @staticmethod
-    def _legacy_correction_prompt(error: str) -> str:
-        return (
-            "Correct your previous response. It was rejected for this reason:\n"
-            f"{error}\nReturn only one JSON object matching the original schema and valid manuscript anchors."
         )
 
     async def _execute_task(
@@ -2360,7 +2342,7 @@ class Armarius:
 
     def _frozen_prompt_template(self, run: Run, role: AgentRole) -> str:
         # Historical task identity is authoritative; never re-render it from the current defaults.
-        self._evidence_anchor_contract_for_run(run, allow_missing=False)
+        self._evidence_anchor_contract_for_run(run)
         return run.frozen_config["evidence_anchor_contract"]["prompt_templates"][role.value]["content"]
 
     @staticmethod
@@ -2427,13 +2409,12 @@ class Armarius:
         except (KeyError, OSError, TypeError, ValueError) as exc:
             raise InfrastructureError(f"bundle navigation is missing or corrupt: {workspace}") from exc
 
-    def _bundle_for_run(self, run: Run, *, allow_legacy: bool = False) -> ManuscriptBundle:
-        contract = self._evidence_anchor_contract_for_run(run, allow_missing=allow_legacy)
+    def _bundle_for_run(self, run: Run) -> ManuscriptBundle:
+        contract = self._evidence_anchor_contract_for_run(run)
         navigation = self._navigation_for_run(run)
         return self._load_bundle(
             self._run_dir(run.id) / "bundle",
             contract,
-            allow_legacy=allow_legacy and contract is None,
             navigation_required="navigation" in run.frozen_config,
             navigation_digest=self._content_record(navigation)["digest"] if navigation is not None else None,
         )
@@ -2442,9 +2423,8 @@ class Armarius:
     def _load_bundle(
         cls,
         workspace: Path,
-        contract: EvidenceAnchorContract | None,
+        contract: EvidenceAnchorContract,
         *,
-        allow_legacy: bool = False,
         navigation_required: bool = False,
         navigation_digest: str | None = None,
     ) -> ManuscriptBundle:
@@ -2497,7 +2477,7 @@ class Armarius:
                     source_path=source.path,
                     read_path=(Path("sources") / relative).as_posix(),
                     source_digest=source.digest,
-                    line_count=cls._anchor_line_count(contract, text) if text_anchorable else None,
+                    line_count=len(contract.split_lines(text)) if text_anchorable else None,
                     text_anchorable=text_anchorable,
                 )
             )
@@ -2539,10 +2519,6 @@ class Armarius:
         if actual_page_files != expected_page_files:
             raise InfrastructureError(f"bundle page set does not match the manifest: {workspace}")
 
-        if contract is None:
-            if not allow_legacy or source_map_value != {"sources": [asdict(source) for source in sources]}:
-                raise InfrastructureError(f"bundle source map has no frozen anchor contract: {workspace}")
-            return ManuscriptBundle(workspace, sources, pdf_pages)
         try:
             anchor_map = EvidenceAnchorMap.model_validate(source_map_value)
             expected_map = EvidenceAnchorMap.model_validate(
@@ -2563,11 +2539,6 @@ class Armarius:
         if anchor_map != expected_map:
             raise InfrastructureError(f"bundle source map does not match the frozen bundle: {workspace}")
         return ManuscriptBundle(workspace, sources, pdf_pages, anchor_map)
-
-    @staticmethod
-    def _anchor_line_count(contract: EvidenceAnchorContract | None, text: str) -> int:
-        # A bundle without a frozen contract is a historical SDK bundle; its anchors are never revalidated.
-        return len(contract.split_lines(text) if contract is not None else text.splitlines())
 
     @staticmethod
     def _require_regular_bundle_file(path: Path) -> None:

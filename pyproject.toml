@@ -65,9 +65,3 @@ path = "src/scriptorium/service.py"
 function = "ScriptoriumService.doctor"
 cap = 28
 reason = "Preflight checks share dependency and diagnostic ordering."
-
-[[tool.scriptorium_complexity.debt]]
-path = "src/scriptorium/workflow.py"
-function = "Armarius._load_bundle"
-cap = 22
-reason = "Bundle loading validates frozen source and page evidence before use."

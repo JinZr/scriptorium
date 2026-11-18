@@ -23,7 +23,7 @@ from typing import Any, Iterator
 from pydantic import ValidationError
 
 from .artifacts import ArtifactError, ArtifactStore
-from .config import find_repo, load_project_config, reject_legacy_local_config, validate_ready
+from .config import find_repo, load_project_config, validate_ready
 from .decision_stats import current_status, decision_stats, markdown_lines as markdown_decision_stats
 from .domain import (
     Attempt,
@@ -317,7 +317,6 @@ class ScriptoriumService:
         else:
             try:
                 validate_ready(project, selected_profile)
-                reject_legacy_local_config(self.repo)
             except ConfigurationError as exc:
                 check("review_profile", False, str(exc), "configuration")
             else:
@@ -357,9 +356,7 @@ class ScriptoriumService:
         self, revision: str, profile: str, allow_duplicate: bool = False, brief: str | None = None
     ) -> dict[str, Any]:
         review_brief = self._parse_brief(brief)
-        reject_legacy_local_config(self.repo)
         run_id = new_id("run")
-        self._storage(self.database.ensure_external_schema)
         with ExitStack() as locks:
             if not allow_duplicate:
                 # Serialize check-and-create across processes: a concurrent starter waits here, then sees this run.
@@ -403,11 +400,10 @@ class ScriptoriumService:
 
     def run_status(self, run_id: str) -> dict[str, Any]:
         run = self._storage(self.database.get_run, run_id)
+        self.armarius.require_external_run(run)
         with self._run_operation(run.id, "run status"):
             view = self.get_run(run_id)
-            external = view["run"].frozen_config.get("execution") == "external"
-            next_actions = self.list_tasks(run_id)["next_actions"] if external else []
-            return run_overview(self._with_brief(view), next_actions)
+            return run_overview(self._with_brief(view), self.list_tasks(run_id)["next_actions"])
 
     def list_runs(self, status: str | None = None, limit: int = 20) -> dict[str, Any]:
         if status is not None and status not in {item.value for item in RunStatus}:
@@ -1297,11 +1293,11 @@ class ScriptoriumService:
     def render_report(self, run_id: str, format: str) -> str | dict[str, Any]:
         if format not in {"markdown", "json"}:
             raise ConfigurationError("report format must be markdown or json")
+        self.armarius.require_external_run(self._storage(self.database.get_run, run_id))
         run_view = self.get_run(run_id)
         findings = self._storage(self.database.list_findings, run_id)
         patches = self._storage(self.database.list_patches, run_id)
         events = self._storage(self.database.list_events, run_id)
-        external_run = run_view["run"].frozen_config.get("execution") == "external"
         access_counts = {}
         export_counts = Counter(event.entity_id for event in events if event.event_type == "tool.export")
         for event in events:
@@ -1316,12 +1312,10 @@ class ScriptoriumService:
             task = item["task"]
             schema_kind = {
                 "review": "review",
-                "review_transcription": "visual_transcription",
                 "revision": "revision",
                 "verification": "verification",
-                "verification_transcription": "visual_transcription",
             }.get(task.stage)
-            if task.stage == "review" and external_run:
+            if task.stage == "review":
                 metadata = self._storage(self.database.get_external_task, task.id)
                 schema_kind = metadata["schema_kind"]
             for attempt in item["attempts"]:
@@ -1332,34 +1326,29 @@ class ScriptoriumService:
                             "attempt_id": attempt.id,
                             "role": task.role.value,
                             "status": attempt.status.value,
-                            "returns": (
-                                access_counts.get(attempt.id, dict.fromkeys(_RETURN_KINDS, 0)) if external_run else None
-                            ),
-                            "exports": export_counts.get(attempt.id, 0) if external_run else None,
+                            "returns": access_counts.get(attempt.id, dict.fromkeys(_RETURN_KINDS, 0)),
+                            "exports": export_counts.get(attempt.id, 0),
                         }
                     )
                 if task.stage == "review" and attempt.status == AttemptStatus.COMPLETED:
                     scope = None
-                    if external_run:
-                        schema = self.armarius._load_schema_artifact(
-                            run_view["run"], metadata["schema_kind"], attempt.schema_digest
-                        )
-                        model = self.armarius._output_model_for_schema(run_view["run"], schema_kind, schema)
-                        if issubclass(model, ScopedReviewOutput):
-                            try:
-                                output_text = self.artifacts.get_bytes(attempt.output_artifact_digest).decode("utf-8")
-                            except (ArtifactError, UnicodeDecodeError) as exc:
-                                raise InfrastructureError(
-                                    f"completed review attempt {attempt.id} has unreadable output"
-                                ) from exc
-                            output, issues = self.armarius._parse_and_validate_output(model, output_text, lambda _: [])
-                            if output is None or issues:
-                                raise InfrastructureError(
-                                    f"completed review attempt {attempt.id} has invalid scope output"
-                                )
-                            scope = output.scope.model_dump(mode="json", exclude_none=True)
-                            if isinstance(output, ScientificReviewOutput):
-                                review_claim_checks.append(self._claim_check_report(task.id, attempt.id, output))
+                    schema = self.armarius._load_schema_artifact(
+                        run_view["run"], metadata["schema_kind"], attempt.schema_digest
+                    )
+                    model = self.armarius._output_model_for_schema(run_view["run"], schema_kind, schema)
+                    if issubclass(model, ScopedReviewOutput):
+                        try:
+                            output_text = self.artifacts.get_bytes(attempt.output_artifact_digest).decode("utf-8")
+                        except (ArtifactError, UnicodeDecodeError) as exc:
+                            raise InfrastructureError(
+                                f"completed review attempt {attempt.id} has unreadable output"
+                            ) from exc
+                        output, issues = self.armarius._parse_and_validate_output(model, output_text, lambda _: [])
+                        if output is None or issues:
+                            raise InfrastructureError(f"completed review attempt {attempt.id} has invalid scope output")
+                        scope = output.scope.model_dump(mode="json", exclude_none=True)
+                        if isinstance(output, ScientificReviewOutput):
+                            review_claim_checks.append(self._claim_check_report(task.id, attempt.id, output))
                     review_scopes.append(
                         {"task_id": task.id, "attempt_id": attempt.id, "role": task.role.value, "scope": scope}
                     )
@@ -1385,9 +1374,7 @@ class ScriptoriumService:
         validation_reports.sort(key=lambda item: (item["created_at"], item["attempt_id"]))
         for item in validation_reports:
             item.pop("created_at")
-        review_coverage_audit = (
-            self._collect_review_coverage_audits(run_view, review_scopes, events) if external_run else []
-        )
+        review_coverage_audit = self._collect_review_coverage_audits(run_view, review_scopes, events)
         finding_records = []
         for finding in findings:
             decisions = self._storage(self.database.list_decisions, "finding", finding.id)
@@ -1436,6 +1423,7 @@ class ScriptoriumService:
 
     def evaluate_gate(self, run_id: str) -> dict[str, Any]:
         run = self._storage(self.database.get_run, run_id)
+        self.armarius.require_external_run(run)
         tasks = self._storage(self.database.list_tasks, run_id)
         findings = self._storage(self.database.list_findings, run_id)
         patches = self._storage(self.database.list_patches, run_id)
@@ -1444,9 +1432,6 @@ class ScriptoriumService:
         review_errors = []
         for task in tasks:
             if task.stage != "review" or task.status != TaskStatus.COMPLETED:
-                continue
-            if run.frozen_config.get("execution") != "external":
-                completed_roles.add(task.role.value)
                 continue
             try:
                 completion = self._storage(self.armarius.review_completion, task)
@@ -1899,15 +1884,12 @@ class ScriptoriumService:
         if plain["review_tool_access"]:
             for item in plain["review_tool_access"]:
                 counts = item["returns"]
-                if counts is None:
-                    lines.append(f"- `{item['attempt_id']}` / {item['status']}: unavailable for legacy execution")
-                else:
-                    lines.append(
-                        f"- `{item['attempt_id']}` / {item['status']}: "
-                        f"read {counts['read']}, search {counts['search']}, page {counts['page']}, "
-                        f"nav {counts.get('nav', 0)}, page text {counts.get('page_text', 0)}, "
-                        f"export {item.get('exports', 0)}"
-                    )
+                lines.append(
+                    f"- `{item['attempt_id']}` / {item['status']}: "
+                    f"read {counts['read']}, search {counts['search']}, page {counts['page']}, "
+                    f"nav {counts.get('nav', 0)}, page text {counts.get('page_text', 0)}, "
+                    f"export {item.get('exports', 0)}"
+                )
         else:
             lines.append("- None")
         lines.append("Scope is model-declared; tool returns do not prove inspection.")

@@ -48,8 +48,10 @@ Preserve the dependency direction and existing ownership:
 - `domain.py`: entities, enums, invariants, and state transitions.
 - `workflow.py`: deterministic task preparation, output validation, recovery, and
   approval/release gates.
-- `storage.py`: SQLite migrations, transactions, and persistence queries. Add a
-  numbered migration for a schema change; do not rewrite historical migrations.
+- `storage.py`: the SQLite schema, transactions, and persistence queries. The
+  schema is defined once in `storage.py`; the project is in internal alpha with
+  no migration or compatibility path, so a schema change edits that definition
+  and existing `.scriptorium/` state is not carried over.
 - `artifacts.py`: atomic, SHA-256-addressed artifact publication.
 - `manuscript.py`: Git snapshots, LaTeX dependency scanning/building, bundles,
   source anchors, and exact patch construction.

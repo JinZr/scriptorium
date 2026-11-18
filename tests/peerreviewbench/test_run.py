@@ -1,5 +1,4 @@
 import asyncio
-from dataclasses import replace
 import json
 from pathlib import Path
 import shutil
@@ -11,8 +10,7 @@ from egs.peerreviewbench.prepare import BenchmarkError, file_digest, load_lock
 import egs.peerreviewbench.run as benchmark_run
 from egs.peerreviewbench.run import PeerReviewBenchManuscriptManager, create_paper_project, run_benchmark
 from scriptorium.config import load_project_config
-from scriptorium.domain import AgentRole, RunStatus, TaskStatus, canonical_json
-from scriptorium.errors import InfrastructureError
+from scriptorium.domain import AgentRole, RunStatus, TaskStatus
 from scriptorium.schemas import DEFAULT_EVIDENCE_ANCHOR_CONTRACT
 from scriptorium.service import ScriptoriumService
 
@@ -393,44 +391,6 @@ def test_full_profile_service_persists_findings_artifacts_and_cost(tmp_path: Pat
         bundle_source.unlink()
         with pytest.raises(BenchmarkError, match="bundle"):
             benchmark_run.validate_completed_scriptorium_state(service, valid_entry)
-
-
-def test_completed_bundle_validation_allows_explicit_legacy_source_map_read_only(tmp_path: Path) -> None:
-    prepared = _prepared_paper(
-        tmp_path / "prepared",
-        paper_id=18,
-        dataset_id="test/peerreview-bench",
-        dataset_revision="locked-revision",
-    )
-    project, manager = _project(tmp_path, prepared)
-    with ScriptoriumService(project, manuscript_manager=manager) as service:
-        run = asyncio.run(service.start_run("prepared", "full"))["run"]
-        _complete_reviews(service, run.id)
-        run_dir = service.armarius._run_dir(run.id)
-        bundle_dir = run_dir / "bundle"
-        bundle_manifest = json.loads((bundle_dir / "manifest.json").read_text(encoding="utf-8"))
-        source_map_path = bundle_dir / "source-map.json"
-        source_map_path.write_text(
-            json.dumps({"sources": bundle_manifest["sources"]}, indent=2, sort_keys=True) + "\n",
-            encoding="utf-8",
-        )
-        run_manifest_path = run_dir / "manifest.json"
-        run_manifest = json.loads(run_manifest_path.read_text(encoding="utf-8"))
-        run_manifest["bundle_digest"] = service.armarius._directory_digest(bundle_dir)
-        run_manifest_path.write_text(
-            json.dumps(run_manifest, indent=2, sort_keys=True) + "\n",
-            encoding="utf-8",
-        )
-        service.armarius._record_file(source_map_path, "application/json")
-        service.armarius._record_text(canonical_json(run_manifest), "application/json")
-        legacy_config = dict(run.frozen_config)
-        legacy_config.pop("evidence_anchor_contract")
-        legacy_run = replace(run, frozen_config=legacy_config)
-
-        benchmark_run._validate_completed_bundle(service, legacy_run, 18)
-        with pytest.raises(InfrastructureError, match="predates the frozen evidence anchor contract"):
-            service.armarius._bundle_for_run(legacy_run)
-        assert len(service.database.list_tasks(run.id)) == 4
 
 
 def test_completed_benchmark_paper_is_not_repeated_on_resume(

@@ -162,23 +162,6 @@ def test_run_commands_dispatch_to_service(monkeypatch, capsys) -> None:
     capsys.readouterr()
 
 
-@pytest.mark.parametrize(
-    "arguments",
-    [
-        ["doctor", "--budget-usd", "1"],
-        ["run", "start", "--budget-usd", "1"],
-        ["run", "retry", "run_1", "--task", "task_1", "--route", "old"],
-    ],
-)
-def test_retired_budget_and_route_options_require_migration(monkeypatch, capsys, arguments) -> None:
-    service = FakeService()
-    install_fake_service(monkeypatch, service)
-
-    assert cli.main(["--json", *arguments]) == 2
-    assert "retired internal model runner" in json.loads(capsys.readouterr().out)["error"]["message"]
-    assert service.calls == []
-
-
 def test_query_and_report_commands_dispatch(monkeypatch, capsys) -> None:
     service = FakeService()
     install_fake_service(monkeypatch, service)

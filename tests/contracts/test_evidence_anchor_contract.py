@@ -13,7 +13,6 @@ from scriptorium.schemas import (
     evidence_anchor_contract_digest,
     output_schema,
 )
-from scriptorium.storage import SCHEMA_VERSION
 
 
 @pytest.mark.parametrize(
@@ -70,7 +69,6 @@ def test_anchor_contract_is_content_addressed_without_a_version_field() -> None:
     assert evidence_anchor_contract_digest(restored) == evidence_anchor_contract_digest()
     assert EvidenceAnchorContract not in SCHEMA_MODELS.values()
     assert "evidence_anchor_contract" not in SCHEMA_MODELS
-    assert SCHEMA_VERSION == 8
     assert (
         "final line terminator"
         in output_schema("revision")["$defs"]["ExactEdit"]["properties"]["before"]["description"]
@@ -143,15 +141,6 @@ def test_provider_and_local_evidence_shapes_are_mutually_exclusive() -> None:
                 {"required": ["quoted_text"]},
             ]
         }
-
-
-def test_visual_transcription_schema_does_not_consume_anchor_contract() -> None:
-    content = evidence_anchor_contract_content()
-    content["source_line"]["matching_rule"] = "changed for this test"
-    contract = EvidenceAnchorContract.model_validate(content)
-
-    assert output_schema("visual_transcription", contract) == output_schema("visual_transcription")
-    assert output_schema("visual_transcription", contract) == SCHEMA_MODELS["visual_transcription"].model_json_schema()
 
 
 def test_provider_schema_uses_the_supplied_contract_content() -> None:

@@ -98,7 +98,6 @@ def brief_summary(brief):
 
 def run_overview(view, next_actions=None):
     run = view["run"]
-    external = run.frozen_config.get("execution") == "external"
     optional = {}
     if "review_brief" in view:
         optional["review_brief"] = brief_summary(view["review_brief"])
@@ -108,12 +107,12 @@ def run_overview(view, next_actions=None):
         {
             "run": {"id": run.id, "status": run.status.value, "commit_sha": run.commit_sha},
             **optional,
-            "execution": "external" if external else "legacy_read_only",
+            "execution": "external",
             "task_counts": dict(Counter(item["task"].status.value for item in view["tasks"])),
             "finding_count": len(view["finding_ids"]),
             "patch_count": len(view["patch_ids"]),
             "has_error": run.error is not None,
-            "estimated_cost_usd": None if external else run.estimated_cost_usd,
+            "estimated_cost_usd": None,
             "next_actions": next_actions if next_actions is not None else [{"command": "run status", "run_id": run.id}],
             "report_parts": {part: report_command(run.id, part) for part in REPORT_PARTS},
         }

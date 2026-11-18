@@ -25,7 +25,6 @@ class _ArgumentParser(argparse.ArgumentParser):
         raise _UsageError(message)
 
 
-_RETIRED = argparse.SUPPRESS
 _BRIEF_LIMIT_BYTES = 256_000
 _TASK_DESCRIPTION = """Use a frozen task from the current host model session.
 
@@ -49,7 +48,6 @@ def build_parser() -> argparse.ArgumentParser:
     doctor_parser = commands.add_parser("doctor", help="check local configuration and dependencies")
     doctor_parser.add_argument("--revision", default="HEAD", help="committed revision to check (default: HEAD)")
     doctor_parser.add_argument("--profile", help="review profile from scriptorium.toml")
-    doctor_parser.add_argument("--budget-usd", help=_RETIRED)
 
     run_parser = commands.add_parser("run", help="manage review runs")
     run_commands = run_parser.add_subparsers(dest="run_command", required=True)
@@ -62,7 +60,6 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="start even if a non-terminal run already exists on the same commit",
     )
-    start_parser.add_argument("--budget-usd", help=_RETIRED)
     start_parser.add_argument(
         "--brief", help="review brief JSON file agreed with the authors, frozen into every review prompt"
     )
@@ -82,7 +79,6 @@ def build_parser() -> argparse.ArgumentParser:
     retry_parser.add_argument("--task", required=True, dest="task_id", help="task ID to retry")
     retry_parser.add_argument("--abandon-attempt", help="active attempt ID to interrupt before retrying")
     retry_parser.add_argument("--reason", help="why the active attempt is abandoned")
-    retry_parser.add_argument("--route", help=_RETIRED)
 
     continue_parser = run_commands.add_parser("continue", help="continue an accepted partial review")
     continue_parser.add_argument("run_id", help="run ID")
@@ -310,8 +306,6 @@ def _dispatch(arguments: argparse.Namespace) -> tuple[Any, int, str | None]:
     service = _build_service(repo)
 
     if arguments.command == "doctor":
-        if arguments.budget_usd is not None:
-            raise ConfigurationError("--budget-usd belongs to the retired internal model runner")
         result = service.doctor(
             profile=arguments.profile,
             revision=arguments.revision,
@@ -336,8 +330,6 @@ def _dispatch(arguments: argparse.Namespace) -> tuple[Any, int, str | None]:
 
 def _dispatch_run(service: Any, arguments: argparse.Namespace) -> tuple[Any, int, str | None]:
     if arguments.run_command == "start":
-        if arguments.budget_usd is not None:
-            raise ConfigurationError("--budget-usd belongs to the retired internal model runner")
         result = _run_async(
             service.start_run(
                 revision=arguments.revision,
@@ -354,8 +346,6 @@ def _dispatch_run(service: Any, arguments: argparse.Namespace) -> tuple[Any, int
     if arguments.run_command == "resume":
         return run_overview(_run_async(service.resume_run(arguments.run_id))), 0, None
     if arguments.run_command == "retry":
-        if arguments.route is not None:
-            raise ConfigurationError("--route belongs to the retired internal model runner")
         result = _run_async(
             service.retry_task(arguments.run_id, arguments.task_id, arguments.abandon_attempt, arguments.reason)
         )

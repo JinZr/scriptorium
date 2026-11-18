@@ -819,18 +819,6 @@ class LinkedScientificReviewOutput(RatedScientificReviewOutput):
         return self
 
 
-# Historical runs still deserialize these persisted outputs, but new runs never schedule this role.
-class VisualTranscriptionPage(StrictModel):
-    page: int = Field(ge=1)
-    page_digest: str = Field(pattern="^[0-9a-f]{64}$")
-    text: str
-
-
-class VisualTranscriptionOutput(StrictModel):
-    pdf_digest: str = Field(pattern="^[0-9a-f]{64}$")
-    pages: list[VisualTranscriptionPage] = Field(min_length=1)
-
-
 class ExactEdit(StrictModel):
     finding_ids: list[str] = Field(min_length=1)
     path: str = Field(
@@ -893,7 +881,7 @@ class ValidationIssue(StrictModel):
 
 
 class ValidationReport(StrictModel):
-    schema_kind: Literal["review", "scientific_review", "visual_transcription", "revision", "verification"]
+    schema_kind: Literal["review", "scientific_review", "revision", "verification"]
     schema_digest: str = Field(pattern="^[0-9a-f]{64}$")
     bundle_digest: str = Field(pattern="^[0-9a-f]{64}$")
     output_artifact_digest: str | None = Field(default=None, pattern="^[0-9a-f]{64}$")
@@ -903,7 +891,6 @@ class ValidationReport(StrictModel):
 SCHEMA_MODELS: dict[str, type[StrictModel]] = {
     "review": ClaimedReviewOutput,
     "scientific_review": LinkedScientificReviewOutput,
-    "visual_transcription": VisualTranscriptionOutput,
     "revision": RevisionOutput,
     "verification": VerificationOutput,
 }
