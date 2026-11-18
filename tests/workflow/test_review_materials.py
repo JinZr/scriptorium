@@ -108,12 +108,6 @@ def test_supplement_retrieval_survives_processes_and_records_unambiguous_pages(t
             {
                 "summary": "Compared the frozen supplement.",
                 "findings": [finding],
-                "scope": {
-                    "completion": "complete",
-                    "checked": [{"source_path": "manuscript.pdf", "page": 2}],
-                    "outstanding": [],
-                    "limitations": [],
-                },
             },
         )
         assert result["run_status"] == RunStatus.AWAITING_DECISION

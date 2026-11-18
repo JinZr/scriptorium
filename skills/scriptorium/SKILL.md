@@ -22,7 +22,6 @@ scriptorium --json patch decide PATCH_ID --approve|--reject --reason TEXT
 scriptorium --json patch apply PATCH_ID
 scriptorium --json run gate RUN_ID
 scriptorium --json run resume RUN_ID
-scriptorium --json run continue RUN_ID --task TASK_ID
 scriptorium --json run retry RUN_ID --task TASK_ID [--abandon-attempt ATTEMPT_ID --reason TEXT]
 scriptorium --json run cancel RUN_ID --reason TEXT
 ```
@@ -44,8 +43,8 @@ confirms, edits, or says "defaults". Write `brief.json` (format: `reference/brie
 `duplicate_run` while a non-terminal run exists on that commit: continue that run, and pass `--allow-duplicate` only
 when the author wants a second independent run. Then read `run status RUN_ID` and follow its `next_actions`, rereading after each change. Use IDs and digests from the CLI, never guessed values. If a run ID is missing or not found, read `run list`; do not search other repositories.
 
-`task claim` actions go to a reviewer session. `run continue` reopens a task whose accepted scope is `partial` or
-`unknown`. `run retry` follows a rejected submission; add `--abandon-attempt` only for a truly stuck attempt, since a
+`task claim` actions go to a reviewer session; an accepted submission completes its review task.
+`run retry` follows a rejected submission; add `--abandon-attempt` only for a truly stuck attempt, since a
 claim survives CLI exit and long work is not failure. `run resume` advances
 after a decision, or recovers a failed run when status offers it; repair the external prerequisite first.
 `run cancel` ends a run.

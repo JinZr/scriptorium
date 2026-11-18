@@ -1,5 +1,4 @@
 import copy
-from decimal import Decimal
 
 from pydantic import ValidationError
 import pytest
@@ -12,7 +11,7 @@ from scriptorium.schemas import (
     EvidenceAnchorMap,
     LinkedClaimCheck,
     ReviewOutput,
-    ReviewScopeArea,
+    ScientificReviewOutput,
     evidence_anchor_contract_content,
     evidence_anchor_contract_digest,
     output_schema,
@@ -101,58 +100,25 @@ def test_evidence_schema_exposes_mutually_exclusive_contract_shapes() -> None:
         }
 
 
-def test_review_scope_schema_exposes_location_and_completion_constraints() -> None:
-    definitions = output_schema("review")["$defs"]
-    pdf_page, source = definitions["ReviewScopeArea"]["oneOf"]
+@pytest.mark.parametrize("kind", ["review", "scientific_review"])
+def test_review_schema_requires_a_limitations_list_of_strings(kind) -> None:
+    schema = output_schema(kind)
+    limitations = schema["properties"]["limitations"]
 
-    assert pdf_page["required"] == ["page"]
-    assert pdf_page["properties"]["source_path"] == {"const": "manuscript.pdf"}
-    assert pdf_page["not"] == {"anyOf": [{"required": ["start_line"]}, {"required": ["end_line"]}]}
-    assert source["properties"]["source_path"] == {"not": {"const": "manuscript.pdf"}}
-    assert source["not"] == {"required": ["page"]}
-    assert source["oneOf"] == [
-        {"required": ["start_line", "end_line"]},
-        {"not": {"anyOf": [{"required": ["start_line"]}, {"required": ["end_line"]}]}},
-    ]
-    assert definitions["ReviewScope"]["allOf"][0]["then"]["properties"]["outstanding"] == {"maxItems": 0}
+    assert "limitations" in schema["required"]
+    assert "scope" not in schema["properties"]
+    assert {"ReviewScope", "ReviewScopeArea"}.isdisjoint(schema["$defs"])
+    assert limitations["type"] == "array"
+    assert limitations["items"] == {"minLength": 1, "type": "string"}
+    assert "could not check or could not read" in limitations["description"]
+    assert "absent from the frozen sources" in limitations["description"]
 
 
-@pytest.mark.parametrize(
-    "area",
-    [
-        {"source_path": "manuscript.pdf", "page": "1"},
-        {"source_path": "manuscript.pdf", "page": True},
-        {"source_path": "manuscript.pdf", "page": 1.5},
-        {"source_path": "manuscript.pdf", "page": Decimal("1.0000000000000001")},
-        {"source_path": "manuscript.pdf", "page": Decimal("1e1000000000")},
-        {"source_path": "main.tex", "start_line": "1", "end_line": 1},
-        {"source_path": "main.tex", "start_line": True, "end_line": 1},
-        {"source_path": "main.tex", "start_line": 1.5, "end_line": 2},
-        {"source_path": "main.tex", "start_line": Decimal("1.0000000000000001"), "end_line": 2},
-        {"source_path": "main.tex", "start_line": Decimal("1e1000000000"), "end_line": 2},
-        {"source_path": "main.tex", "start_line": 1, "end_line": "1"},
-        {"source_path": "main.tex", "start_line": 1, "end_line": True},
-        {"source_path": "main.tex", "start_line": 1, "end_line": 1.5},
-        {"source_path": "main.tex", "start_line": 1, "end_line": Decimal("1.0000000000000001")},
-        {"source_path": "main.tex", "start_line": 1, "end_line": Decimal("1e1000000000")},
-    ],
-)
-def test_review_scope_coordinates_require_integers(area) -> None:
-    with pytest.raises(ValidationError):
-        ReviewScopeArea.model_validate(area)
-
-
-@pytest.mark.parametrize(
-    ("area", "field"),
-    [
-        ({"source_path": "manuscript.pdf", "page": 1.0}, "page"),
-        ({"source_path": "manuscript.pdf", "page": Decimal("1.0")}, "page"),
-        ({"source_path": "main.tex", "start_line": 1.0, "end_line": 1}, "start_line"),
-        ({"source_path": "main.tex", "start_line": 1, "end_line": 1.0}, "end_line"),
-    ],
-)
-def test_review_scope_accepts_integral_json_numbers(area, field) -> None:
-    assert getattr(ReviewScopeArea.model_validate(area), field) == 1
+def test_limitations_items_must_not_be_blank() -> None:
+    assert ScientificReviewOutput.model_fields["limitations"].is_required()
+    with pytest.raises(ValidationError, match="items must not be blank"):
+        ReviewOutput.model_validate({"summary": "Reviewed.", "findings": [], "limitations": ["Missing.", " \n"]})
+    assert ReviewOutput.model_validate({"summary": "Reviewed.", "findings": [], "limitations": []}).limitations == []
 
 
 def test_output_schema_uses_the_supplied_frozen_contract() -> None:
@@ -212,7 +178,7 @@ def test_review_output_schema_forbids_unknown_fields() -> None:
     payload = {
         "summary": "No findings.",
         "findings": [],
-        "scope": {"completion": "complete", "checked": [], "outstanding": [], "limitations": []},
+        "limitations": [],
         "unexpected": True,
     }
     with pytest.raises(ValidationError):

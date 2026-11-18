@@ -109,7 +109,7 @@ def test_multiple_judges_preserve_disagreement_and_original_outputs(collections,
     verify_seal(tmp_path / "results")
 
 
-def test_duplicate_event_origins_preserve_continuation_and_other_role(tmp_path):
+def test_duplicate_event_origins_preserve_the_other_role(tmp_path):
     root = project(tmp_path)
     configuration = root / "scriptorium.toml"
     configuration.write_text(configuration.read_text().replace('["copyedit"]', '["copyedit", "consistency"]'))
@@ -131,9 +131,7 @@ def test_duplicate_event_origins_preserve_continuation_and_other_role(tmp_path):
     )
     run_id, task_id = start(root)
     with ScriptoriumService(root) as service:
-        first = submit(service, task_id, completion="partial")
-        asyncio.run(service.continue_review(run_id, task_id))
-        continued = submit(service, task_id, session="continued")
+        first = submit(service, task_id)
         other_id = next(item["task"].id for item in service.list_tasks(run_id)["tasks"] if item["task"].id != task_id)
         other = submit(service, other_id, session="other-role")
     collection = collect(root, run_id, tmp_path / "collection", "paper", "multi-role")
@@ -141,10 +139,8 @@ def test_duplicate_event_origins_preserve_continuation_and_other_role(tmp_path):
     mapping = read_json(packet / "mapping.json")
     assert len(mapping["candidates"]) == 1
     origins = mapping["candidates"]["C0001"]
-    assert [origin["attempt_id"] for origin in origins] == [
-        context["attempt"].id for context in (first, continued, other)
-    ]
-    assert [origin["role"] for origin in origins] == ["copyedit", "copyedit", "consistency"]
+    assert [origin["attempt_id"] for origin in origins] == [context["attempt"].id for context in (first, other)]
+    assert [origin["role"] for origin in origins] == ["copyedit", "consistency"]
     events = [
         event for event in read_json(collection / "report.json")["events"] if event["event_type"] == "finding.duplicate"
     ]

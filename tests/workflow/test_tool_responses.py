@@ -113,13 +113,26 @@ def test_terminal_attempt_keeps_bounded_source_map_inspection(review_cli, status
     if status == "interrupted":
         service.cancel_run(task.run_id, "Stop review")
     else:
+        page = {"source_path": "manuscript.pdf", "page": 1}
+        check = {
+            "claim_index": 0,
+            "evidence": [page],
+            "critical_question": "Is the reported result supported?",
+            "countercheck": "Checked the rendered page.",
+            "stated_scope": "As stated in the manuscript.",
+            "check_type": "design_and_analysis",
+            "question_answer": "yes",
+            "exceptions": [],
+            "assessment": "supported",
+            "finding_indices": [],
+        }
         output = {
-            "summary": "Partial check.",
+            "summary": "Checked the result.",
             "findings": [],
-            "claim_checks": [],
-            "claim_inventory": [],
+            "limitations": [],
+            "claim_checks": [check],
+            "claim_inventory": [{"claim": "The result is clear.", "claim_anchor": page, "prominence": "headline"}],
             "verdict": {"recommendation": "accept", "decisive_questions": ["Is the reported result supported?"]},
-            "scope": {"completion": "partial", "checked": [], "outstanding": [], "limitations": []},
         }
         asyncio.run(
             service.submit_task(

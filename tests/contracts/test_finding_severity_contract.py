@@ -7,12 +7,9 @@ from scriptorium.schemas import (
     SEVERITY_RUBRIC,
     SEVERITY_RULES,
     RatedFinding,
-    ReviewScope,
     Severity,
     output_schema,
 )
-
-_SCOPE = {"completion": "complete", "checked": [], "outstanding": [], "limitations": []}
 
 
 def _finding(**changes):
@@ -76,17 +73,3 @@ def test_submission_compliance_findings_accept_minor_and_suggestion(severity) ->
     finding = RatedFinding.model_validate(_finding(category="submission_compliance", severity=severity.value))
     assert finding.severity == severity
     assert RatedFinding.model_validate(_finding(category="formatting", severity="major")).severity == Severity.MAJOR
-
-
-@pytest.mark.parametrize(
-    ("entry", "kind"),
-    [("main.tex", "a string"), (3, "a number"), (["main.tex"], "an array"), (None, "null")],
-)
-def test_scope_entries_that_are_not_objects_name_the_area_fields(entry, kind) -> None:
-    errors = _errors(ReviewScope, {**_SCOPE, "completion": "partial", "checked": [entry]})
-
-    assert errors[0]["loc"] == ("checked", 0)
-    assert errors[0]["type"] == "scope_area_type"
-    message = errors[0]["msg"]
-    assert message.startswith(f"each scope.checked and scope.outstanding entry must be an object, not {kind}")
-    assert all(field in message for field in ("source_path", "start_line", "end_line", "manuscript.pdf", "page"))

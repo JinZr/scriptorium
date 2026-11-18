@@ -143,7 +143,6 @@ def test_run_commands_dispatch_to_service(monkeypatch, capsys) -> None:
         (["run", "list"], ("list_runs", None, 20)),
         (["run", "list", "--status", "reviewing", "--limit", "5"], ("list_runs", "reviewing", 5)),
         (["run", "resume", "run_1"], ("resume_run", "run_1")),
-        (["run", "continue", "run_1", "--task", "task_1"], ("continue_review", "run_1", "task_1")),
         (
             ["run", "retry", "run_1", "--task", "task_1"],
             ("retry_task", "run_1", "task_1", None, None),
@@ -160,6 +159,18 @@ def test_run_commands_dispatch_to_service(monkeypatch, capsys) -> None:
         assert cli.main(arguments) == 0
         assert service.calls == [expected]
     capsys.readouterr()
+
+
+def test_run_does_not_offer_continue(monkeypatch, capsys) -> None:
+    service = FakeService()
+    install_fake_service(monkeypatch, service)
+
+    with pytest.raises(SystemExit):
+        cli.main(["run", "--help"])
+    assert "continue" not in capsys.readouterr().out
+    assert cli.main(["run", "continue", "run_1", "--task", "task_1"]) == 2
+    assert "invalid choice: 'continue'" in capsys.readouterr().err
+    assert service.calls == []
 
 
 def test_query_and_report_commands_dispatch(monkeypatch, capsys) -> None:

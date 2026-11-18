@@ -112,18 +112,13 @@ def test_text_layer_is_bounded_and_not_counted_as_a_page_view(pages):
         {
             "summary": "Checked the page text layer only.",
             "findings": [],
-            "scope": {
-                "completion": "partial",
-                "checked": [{"source_path": "manuscript.pdf", "page": 1}],
-                "outstanding": [],
-                "limitations": [],
-            },
+            "limitations": ["The rendered page image was not inspected."],
         },
     )
     assert receipt["attempt"].status.value == "completed"
-    report = service.render_report(run.id, "json")
-    assert report["review_tool_access"][0]["returns"]["page_text"] == 2
-    assert report["review_coverage_audit"][0]["declared_without_task_page"] == [1]
+    events = [event.event_type for event in service.database.list_events(run.id)]
+    assert events.count("tool.page_text") == 2
+    assert "tool.page" not in events
 
 
 def test_long_text_layer_continues_with_offsets(pages, monkeypatch):

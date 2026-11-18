@@ -54,22 +54,16 @@ def test_substantive_review_records_anchored_claim_checks_and_links_findings(tmp
         assert "evidence: `manuscript.pdf:page 1`" in markdown
 
 
-@pytest.mark.parametrize("completion", ["complete", "partial", "unknown"])
-def test_unresolved_external_evidence_is_separate_from_unfinished_frozen_review(tmp_path, completion):
+def test_unresolved_external_evidence_is_a_limitation_of_a_completed_review(tmp_path):
     repo = make_repository(tmp_path, roles=("substantive_review",))
     with ScriptoriumService(repo, manuscript_manager=PdfBuildingManuscriptManager(repo)) as service:
         run = asyncio.run(service.start_run("HEAD", "quick"))["run"]
         review = claim(service, run.id, AgentRole.SUBSTANTIVE_REVIEW)
-        assert "Mark completion partial or unknown when work remains or cannot be assessed" not in review["prompt"]
-        assert "available relevant frozen sources or pages remains unfinished" in review["prompt"]
-        assert (
-            "do not alone prevent complete after the available relevant material has been assessed" in review["prompt"]
-        )
-        complete = completion == "complete"
+        assert "completion partial or unknown" not in review["prompt"]
+        assert "scope.outstanding" not in review["prompt"] and "scope.limitations" not in review["prompt"]
+        assert "In limitations, list relevant material you could not check or could not read" in review["prompt"]
+        assert "An accepted submission completes the review" in review["prompt"]
         limitation = "The external raw data needed to resolve the scientific question are unavailable."
-        checked = [{"source_path": "main.tex", "start_line": 1, "end_line": 4}]
-        if complete:
-            checked.append({"source_path": "manuscript.pdf", "page": 1})
         receipt = submit(
             service,
             review,
@@ -82,18 +76,14 @@ def test_unresolved_external_evidence_is_separate_from_unfinished_frozen_review(
                         "countercheck": limitation,
                     }
                 ],
-                "scope": {
-                    "completion": completion,
-                    "checked": checked,
-                    "outstanding": [] if complete else [{"source_path": "manuscript.pdf", "page": 1}],
-                    "limitations": [limitation] if complete else [limitation, "The frozen page is still unread."],
-                },
+                "limitations": [limitation],
             },
         )
         assert receipt["attempt"].status == AttemptStatus.COMPLETED
-        assert receipt["run_status"] == (RunStatus.AWAITING_DECISION if complete else RunStatus.REVIEWING)
+        assert receipt["run_status"] == RunStatus.AWAITING_DECISION
         report = service.render_report(run.id, "json")
         assert report["review_claim_checks"][0]["claim_checks"][0]["assessment"] == "unresolved"
+        assert report["review_limitations"][0]["limitations"] == [limitation]
         assert service.database.list_findings(run.id) == []
         assert not service.evaluate_gate(run.id)["passed"]
 
@@ -254,7 +244,7 @@ def test_claim_inventory_anchor_is_validated_and_rendered(tmp_path):
         assert "  - [0] The result is clear. — supported" in markdown
 
 
-def test_complete_review_must_check_every_inventoried_headline_claim(tmp_path):
+def test_review_must_check_every_inventoried_headline_claim(tmp_path):
     repo = make_repository(tmp_path, roles=("substantive_review",))
     with ScriptoriumService(repo, manuscript_manager=PdfBuildingManuscriptManager(repo)) as service:
         run = asyncio.run(service.start_run("HEAD", "quick"))["run"]
@@ -282,122 +272,28 @@ def test_complete_review_must_check_every_inventoried_headline_claim(tmp_path):
         )
         assert receipt["attempt"].status == AttemptStatus.FAILED
         assert "must check every inventoried headline claim" in str(receipt["validation_report"]["issues"])
-
-
-def test_continuation_preserves_prior_claim_checks_and_accepts_new_checks(tmp_path):
-    repo = make_repository(tmp_path, roles=("substantive_review",))
-    with ScriptoriumService(repo, manuscript_manager=PdfBuildingManuscriptManager(repo)) as service:
-        run = asyncio.run(service.start_run("HEAD", "quick"))["run"]
-        first = claim(service, run.id, AgentRole.SUBSTANTIVE_REVIEW)
-        finding = review_finding(first)
-        partial = {
-            "summary": "Checked one claim; a page remains.",
-            "findings": [finding],
-            "claim_checks": [_claim_check(assessment="finding", finding_indices=[0])],
-            "scope": {
-                "completion": "partial",
-                "checked": [{"source_path": "main.tex", "start_line": 1, "end_line": 4}],
-                "outstanding": [{"source_path": "manuscript.pdf", "page": 1}],
-                "limitations": ["The rendered page remains unchecked."],
-            },
-        }
-        assert submit(service, first, partial)["attempt"].status == AttemptStatus.COMPLETED
-        asyncio.run(service.continue_review(run.id, first["task"].id))
-        second = claim(service, run.id, AgentRole.SUBSTANTIVE_REVIEW)
-        assert "claim_checks" in second["prompt"]
-        assert '"claim_inventory":[{"claim":' in second["prompt"]
-        assert '"verdict":{"decisive_questions":' in second["prompt"]
-        assert "except when a newly assessed claim check must link to an existing concern" in second["prompt"]
-        assert second["attempt"].id != first["attempt"].id
-        assert (
-            submit(
-                service,
-                second,
-                {
-                    "summary": "Checked the rendered result.",
-                    "findings": [{**finding, "explanation": "The page confirms the same typo."}],
-                    "claim_checks": [_claim_check(assessment="finding", finding_indices=[0])],
-                },
-            )["run_status"]
-            == RunStatus.AWAITING_DECISION
-        )
-        report = service.render_report(run.id, "json")
-        assert len(report["review_claim_checks"]) == 2
-        assert len(report["findings"]) == 1
-        assert all(item["submitted_findings"][0]["title"] == finding["title"] for item in report["review_claim_checks"])
-
-
-def test_continuation_must_keep_listing_claims_the_accepted_inventory_left_unchecked(tmp_path):
-    repo = make_repository(tmp_path, roles=("substantive_review",))
-    with ScriptoriumService(repo, manuscript_manager=PdfBuildingManuscriptManager(repo)) as service:
-        run = asyncio.run(service.start_run("HEAD", "quick"))["run"]
-        first = claim(service, run.id, AgentRole.SUBSTANTIVE_REVIEW)
-        page = {"source_path": "manuscript.pdf", "page": 1}
-        assert "give that entry a not_checked_reason" in first["prompt"]
-        assert "prior inventory left unchecked, one entry per claim" in first["prompt"]
-        checked = {
-            "claim": _claim_check()["claim"],
-            "claim_anchor": page,
-            "prominence": "headline",
-            "check_indices": [0],
-        }
-        open_headline = {
-            "claim": "The result generalizes.",
-            "claim_anchor": review_finding(first)["evidence"][0],
-            "prominence": "headline",
-            "check_indices": [],
-            "not_checked_reason": "Not reached yet.",
-        }
-        second_open = {**open_headline, "claim": "The result scales."}
-        partial = {
-            "summary": "Checked one headline claim.",
-            "findings": [],
-            "claim_checks": [_claim_check()],
-            "claim_inventory": [checked, open_headline, second_open],
-            "scope": {
-                "completion": "partial",
-                "checked": [{"source_path": "main.tex", "start_line": 1, "end_line": 4}],
-                "outstanding": [{"source_path": "manuscript.pdf", "page": 1}],
-                "limitations": ["The general claims remain unchecked."],
-            },
-        }
-        assert submit(service, first, partial)["attempt"].status == AttemptStatus.COMPLETED
-        asyncio.run(service.continue_review(run.id, first["task"].id))
-        second = claim(service, run.id, AgentRole.SUBSTANTIVE_REVIEW)
-        generalizes = _claim_check(claim=open_headline["claim"], claim_anchor=open_headline["claim_anchor"])
-        complete = {"summary": "Checked the page.", "findings": [], "claim_checks": [generalizes]}
-        resumed = {**open_headline, "check_indices": [0]}
-        del resumed["not_checked_reason"]
-        # One entry on the shared anchor carries forward only one of the two open claims.
-        dropped = submit(service, second, {**complete, "claim_inventory": [resumed]})
-        assert dropped["attempt"].status == AttemptStatus.FAILED
-        issues = dropped["validation_report"]["issues"]
-        assert [issue["code"] for issue in issues] == ["claim_inventory.unchecked_claim_dropped"]
-        assert issues[0]["expected"]["claim"] == "The result scales."
-        asyncio.run(service.retry_task(run.id, second["task"].id))
-        third = claim(service, run.id, AgentRole.SUBSTANTIVE_REVIEW, session="third")
-        demoted = {**second_open, "prominence": "supporting"}
-        receipt = submit(service, third, {**complete, "claim_inventory": [resumed, demoted]})
-        assert receipt["attempt"].status == AttemptStatus.FAILED
-        asyncio.run(service.retry_task(run.id, second["task"].id))
-        fourth = claim(service, run.id, AgentRole.SUBSTANTIVE_REVIEW, session="fourth")
-        # A different claim on the same anchor and prominence does not carry the open claim forward.
-        robust = {**generalizes, "claim": "The result is robust."}
-        replaced = {**resumed, "claim": robust["claim"], "check_indices": [1]}
+        assert "not_checkable" in str(receipt["validation_report"]["issues"])
+        asyncio.run(service.retry_task(run.id, review["task"].id))
+        review = claim(service, run.id, AgentRole.SUBSTANTIVE_REVIEW, session="second")
+        undecidable = _claim_check(assessment="unresolved", claim="The result generalizes.")
+        inventory[1] = {**inventory[1], "check_indices": [1]}
+        del inventory[1]["not_checked_reason"]
         receipt = submit(
-            service, fourth, {**complete, "claim_checks": [generalizes, robust], "claim_inventory": [resumed, replaced]}
+            service,
+            review,
+            {
+                "summary": "Checked both headline claims.",
+                "findings": [],
+                "claim_checks": [_claim_check(), undecidable],
+                "claim_inventory": inventory,
+            },
         )
-        assert receipt["attempt"].status == AttemptStatus.FAILED
-        assert receipt["validation_report"]["issues"][0]["expected"]["claim"] == "The result scales."
-        asyncio.run(service.retry_task(run.id, second["task"].id))
-        fifth = claim(service, run.id, AgentRole.SUBSTANTIVE_REVIEW, session="fifth")
-        scales = {**generalizes, "claim": second_open["claim"]}
-        both = [resumed, {**resumed, "claim": scales["claim"], "check_indices": [1]}]
-        receipt = submit(service, fifth, {**complete, "claim_checks": [generalizes, scales], "claim_inventory": both})
         assert receipt["attempt"].status == AttemptStatus.COMPLETED
+        report = service.render_report(run.id, "json")
+        assert report["review_claim_checks"][0]["claim_checks"][1]["question_answer"] == "not_checkable"
 
 
-def test_other_review_roles_keep_the_scoped_review_schema(tmp_path):
+def test_other_review_roles_keep_the_detail_review_schema(tmp_path):
     repo = make_repository(tmp_path, roles=("copyedit",))
     with ScriptoriumService(repo, manuscript_manager=PdfBuildingManuscriptManager(repo)) as service:
         run = asyncio.run(service.start_run("HEAD", "quick"))["run"]

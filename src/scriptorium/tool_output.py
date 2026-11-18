@@ -19,10 +19,8 @@ REPORT_PARTS = (
     "patches",
     "events",
     "validation_reports",
-    "review_scopes",
+    "review_limitations",
     "review_claim_checks",
-    "review_tool_access",
-    "review_coverage_audit",
     "gate",
 )
 

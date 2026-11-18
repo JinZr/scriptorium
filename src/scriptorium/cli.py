@@ -80,10 +80,6 @@ def build_parser() -> argparse.ArgumentParser:
     retry_parser.add_argument("--abandon-attempt", help="active attempt ID to interrupt before retrying")
     retry_parser.add_argument("--reason", help="why the active attempt is abandoned")
 
-    continue_parser = run_commands.add_parser("continue", help="continue an accepted partial review")
-    continue_parser.add_argument("run_id", help="run ID")
-    continue_parser.add_argument("--task", required=True, dest="task_id", help="review task ID with partial scope")
-
     cancel_parser = run_commands.add_parser("cancel", help="cancel a run and invalidate active attempts")
     cancel_parser.add_argument("run_id", help="run ID")
     cancel_parser.add_argument("--reason", required=True, type=_nonempty, help="non-empty cancellation reason")
@@ -350,8 +346,6 @@ def _dispatch_run(service: Any, arguments: argparse.Namespace) -> tuple[Any, int
             service.retry_task(arguments.run_id, arguments.task_id, arguments.abandon_attempt, arguments.reason)
         )
         return run_overview(result), 0, None
-    if arguments.run_command == "continue":
-        return run_overview(_run_async(service.continue_review(arguments.run_id, arguments.task_id))), 0, None
     if arguments.run_command == "cancel":
         return run_overview(service.cancel_run(arguments.run_id, arguments.reason)), 0, None
     if arguments.run_command == "report":

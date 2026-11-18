@@ -24,18 +24,15 @@ claim and answers the critical question at the stated scope; answering one candi
 by itself. Use "unresolved" when the available material does not decide a material part, and "finding" when a
 specific consequential concern remains after checking the authors' explanation. A finding assessment must list
 the zero-based indices of its entries in findings; the other assessments use an empty list. Include every finding
-in at least one claim check. A partial review may submit an empty claim_checks list; a complete review must include
-the central claims it assessed.
+in at least one claim check. Submit at least one claim check, covering the central claims you assessed.
 
 List the manuscript's central claims in claim_inventory before checking them: each headline claim the authors
 state in the abstract, stated contributions, or conclusions, and the supporting claims those headline claims depend
 on. Anchor each entry where the authors state it. Each claim check assesses exactly one inventoried claim and names
 it by claim_index, the entry's zero-based position in claim_inventory; do not restate the claim in the check. When no
-check in this submission names a claim, give that entry a not_checked_reason; omit the reason otherwise. A complete
-review must check every inventoried headline claim, even when the check can only conclude "unresolved".
-In a continuation, list the claims this submission assesses and every claim the
-prior inventory left unchecked, one entry per claim with the same claim, claim_anchor, and prominence; claims checked
-in an earlier accepted attempt need not be repeated.
+check in this submission names a claim, give that entry a not_checked_reason; omit the reason otherwise. Check every
+inventoried headline claim, even when the check can only conclude "unresolved"; when the frozen bundle cannot decide
+it, answer "not_checkable".
 
 Decide the verdict before listing findings. Set verdict.recommendation to accept, minor_revision, major_revision, or
 reject, and make verdict.decisive_questions the one to three questions whose answers would change the recommendation;
@@ -45,8 +42,7 @@ none. A blocker finding must be linked from a check of a headline claim.
 
 Phrase each critical question so the reported countercheck can answer it. A check that only confirms repeated
 numbers supports that narrow consistency question, not a broader scientific conclusion. If a material link in the
-evidence chain remains unexamined, name its frozen source or page in scope.outstanding when present and explain
-the gap in scope.limitations rather than declaring the broader claim supported.
+evidence chain remains unexamined, explain the gap in limitations rather than declaring the broader claim supported.
 
 Record each check's judgment explicitly. Put the conditions and qualifications of the inventoried claim in
 stated_scope; keep evidence for the material that decides the assessment. Set
@@ -75,9 +71,7 @@ exceptions, and assessment together:
 - Update the summary to match the final checks, preserving material exceptions and unresolved conclusions. State
   which comparisons were checked within the bundle; a citation is not evidence that its external paper was read.
 
-Describe remaining available-but-unexamined sources or pages in scope.outstanding. Missing external material
-belongs in scope.limitations. An unresolved scientific question does not itself require a partial review if the
-available relevant material has been assessed; scope completion describes the work done, not scientific certainty.
+List relevant material you could not check or could not read, including missing external material, in limitations.
 Keep the summary short. Findings may be empty; do not invent one to fill the procedure or repeat copyediting issues.
 Naming, notation, units, caption wording, figure arithmetic, and bibliography presentation belong to the copyedit,
 consistency, and figure-review roles and are not substantive findings. Report such an item only when it changes how a

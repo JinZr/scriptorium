@@ -83,7 +83,7 @@ def test_benchmark_prepares_external_tasks_and_collects_validated_reviews(tmp_pa
                         {
                             "summary": "Reviewed the frozen paper.",
                             "findings": [],
-                            "scope": {"completion": "complete", "checked": [], "outstanding": [], "limitations": []},
+                            "limitations": [],
                             **(
                                 {
                                     "claim_checks": [

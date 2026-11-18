@@ -65,11 +65,8 @@ def substantive(claim_data):
     return claim_data["task"].stage == "review" and claim_data["task"].role == AgentRole.SUBSTANTIVE_REVIEW
 
 
-def link_claims(output, *, prior_high=False):
-    """Build a substantive output from checks that name their claim: link them by claim_index, add a verdict.
-
-    prior_high says whether the task's earlier accepted outputs already hold a major or blocker finding.
-    """
+def link_claims(output):
+    """Build a substantive output from checks that name their claim: link them by claim_index, add a verdict."""
     checks = output.get("claim_checks", [])
     if any("claim" in check for check in checks):
         inventory = output.get("claim_inventory") or claim_inventory(checks)
@@ -86,9 +83,7 @@ def link_claims(output, *, prior_high=False):
         inventory = [{key: value for key, value in entry.items() if key != "check_indices"} for entry in inventory]
         output = {**output, "claim_checks": checks, "claim_inventory": inventory}
     if "verdict" not in output:
-        high = prior_high or any(
-            finding.get("severity") in {"blocker", "major"} for finding in output.get("findings", [])
-        )
+        high = any(finding.get("severity") in {"blocker", "major"} for finding in output.get("findings", []))
         output = {
             **output,
             "verdict": {
@@ -100,11 +95,8 @@ def link_claims(output, *, prior_high=False):
 
 
 def submit(service, claim_data, output):
-    if claim_data["task"].stage == "review" and "scope" not in output:
-        output = {
-            **output,
-            "scope": {"completion": "complete", "checked": [], "outstanding": [], "limitations": []},
-        }
+    if claim_data["task"].stage == "review" and "limitations" not in output:
+        output = {**output, "limitations": []}
     if substantive(claim_data) and "claim_checks" not in output:
         findings = output.get("findings", [])
         output = {
@@ -126,11 +118,7 @@ def submit(service, claim_data, output):
             ],
         }
     if substantive(claim_data):
-        prior_high = any(
-            finding.task_id == claim_data["task"].id and finding.severity.value in {"blocker", "major"}
-            for finding in service.database.list_findings(claim_data["task"].run_id)
-        )
-        output = link_claims(output, prior_high=prior_high)
+        output = link_claims(output)
     return asyncio.run(
         service.submit_task(
             claim_data["attempt"].id,

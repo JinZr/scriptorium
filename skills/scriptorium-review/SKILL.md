@@ -1,6 +1,6 @@
 ---
 name: scriptorium-review
-description: Work one Scriptorium review, revision, or verification task from the current Codex, Claude Code, or Antigravity session. Claim it with the host's real identity, read the frozen inputs through bounded commands, cite exact evidence anchors, declare scope, and check then submit one JSON output.
+description: Work one Scriptorium review, revision, or verification task from the current Codex, Claude Code, or Antigravity session. Claim it with the host's real identity, read the frozen inputs through bounded commands, cite exact evidence anchors, list limitations, and check then submit one JSON output.
 ---
 
 # Scriptorium reviewer
@@ -20,7 +20,6 @@ scriptorium --json task page ATTEMPT_ID --number N [--document ENTRYPOINT] [--sc
 scriptorium --json task export ATTEMPT_ID --dir DIR
 scriptorium --json task submit ATTEMPT_ID --input-digest D --file answer.json [--check]
 scriptorium --json run status RUN_ID
-scriptorium --json run continue RUN_ID --task TASK_ID
 scriptorium --json run retry RUN_ID --task TASK_ID
 ```
 
@@ -52,22 +51,19 @@ counterchecks, recomputation, verdict rules); follow it.
   lines. Prefer the source map's `read_path`.
 - `task page` renders a global page of `manuscript.pdf`. Open the returned image; a path is no inspection. Crop
   figures with `--scale 3 --crop x0,y0,x1,y1` (page fractions). `--text` is a reading aid, never evidence, and
-  is not a page render for the audit.
+  is not a page render.
 - `task export` writes the frozen files into a new or empty directory. It replaces neither
   `task read --anchor` for evidence nor `task page` for rendered pages.
 
-## Evidence and scope
+## Evidence and limitations
 
 A text anchor has exactly `source_path`, `start_line`, `end_line`, `source_digest`, and verbatim `quoted_text`
 (shortenable). A PDF anchor is `source_path: "manuscript.pdf"` with the global
 `page`. Details: `reference/anchors.md`.
 
-A review output declares `scope`: `completion` (`complete`, `partial`, or `unknown`), `checked` and `outstanding`
-areas, and `limitations`, even with no findings. Never mark it complete with anything outstanding. Declare
-`checked` only what you assessed. The audit corroborates just this task's `task read`, `task page`, and own
-`task export`; re-read anything else (another task's export, outside files) here, or name it in `limitations`
-expecting an audit gap. A graphics source cannot be read: inspect and declare its rendered
-pages. Area shapes, audit, graphics: `reference/scope.md`.
+A review output lists in `limitations` the relevant material you could not check or could not read, including
+material the manuscript mentions that is absent from the frozen sources; it may be empty. A graphics source cannot
+be read: inspect its rendered pages.
 
 ## Check, then submit
 
@@ -78,12 +74,10 @@ scriptorium --json task submit ATTEMPT_ID --input-digest DIGEST --file answer.js
 
 `--check` validates fully, records no output or findings, and keeps the attempt active. When `data.valid` is false, fix each entry
 of `data.validation_report.issues` and check again. Each has a `code` (`json.invalid` is often an unescaped LaTeX
-backslash; `schema.*` is shape; `evidence.*` and `scope.*` compare your locations with the frozen sources), a
+backslash; `schema.*` is shape; `evidence.*` compares your locations with the frozen sources), a
 JSON-pointer `path`, a `message`, often `expected` and `actual`. A passing check is not a receipt; submit the
 same file without `--check`. A rejected submission fails the attempt and records no findings; `run retry`, claim
 again, and submit to the **new** attempt with its new digest.
 
-After each receipt, follow `run status` `next_actions`. If accepted scope is `partial` or `unknown`, read
-`run report RUN_ID --part review_coverage_audit`, `run continue`, and claim again. The new attempt carries your
-prior scope and findings; submit only new findings, plus any earlier one a new claim check must link. At a human
-gate, hand back to the operator.
+An accepted submission completes the review task; there is no second submission for it. After each receipt,
+follow `run status` `next_actions`. At a human gate, hand back to the operator.

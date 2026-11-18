@@ -128,7 +128,7 @@ def test_report_invalid_cursors_are_rejected(tmp_path, offset, digest):
             service.read_report(run_id, "missing")
 
 
-def test_status_preserves_partial_continuation_and_human_gates(tmp_path, monkeypatch, capsys):
+def test_status_preserves_human_gates(tmp_path, monkeypatch, capsys):
     repo = make_repository(tmp_path, roles=("substantive_review",))
     with ScriptoriumService(repo, manuscript_manager=PdfBuildingManuscriptManager(repo)) as service:
         run_id = asyncio.run(service.start_run("HEAD", "quick"))["run"].id
@@ -136,26 +136,18 @@ def test_status_preserves_partial_continuation_and_human_gates(tmp_path, monkeyp
         submit(
             service,
             context,
-            {
-                "summary": "A page remains.",
-                "findings": [],
-                "scope": {
-                    "completion": "partial",
-                    "checked": [],
-                    "outstanding": [{"source_path": "manuscript.pdf", "page": 1}],
-                    "limitations": ["Not inspected."],
-                },
-            },
+            {"summary": "Reviewed.", "findings": [review_finding(context)], "limitations": ["Not inspected."]},
         )
         status = service.run_status(run_id)
-        assert status["next_actions"] == [{"command": "run continue", "run_id": run_id, "task_id": context["task"].id}]
+        assert status["run"]["status"] == RunStatus.AWAITING_DECISION.value
+        decide = {"command": "finding list", "run_id": run_id, "requires_human_decision": True}
+        assert status["next_actions"] == [decide]
         monkeypatch.chdir(repo)
         monkeypatch.setattr(cli, "_build_service", lambda _: service)
-        assert cli.main(["--json", "run", "continue", run_id, "--task", context["task"].id]) == 0
+        assert cli.main(["--json", "run", "status", run_id]) == 0
         raw = capsys.readouterr().out
         assert len(raw.encode()) <= MAX_TOOL_RESPONSE_BYTES
-        assert json.loads(raw)["data"]["next_actions"] == [{"command": "run status", "run_id": run_id}]
-        assert service.run_status(run_id)["next_actions"] == [{"command": "task claim", "task_id": context["task"].id}]
+        assert json.loads(raw)["data"]["next_actions"] == status["next_actions"]
         patch, finding_id = prepare_verification(service, run_id)
         verification = claim(service, run_id, AgentRole.VERIFICATION, session="independent-verifier")
         receipt = submit(

@@ -16,13 +16,11 @@ _HEADLINE = "The proposed method improves the main metric over the baseline."
 _SUPPORTING = "The improvement is computed from the reported per-run values."
 
 
-def build_review_example(
-    schema_kind: str, role: str, source_anchor: dict[str, Any] | None, source_area: dict[str, Any] | None
-) -> dict[str, Any]:
+def build_review_example(schema_kind: str, role: str, source_anchor: dict[str, Any] | None) -> dict[str, Any]:
     """Fill a review or scientific_review output; callers validate the result against the output model.
 
-    source_anchor is an exact source-line evidence object and source_area the scope area covering its source; when
-    the bundle has no anchorable text, both are None and only the compiled PDF page is cited.
+    source_anchor is an exact source-line evidence object; when the bundle has no anchorable text, it is None and
+    only the compiled PDF page is cited.
     """
     page = {"source_path": "manuscript.pdf", "page": 1}
     anchor = source_anchor or page
@@ -41,12 +39,7 @@ def build_review_example(
     output = {
         "summary": "Placeholder summary: one sentence on what was reviewed and the main concern.",
         "findings": [finding],
-        "scope": {
-            "completion": "partial",
-            "checked": [source_area or page],
-            "outstanding": [page] if source_area else [],
-            "limitations": ["Placeholder limitation: the rendered page was not inspected."],
-        },
+        "limitations": ["Placeholder limitation: the supplement the manuscript cites is not in the frozen sources."],
     }
     if schema_kind == "review":
         # A detail-role finding at moderate or above names the claim it changes.

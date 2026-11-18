@@ -1,8 +1,8 @@
 # Reading report parts
 
 `run status RUN_ID` lists the available parts under `report_parts`. They are the top-level keys of the full JSON
-report, such as `run`, `tasks`, `findings`, `findings_grouped`, `decision_stats`, `patches`, `review_scopes`,
-`review_coverage_audit`, and `gate`. `run report --help` lists the parts this installation accepts.
+report, such as `run`, `tasks`, `findings`, `findings_grouped`, `decision_stats`, `patches`,
+`review_limitations`, and `gate`. `run report --help` lists the parts this installation accepts.
 
 ## Traversal
 

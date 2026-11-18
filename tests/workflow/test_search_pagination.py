@@ -10,7 +10,7 @@ from scriptorium.domain import AgentRole
 from scriptorium.errors import ConfigurationError, InfrastructureError
 from scriptorium.service import ScriptoriumService
 
-from ._support import PdfBuildingManuscriptManager, claim, make_repository, submit
+from ._support import PdfBuildingManuscriptManager, claim, make_repository
 
 
 @pytest.mark.parametrize("path", ["main.tex", "sources/main.tex"])
@@ -166,22 +166,5 @@ def test_every_source_in_a_metadata_alias_chain_remains_retrievable(
             assert len(matches) == 3
             assert {match["path"] for match in matches} == {path}
             assert {match["source_digest"] for match in matches} == {source["source_digest"]}
-        submit(
-            service,
-            context,
-            {
-                "summary": "Checked each source.",
-                "findings": [],
-                "scope": {
-                    "completion": "complete",
-                    "checked": [{"source_path": path} for path in paths],
-                    "outstanding": [],
-                    "limitations": [],
-                },
-            },
-        )
-        audit = service.render_report(run.id, "json")["review_coverage_audit"][0]
-        assert audit["read_lines"] == [
-            {"source_path": path, "ranges": [{"start_line": 1, "end_line": 1}]} for path in paths
-        ]
-        assert audit["declared_without_task_read"] == []
+        reads = [event.payload for event in service.database.list_events(run.id) if event.event_type == "tool.read"]
+        assert {read["source_path"] for read in reads if read["source_path"] is not None} == set(paths)
