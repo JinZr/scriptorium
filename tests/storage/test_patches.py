@@ -143,7 +143,6 @@ def test_repropose_rejected_patch_updates_lineage_and_preserves_decision(tmp_pat
                 run_id=run.id,
                 stage="revision",
                 role=AgentRole.REVISION,
-                route="primary",
                 input_digest="2" * 64,
             )
         )

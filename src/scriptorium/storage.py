@@ -43,8 +43,6 @@ CREATE TABLE IF NOT EXISTS runs (
     status TEXT NOT NULL,
     config_digest TEXT NOT NULL,
     frozen_config_json TEXT NOT NULL,
-    budget_usd REAL,
-    estimated_cost_usd REAL NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
     error TEXT,
@@ -56,12 +54,11 @@ CREATE TABLE IF NOT EXISTS tasks (
     run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE RESTRICT,
     stage TEXT NOT NULL,
     role TEXT NOT NULL,
-    route TEXT NOT NULL,
     input_digest TEXT NOT NULL,
     status TEXT NOT NULL,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
-    UNIQUE (run_id, stage, role, route, input_digest)
+    UNIQUE (run_id, stage, role, input_digest)
 );
 
 CREATE TABLE IF NOT EXISTS artifacts (
@@ -78,21 +75,11 @@ CREATE TABLE IF NOT EXISTS attempts (
     ordinal INTEGER NOT NULL,
     status TEXT NOT NULL,
     thread_id TEXT,
-    runtime_name TEXT,
-    runtime_version TEXT,
     model TEXT,
-    model_provider TEXT,
     prompt_digest TEXT,
     schema_digest TEXT,
     bundle_digest TEXT,
-    input_tokens INTEGER NOT NULL DEFAULT 0,
-    cached_input_tokens INTEGER NOT NULL DEFAULT 0,
-    output_tokens INTEGER NOT NULL DEFAULT 0,
-    reasoning_tokens INTEGER NOT NULL DEFAULT 0,
-    estimated_cost_usd REAL NOT NULL DEFAULT 0,
-    trace_artifact_digest TEXT REFERENCES artifacts(digest) ON DELETE RESTRICT,
     output_artifact_digest TEXT REFERENCES artifacts(digest) ON DELETE RESTRICT,
-    duration_ms INTEGER,
     error TEXT,
     created_at TEXT NOT NULL,
     completed_at TEXT,
@@ -291,8 +278,8 @@ class Database:
                 """
                 INSERT INTO runs (
                     id, repository, commit_sha, tree_sha, profile, status, config_digest, frozen_config_json,
-                    budget_usd, estimated_cost_usd, created_at, updated_at, error, brief_digest
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    created_at, updated_at, error, brief_digest
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     run.id,
@@ -303,8 +290,6 @@ class Database:
                     run.status.value,
                     run.config_digest,
                     canonical_json(run.frozen_config),
-                    run.budget_usd,
-                    run.estimated_cost_usd,
                     run.created_at,
                     run.updated_at,
                     run.error,
@@ -392,34 +377,20 @@ class Database:
     def update_run(self, run_id: str, status: RunStatus, error: str | None = None) -> Run:
         return self.update_run_status(run_id, status, error)
 
-    def add_run_cost(self, run_id: str, amount_usd: float) -> Run:
-        if amount_usd < 0:
-            raise ValueError("amount_usd must be non-negative")
-        with self.transaction() as connection:
-            result = connection.execute(
-                "UPDATE runs SET estimated_cost_usd = estimated_cost_usd + ?, updated_at = ? WHERE id = ?",
-                (amount_usd, utc_now(), run_id),
-            )
-            if result.rowcount != 1:
-                raise NotFoundError(f"run not found: {run_id}")
-            row = connection.execute("SELECT * FROM runs WHERE id = ?", (run_id,)).fetchone()
-        return self._run_from_row(row)
-
     def create_task(self, task: Task) -> Task:
         with self.transaction() as connection:
             try:
                 connection.execute(
                     """
                     INSERT INTO tasks (
-                        id, run_id, stage, role, route, input_digest, status, created_at, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        id, run_id, stage, role, input_digest, status, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         task.id,
                         task.run_id,
                         task.stage,
                         task.role.value,
-                        task.route,
                         task.input_digest,
                         task.status.value,
                         task.created_at,
@@ -427,7 +398,7 @@ class Database:
                     ),
                 )
             except sqlite3.IntegrityError as exc:
-                raise ConflictError("task already exists for run, stage, role, route, and input digest") from exc
+                raise ConflictError("task already exists for run, stage, role, and input digest") from exc
             self._append_event_row(
                 connection,
                 Event(
@@ -435,7 +406,7 @@ class Database:
                     event_type="task.created",
                     entity_type="task",
                     entity_id=task.id,
-                    payload={"stage": task.stage, "role": task.role.value, "route": task.route},
+                    payload={"stage": task.stage, "role": task.role.value},
                 ),
             )
         return task
@@ -451,15 +422,14 @@ class Database:
         run_id: str,
         stage: str,
         role: AgentRole,
-        route: str,
         input_digest: str,
     ) -> Task | None:
         row = self.connection.execute(
             """
             SELECT * FROM tasks
-            WHERE run_id = ? AND stage = ? AND role = ? AND route = ? AND input_digest = ?
+            WHERE run_id = ? AND stage = ? AND role = ? AND input_digest = ?
             """,
-            (run_id, stage, role.value, route, input_digest),
+            (run_id, stage, role.value, input_digest),
         ).fetchone()
         return self._task_from_row(row) if row is not None else None
 
@@ -566,13 +536,10 @@ class Database:
             connection.execute(
                 """
                 INSERT INTO attempts (
-                    id, task_id, ordinal, status, thread_id, runtime_name, runtime_version, model,
-                    model_provider, external_client, effort, session_source,
-                    prompt_digest, schema_digest, bundle_digest, input_tokens,
-                    cached_input_tokens, output_tokens, reasoning_tokens, estimated_cost_usd,
-                    trace_artifact_digest, output_artifact_digest, validation_report_artifact_digest,
-                    duration_ms, error, created_at, completed_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    id, task_id, ordinal, status, thread_id, model, external_client, effort, session_source,
+                    prompt_digest, schema_digest, bundle_digest, output_artifact_digest,
+                    validation_report_artifact_digest, error, created_at, completed_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 self._attempt_values(attempt),
             )
@@ -637,19 +604,9 @@ class Database:
         status: AttemptStatus,
         *,
         thread_id: str | None = None,
-        runtime_name: str | None = None,
-        runtime_version: str | None = None,
         model: str | None = None,
-        model_provider: str | None = None,
-        input_tokens: int = 0,
-        cached_input_tokens: int = 0,
-        output_tokens: int = 0,
-        reasoning_tokens: int = 0,
-        estimated_cost_usd: float = 0.0,
-        trace_artifact_digest: str | None = None,
         output_artifact_digest: str | None = None,
         validation_report_artifact_digest: str | None = None,
-        duration_ms: int | None = None,
         error: str | None = None,
     ) -> Attempt:
         if status == AttemptStatus.RUNNING:
@@ -674,32 +631,17 @@ class Database:
                 """
                 UPDATE attempts SET
                     status = ?, thread_id = COALESCE(?, thread_id),
-                    runtime_name = COALESCE(?, runtime_name),
-                    runtime_version = COALESCE(?, runtime_version),
                     model = COALESCE(?, model),
-                    model_provider = COALESCE(?, model_provider),
-                    input_tokens = ?, cached_input_tokens = ?, output_tokens = ?,
-                    reasoning_tokens = ?, estimated_cost_usd = ?, trace_artifact_digest = ?,
                     output_artifact_digest = ?, validation_report_artifact_digest = ?,
-                    duration_ms = ?, error = ?, completed_at = ?
+                    error = ?, completed_at = ?
                 WHERE id = ?
                 """,
                 (
                     status.value,
                     thread_id,
-                    runtime_name,
-                    runtime_version,
                     model,
-                    model_provider,
-                    input_tokens,
-                    cached_input_tokens,
-                    output_tokens,
-                    reasoning_tokens,
-                    estimated_cost_usd,
-                    trace_artifact_digest,
                     output_artifact_digest,
                     validation_report_artifact_digest,
-                    duration_ms,
                     error,
                     completed_at,
                     attempt_id,
@@ -709,10 +651,6 @@ class Database:
             connection.execute(
                 "UPDATE tasks SET status = ?, updated_at = ? WHERE id = ?",
                 (task_status.value, completed_at, row["task_id"]),
-            )
-            connection.execute(
-                "UPDATE runs SET estimated_cost_usd = estimated_cost_usd + ?, updated_at = ? WHERE id = ?",
-                (estimated_cost_usd, completed_at, row["run_id"]),
             )
             self._append_event_row(
                 connection,
@@ -1512,8 +1450,6 @@ class Database:
             status=RunStatus(row["status"]),
             config_digest=row["config_digest"],
             frozen_config=json.loads(row["frozen_config_json"]),
-            budget_usd=row["budget_usd"],
-            estimated_cost_usd=row["estimated_cost_usd"],
             created_at=row["created_at"],
             updated_at=row["updated_at"],
             error=row["error"],
@@ -1527,7 +1463,6 @@ class Database:
             run_id=row["run_id"],
             stage=row["stage"],
             role=AgentRole(row["role"]),
-            route=row["route"],
             input_digest=row["input_digest"],
             status=TaskStatus(row["status"]),
             created_at=row["created_at"],
@@ -1542,25 +1477,15 @@ class Database:
             attempt.ordinal,
             attempt.status.value,
             attempt.thread_id,
-            attempt.runtime_name,
-            attempt.runtime_version,
             attempt.model,
-            attempt.model_provider,
             attempt.external_client,
             attempt.effort,
             attempt.session_source,
             attempt.prompt_digest,
             attempt.schema_digest,
             attempt.bundle_digest,
-            attempt.input_tokens,
-            attempt.cached_input_tokens,
-            attempt.output_tokens,
-            attempt.reasoning_tokens,
-            attempt.estimated_cost_usd,
-            attempt.trace_artifact_digest,
             attempt.output_artifact_digest,
             attempt.validation_report_artifact_digest,
-            attempt.duration_ms,
             attempt.error,
             attempt.created_at,
             attempt.completed_at,
@@ -1574,25 +1499,15 @@ class Database:
             ordinal=row["ordinal"],
             status=AttemptStatus(row["status"]),
             thread_id=row["thread_id"],
-            runtime_name=row["runtime_name"],
-            runtime_version=row["runtime_version"],
             model=row["model"],
-            model_provider=row["model_provider"],
             external_client=row["external_client"] if "external_client" in row.keys() else None,
             effort=row["effort"] if "effort" in row.keys() else None,
             session_source=row["session_source"] if "session_source" in row.keys() else None,
             prompt_digest=row["prompt_digest"],
             schema_digest=row["schema_digest"],
             bundle_digest=row["bundle_digest"],
-            input_tokens=row["input_tokens"],
-            cached_input_tokens=row["cached_input_tokens"],
-            output_tokens=row["output_tokens"],
-            reasoning_tokens=row["reasoning_tokens"],
-            estimated_cost_usd=row["estimated_cost_usd"],
-            trace_artifact_digest=row["trace_artifact_digest"],
             output_artifact_digest=row["output_artifact_digest"],
             validation_report_artifact_digest=row["validation_report_artifact_digest"],
-            duration_ms=row["duration_ms"],
             error=row["error"],
             created_at=row["created_at"],
             completed_at=row["completed_at"],

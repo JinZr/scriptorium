@@ -345,7 +345,6 @@ def test_full_profile_service_persists_findings_artifacts_and_cost(tmp_path: Pat
         assert all(attempt.external_client == "codex" for attempt in attempts)
         for attempt in attempts:
             assert service.database.get_artifact(attempt.output_artifact_digest).media_type == "application/json"
-            assert attempt.trace_artifact_digest is None
 
         findings = service.list_findings(run.id)
         assert len(findings) == 4

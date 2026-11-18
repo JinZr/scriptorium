@@ -327,7 +327,6 @@ def test_json_cli_reads_and_submits_from_stdin_across_processes(tmp_path: Path) 
         input_text=output,
     )
     assert submitted["data"]["attempt"]["status"] == "completed"
-    assert submitted["data"]["attempt"]["estimated_cost_usd"] is None
     assert (
         command(
             "task", "submit", attempt_id, "--input-digest", claim["input_digest"], "--file", "-", input_text=output
@@ -589,32 +588,6 @@ def test_corrupt_completed_output_cannot_be_replayed_or_pass_the_gate(tmp_path: 
             asyncio.run(service.resume_run(run_id))
         assert service.list_findings(run_id) == []
         assert not service.evaluate_gate(run_id)["passed"]
-
-
-def test_a_run_not_prepared_for_external_hosts_is_rejected(tmp_path: Path) -> None:
-    repo = _repo(tmp_path / "paper")
-    run_id, _ = _start(repo)
-    with ScriptoriumService(repo) as service:
-        row = service.database.connection.execute(
-            "SELECT frozen_config_json FROM runs WHERE id = ?", (run_id,)
-        ).fetchone()
-        config = json.loads(row["frozen_config_json"])
-        config.pop("execution")
-        with service.database.transaction() as connection:
-            connection.execute(
-                "UPDATE runs SET frozen_config_json = ? WHERE id = ?",
-                (json.dumps(config), run_id),
-            )
-    with ScriptoriumService(repo) as service:
-        for inspect in (
-            lambda: service.run_status(run_id),
-            lambda: service.render_report(run_id, "json"),
-            lambda: service.read_report(run_id, "gate"),
-            lambda: service.evaluate_gate(run_id),
-            lambda: asyncio.run(service.resume_run(run_id)),
-        ):
-            with pytest.raises(StateError, match="not prepared for external hosts"):
-                inspect()
 
 
 def test_json_cli_freezes_a_review_brief_and_detects_a_committed_template(tmp_path: Path) -> None:

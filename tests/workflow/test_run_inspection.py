@@ -40,7 +40,7 @@ def test_status_and_report_parts_return_the_full_report(tmp_path, monkeypatch, c
         overview = command([*options, "run", "status", run_id])
         assert overview["run"]["status"] == "awaiting_decision"
         assert overview["finding_count"] == 1
-        assert overview["estimated_cost_usd"] is None
+        assert not {"execution", "estimated_cost_usd"} & set(overview)
         assert overview["next_actions"] == service.list_tasks(run_id)["next_actions"]
         assert overview["next_actions"][0]["requires_human_decision"] is True
         assert "frozen_config" not in overview["run"]

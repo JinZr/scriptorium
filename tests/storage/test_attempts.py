@@ -18,7 +18,6 @@ def test_run_task_attempt_lifecycle_persists(tmp_path) -> None:
         assert attempt.status == AttemptStatus.COMPLETED
         assert attempt.thread_id == "thread-1"
         assert database.get_task(task.id).status == TaskStatus.COMPLETED
-        assert database.get_run(run.id).estimated_cost_usd == pytest.approx(0.25)
         assert [event.event_type for event in database.list_events(run.id)] == [
             "run.created",
             "run.status_changed",
@@ -43,7 +42,6 @@ def test_attempt_retry_is_append_only(tmp_path) -> None:
                 run_id=run.id,
                 stage="review",
                 role=AgentRole.CONSISTENCY,
-                route="primary",
                 input_digest="d" * 64,
             )
         )
@@ -77,7 +75,6 @@ def test_attempt_session_is_recorded_once_while_running(tmp_path) -> None:
                 run_id=run.id,
                 stage="review",
                 role=AgentRole.CONSISTENCY,
-                route="primary",
                 input_digest="d" * 64,
             )
         )
@@ -109,7 +106,6 @@ def test_finish_attempt_rejects_a_different_recorded_session(tmp_path) -> None:
                 run_id=run.id,
                 stage="review",
                 role=AgentRole.CONSISTENCY,
-                route="primary",
                 input_digest="d" * 64,
             )
         )
@@ -135,7 +131,6 @@ def test_validation_report_pointer_is_atomic_and_persists(tmp_path) -> None:
                 run_id=run.id,
                 stage="review",
                 role=AgentRole.CONSISTENCY,
-                route="primary",
                 input_digest="d" * 64,
             )
         )
@@ -147,11 +142,9 @@ def test_validation_report_pointer_is_atomic_and_persists(tmp_path) -> None:
                 attempt.id,
                 AttemptStatus.FAILED,
                 validation_report_artifact_digest=digest,
-                estimated_cost_usd=0.25,
             )
 
         assert database.get_attempt(attempt.id).status == AttemptStatus.RUNNING
-        assert database.get_run(run.id).estimated_cost_usd == 0
         assert database.list_events(run.id) == events_before
 
         database.record_artifact(
@@ -187,7 +180,6 @@ def test_cancel_incomplete_tasks_preserves_completed_history(tmp_path) -> None:
                 run_id=run.id,
                 stage="review",
                 role=AgentRole.CONSISTENCY,
-                route="primary",
                 input_digest="e" * 64,
             )
         )
@@ -206,7 +198,6 @@ def test_durable_cancel_is_atomic_and_idempotent_by_terminal_state(tmp_path) -> 
                 run_id=run.id,
                 stage="review",
                 role=AgentRole.CONSISTENCY,
-                route="primary",
                 input_digest="d" * 64,
             )
         )

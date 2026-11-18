@@ -11,7 +11,6 @@ import sys
 from typing import Any
 
 from .config import find_repo, initialize_project
-from .domain import Attempt, Run, Task
 from .errors import ConfigurationError, InfrastructureError, ScriptoriumError
 from .tool_output import REPORT_PARTS, pretty_json, run_overview, success_json
 
@@ -450,22 +449,6 @@ def _emit_error(code: str, message: str, json_output: bool) -> None:
 def _jsonable(value: Any) -> Any:
     if isinstance(value, Enum):
         return value.value
-    if isinstance(value, Run) and value.frozen_config.get("execution") == "external":
-        return {
-            **{field.name: _jsonable(getattr(value, field.name)) for field in fields(value)},
-            "estimated_cost_usd": None,
-        }
-    if isinstance(value, Attempt) and value.external_client is not None:
-        return {
-            **{field.name: _jsonable(getattr(value, field.name)) for field in fields(value)},
-            "input_tokens": None,
-            "cached_input_tokens": None,
-            "output_tokens": None,
-            "reasoning_tokens": None,
-            "estimated_cost_usd": None,
-        }
-    if isinstance(value, Task) and value.route == "":
-        return {field.name: _jsonable(getattr(value, field.name)) for field in fields(value) if field.name != "route"}
     if is_dataclass(value) and not isinstance(value, type):
         return {field.name: _jsonable(getattr(value, field.name)) for field in fields(value)}
     if hasattr(value, "model_dump"):

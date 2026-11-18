@@ -475,15 +475,6 @@ def summarize_scriptorium_run(service: ScriptoriumService, run_id: str) -> dict[
             if attempt_data.get("validation_report_artifact_digest") is None:
                 attempt_data.pop("validation_report_artifact_digest", None)
             attempts.append(attempt_data)
-            if attempt.external_client is not None:
-                for key in (
-                    "input_tokens",
-                    "cached_input_tokens",
-                    "output_tokens",
-                    "reasoning_tokens",
-                    "estimated_cost_usd",
-                ):
-                    attempt_data[key] = None
         task_summaries.append(
             {
                 "id": task.id,
@@ -799,7 +790,6 @@ def validate_completed_scriptorium_state(
             for field in (
                 "prompt_digest",
                 "schema_digest",
-                "trace_artifact_digest",
                 "output_artifact_digest",
                 "validation_report_artifact_digest",
             ):

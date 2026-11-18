@@ -77,4 +77,4 @@ apply only a verified patch, then read `run gate RUN_ID`. Inconclusive or failed
 ## Reporting back
 
 Report the run, task, attempt, finding, and patch IDs; host model and effort; retrieval gaps; validation status;
-the current human gate; the gate result. Unknown usage or cost stays unknown.
+the current human gate; the gate result. Scriptorium records no usage or cost.

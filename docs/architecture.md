@@ -56,4 +56,4 @@ it does not change the submitted result schema or the database schema.
 
 Finding decisions, patch approval, verification, and application are separate stages. The verifier must claim from a new host-reported conversation ID, distinct from review and revision. A declared or reused ID cannot produce a passing verification. This checks recorded provenance; Scriptorium cannot authenticate the external host's claim. Patch application rechecks exact approved edits against the current worktree. Infrastructure failures cannot pass the release gate.
 
-External model usage and cost are unknown unless the host supplies independent evidence. The tool neither invokes providers nor enforces their spending limits.
+Scriptorium records no usage or cost. The tool neither invokes providers nor enforces their spending limits.
