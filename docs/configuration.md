@@ -37,7 +37,7 @@ document. Its response includes the corresponding global `page` in `manuscript.p
 evidence and scope. These numbers are physical page positions, not printed page labels. Old frozen bundles
 without a document index remain readable with their original global page numbers.
 
-The selected Codex, Claude Code, or Antigravity CLI session owns model choice, effort, authentication, and spending. Supply its actual selection when claiming a task. Scriptorium stores this as external provenance; it cannot verify provider billing. `--budget-usd`, `--route`, and `.scriptorium/config.toml` belonged to the removed internal runner. Remove the old local config before starting a new run. The CLI rejects those old options or configuration with a migration error.
+The selected Codex, Claude Code, or Antigravity CLI session owns model choice, effort, authentication, and spending. Supply its actual selection when claiming a task. Scriptorium stores this as external provenance; it cannot verify provider billing.
 
 ## Review brief
 
