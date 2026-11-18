@@ -4,8 +4,6 @@ import json
 import pytest
 
 from scriptorium.domain import AgentRole, AttemptStatus, RunStatus
-import scriptorium.schemas
-from scriptorium.schemas import RatedReviewOutput, RatedScientificReviewOutput
 from scriptorium.service import ScriptoriumService
 
 from ._support import PdfBuildingManuscriptManager, claim, make_repository, review_finding, submit
@@ -160,35 +158,6 @@ def test_continuation_verdict_counts_recorded_findings_and_carries_unchecked_cla
             "major_revision",
             "major_revision",
         ]
-
-
-def test_run_frozen_before_the_verdict_keeps_restated_claim_checks(tmp_path, monkeypatch):
-    repo = make_repository(tmp_path, roles=("substantive_review", "copyedit"))
-    with ScriptoriumService(repo, manuscript_manager=PdfBuildingManuscriptManager(repo)) as service:
-        with monkeypatch.context() as patch:
-            patch.setitem(scriptorium.schemas.SCHEMA_MODELS, "scientific_review", RatedScientificReviewOutput)
-            patch.setitem(scriptorium.schemas.SCHEMA_MODELS, "review", RatedReviewOutput)
-            run = asyncio.run(service.start_run("HEAD", "quick"))["run"]
-        review = claim(service, run.id, AgentRole.SUBSTANTIVE_REVIEW)
-        assert "verdict" not in review["schema"]["properties"]
-        finding = review_finding(review)
-        check = {key: value for key, value in _check(finding_indices=[0]).items() if key != "claim_index"}
-        legacy = {
-            "summary": "Checked the reported result.",
-            "findings": [finding],
-            "claim_checks": [{**check, "claim": "The result is clear.", "claim_anchor": _PAGE}],
-            "claim_inventory": [{**_claim(), "check_indices": [0]}],
-        }
-        assert submit(service, review, legacy)["attempt"].status == AttemptStatus.COMPLETED
-        copyedit = claim(service, run.id, AgentRole.COPYEDIT)
-        major = review_finding(copyedit)
-        assert "affected_claim" not in major
-        receipt = submit(service, copyedit, {"summary": "Checked language.", "findings": [major]})
-        assert receipt["attempt"].status == AttemptStatus.COMPLETED
-        entry = service.render_report(run.id, "json")["review_claim_checks"][0]
-        assert "verdict" not in entry
-        markdown = service.render_report(run.id, "markdown")
-        assert "claim checks [0]" in markdown and "verdict:" not in markdown
 
 
 @pytest.mark.parametrize("role", ["copyedit", "consistency", "figure_review"])

@@ -56,12 +56,11 @@ from .manuscript import (
     render_page_view,
 )
 from .schemas import (
+    SCHEMA_MODELS,
+    UNIVERSAL_LINE_TERMINATORS,
     EvidenceAnchorContract,
-    InventoriedScientificReviewOutput,
-    LinkedScientificReviewOutput,
     ReviewBrief,
     ScientificReviewOutput,
-    ScopedReviewOutput,
 )
 from .storage import ConflictError, Database, NotFoundError as StorageNotFoundError, StorageError
 from .tool_output import (
@@ -710,7 +709,6 @@ class ScriptoriumService:
             max_chars,
             end_line,
             anchor,
-            not anchor or source is None or self._retrieval_numbers_like_contract(task.run_id, source, read_path),
         )
         self._record_access(
             task.run_id,
@@ -733,15 +731,6 @@ class ScriptoriumService:
             },
         )
         return response
-
-    def _retrieval_numbers_like_contract(self, run_id: str, source, read_path: Path) -> bool:
-        contract = self.armarius.require_evidence_anchor_contract(run_id)
-        if contract.line_terminators is not None:
-            return True
-        # Retrieval splits only at newlines; an earlier contract also split at form feeds and Unicode separators.
-        # Those break points are a superset, so the numberings agree exactly when the line counts do.
-        with read_path.open(encoding="utf-8") as stream:
-            return sum(1 for _ in stream) == source.line_count
 
     def search_task(
         self,
@@ -1265,7 +1254,7 @@ class ScriptoriumService:
         sources = self.armarius._bundle_for_run(run_view["run"]).anchor_map.sources
         audits = []
         for item in run_view["tasks"]:
-            scopes = [scope for scope in review_scopes if scope["task_id"] == item["task"].id and scope["scope"]]
+            scopes = [scope for scope in review_scopes if scope["task_id"] == item["task"].id]
             if not scopes:
                 continue
             latest = scopes[-1]
@@ -1331,24 +1320,21 @@ class ScriptoriumService:
                         }
                     )
                 if task.stage == "review" and attempt.status == AttemptStatus.COMPLETED:
-                    scope = None
-                    schema = self.armarius._load_schema_artifact(
-                        run_view["run"], metadata["schema_kind"], attempt.schema_digest
+                    self.armarius._load_schema_artifact(run_view["run"], metadata["schema_kind"], attempt.schema_digest)
+                    try:
+                        output_text = self.artifacts.get_bytes(attempt.output_artifact_digest).decode("utf-8")
+                    except (ArtifactError, UnicodeDecodeError) as exc:
+                        raise InfrastructureError(
+                            f"completed review attempt {attempt.id} has unreadable output"
+                        ) from exc
+                    output, issues = self.armarius._parse_and_validate_output(
+                        SCHEMA_MODELS[schema_kind], output_text, lambda _: []
                     )
-                    model = self.armarius._output_model_for_schema(run_view["run"], schema_kind, schema)
-                    if issubclass(model, ScopedReviewOutput):
-                        try:
-                            output_text = self.artifacts.get_bytes(attempt.output_artifact_digest).decode("utf-8")
-                        except (ArtifactError, UnicodeDecodeError) as exc:
-                            raise InfrastructureError(
-                                f"completed review attempt {attempt.id} has unreadable output"
-                            ) from exc
-                        output, issues = self.armarius._parse_and_validate_output(model, output_text, lambda _: [])
-                        if output is None or issues:
-                            raise InfrastructureError(f"completed review attempt {attempt.id} has invalid scope output")
-                        scope = output.scope.model_dump(mode="json", exclude_none=True)
-                        if isinstance(output, ScientificReviewOutput):
-                            review_claim_checks.append(self._claim_check_report(task.id, attempt.id, output))
+                    if output is None or issues:
+                        raise InfrastructureError(f"completed review attempt {attempt.id} has invalid scope output")
+                    scope = output.scope.model_dump(mode="json", exclude_none=True)
+                    if isinstance(output, ScientificReviewOutput):
+                        review_claim_checks.append(self._claim_check_report(task.id, attempt.id, output))
                     review_scopes.append(
                         {"task_id": task.id, "attempt_id": attempt.id, "role": task.role.value, "scope": scope}
                     )
@@ -1438,7 +1424,7 @@ class ScriptoriumService:
             except InfrastructureError as exc:
                 review_errors.append(str(exc))
                 continue
-            if completion in {"complete", "unreported"} or (
+            if completion == "complete" or (
                 completion in {"partial", "unknown"}
                 and run.status
                 in {
@@ -1636,14 +1622,11 @@ class ScriptoriumService:
             raise InfrastructureError(f"patched snapshot does not match immutable diff {patch.diff_digest}")
 
     @staticmethod
-    def _markdown_findings(items: list[dict[str, Any]], terminators: tuple[str, ...] | None) -> list[str]:
+    def _markdown_findings(items: list[dict[str, Any]]) -> list[str]:
         lines = ["", "## Findings", ""]
         if not items:
             return [*lines, "- None"]
-
-        def text(value: str) -> str:
-            return ScriptoriumService._markdown_text(value, terminators)
-
+        text = ScriptoriumService._markdown_text
         for item in items:
             finding = item["finding"]
             lines.append(f"- `{finding['id']}` — {finding['severity']} / {finding['status']}: {finding['title']}")
@@ -1654,8 +1637,7 @@ class ScriptoriumService:
             lines.append(f"  - claim: {text(finding['claim'])}")
             if finding.get("affected_claim"):
                 lines.append(f"  - affected claim: {text(finding['affected_claim'])}")
-            if finding.get("consequence"):
-                lines.append(f"  - consequence: {text(finding['consequence'])}")
+            lines.append(f"  - consequence: {text(finding['consequence'])}")
             lines.append(f"  - explanation: {text(finding['explanation'])}")
             lines.append(f"  - suggested action: {text(finding['suggested_action'])}")
             for anchor in finding["evidence"]:
@@ -1666,26 +1648,13 @@ class ScriptoriumService:
         return lines
 
     @staticmethod
-    def _frozen_line_terminators(run: dict[str, Any]) -> tuple[str, ...] | None:
-        """Line terminators of the run's frozen evidence anchor contract; None when it split like str.splitlines()."""
-        record = run["frozen_config"].get("evidence_anchor_contract") or {}
-        terminators = record.get("content", {}).get("line_terminators")
-        return tuple(terminators) if terminators else None
+    def _markdown_text(text: str) -> str:
+        """Keep a field on one list item: each line break of the evidence anchor contract becomes a visible ⏎.
 
-    @staticmethod
-    def _markdown_text(text: str, terminators: tuple[str, ...] | None) -> str:
-        """Keep a field on one list item: each line break of the run's frozen line definition becomes a visible ⏎.
-
-        A terminal line break keeps its mark. Contracts without terminators split like str.splitlines(), so their
-        form feeds and Unicode separators are line breaks too; later contracts end lines only at CRLF, CR, and LF
-        and keep other separators verbatim.
+        A terminal line break keeps its mark. Lines end only at CRLF, CR, and LF; other separators stay verbatim.
         """
-        if terminators is None:
-            bodies = text.splitlines() or [""]
-            ended = (text.splitlines(keepends=True) or [""])[-1] != bodies[-1]
-            return " ⏎ ".join(bodies) + (" ⏎" if ended else "")
-        rendered = re.sub("|".join(re.escape(terminator) for terminator in terminators), " ⏎ ", text)
-        return rendered[:-1] if text.endswith(terminators) else rendered
+        rendered = re.sub("|".join(re.escape(terminator) for terminator in UNIVERSAL_LINE_TERMINATORS), " ⏎ ", text)
+        return rendered[:-1] if text.endswith(UNIVERSAL_LINE_TERMINATORS) else rendered
 
     @staticmethod
     def _markdown_code_span(text: str) -> str:
@@ -1699,19 +1668,14 @@ class ScriptoriumService:
 
     @staticmethod
     def _claim_check_report(task_id: str, attempt_id: str, output: ScientificReviewOutput) -> dict[str, Any]:
-        entry: dict[str, Any] = {
+        return {
             "task_id": task_id,
             "attempt_id": attempt_id,
             "submitted_findings": [finding.model_dump(mode="json", exclude_none=True) for finding in output.findings],
             "claim_checks": [check.model_dump(mode="json", exclude_none=True) for check in output.claim_checks],
+            "claim_inventory": [claim.model_dump(mode="json", exclude_none=True) for claim in output.claim_inventory],
+            "verdict": output.verdict.model_dump(mode="json"),
         }
-        if isinstance(output, InventoriedScientificReviewOutput):
-            entry["claim_inventory"] = [
-                claim.model_dump(mode="json", exclude_none=True) for claim in output.claim_inventory
-            ]
-        if isinstance(output, LinkedScientificReviewOutput):
-            entry["verdict"] = output.verdict.model_dump(mode="json")
-        return entry
 
     @staticmethod
     def _markdown_claim_checks(items: list[dict[str, Any]]) -> list[str]:
@@ -1720,28 +1684,20 @@ class ScriptoriumService:
             return [*lines, "- None"]
         for item in items:
             lines.append(f"- `{item['attempt_id']}`: {len(item['claim_checks'])} checks")
-            if verdict := item.get("verdict"):
-                lines.append(
-                    f"  - verdict: {verdict['recommendation']}; decisive questions: "
-                    + " | ".join(verdict["decisive_questions"])
-                )
+            verdict = item["verdict"]
+            lines.append(
+                f"  - verdict: {verdict['recommendation']}; decisive questions: "
+                + " | ".join(verdict["decisive_questions"])
+            )
             for index, finding in enumerate(item["submitted_findings"]):
                 lines.append(f"  - submitted finding [{index}]: {finding['severity']} — {finding['title']}")
-            inventory = item.get("claim_inventory", [])
-            # Checks either restate their claim or, since the verdict shape, refer to it by claim_index.
-            claims = [
-                inventory[check["claim_index"]] if "claim_index" in check else check for check in item["claim_checks"]
-            ]
+            inventory = item["claim_inventory"]
+            claims = [inventory[check["claim_index"]] for check in item["claim_checks"]]
             for entry_index, entry in enumerate(inventory):
                 location = ScriptoriumService._markdown_location(entry["claim_anchor"])
-                checked = entry.get(
-                    "check_indices",
-                    [
-                        index
-                        for index, check in enumerate(item["claim_checks"])
-                        if check.get("claim_index") == entry_index
-                    ],
-                )
+                checked = [
+                    index for index, check in enumerate(item["claim_checks"]) if check["claim_index"] == entry_index
+                ]
                 status = f"claim checks {checked}" if checked else f"not checked: {entry['not_checked_reason']}"
                 lines.append(
                     f"  - inventoried {entry['prominence']} claim at `{location}`: {entry['claim']} — {status}"
@@ -1751,7 +1707,7 @@ class ScriptoriumService:
                     f"  - [{index}] {claim['claim']} — {check['assessment']}; question: {check['critical_question']}; "
                     f"countercheck: {check['countercheck']}; submitted finding indices: {check['finding_indices']}"
                 )
-                lines.extend(ScriptoriumService._markdown_claim_judgment(check, claim.get("claim_anchor")))
+                lines.extend(ScriptoriumService._markdown_claim_judgment(check, claim["claim_anchor"]))
                 for evidence in check["evidence"]:
                     lines.append(f"    - evidence: `{ScriptoriumService._markdown_location(evidence)}`")
         lines.append("Claim checks are reviewer declarations; valid anchors do not establish scientific correctness.")
@@ -1760,15 +1716,12 @@ class ScriptoriumService:
     @staticmethod
     def _markdown_location(anchor: dict[str, Any]) -> str:
         # Validation anchors any record with a line range to the source; a page beside it was only bounds-checked.
-        # Historical page anchors may carry null line keys, so test the value rather than the key.
-        if anchor.get("start_line") is not None:
+        if "start_line" in anchor:
             return f"{anchor['source_path']}:{anchor['start_line']}-{anchor['end_line']}"
         return f"{anchor['source_path']}:page {anchor['page']}"
 
     @staticmethod
-    def _markdown_claim_judgment(check: dict[str, Any], claim_anchor: dict[str, Any] | None) -> list[str]:
-        if "question_answer" not in check:
-            return []
+    def _markdown_claim_judgment(check: dict[str, Any], claim_anchor: dict[str, Any]) -> list[str]:
         location = ScriptoriumService._markdown_location(claim_anchor)
         lines = [
             f"    - claim at `{location}`; stated scope: {check['stated_scope']}",
@@ -1860,9 +1813,6 @@ class ScriptoriumService:
         if plain["review_scopes"]:
             for item in plain["review_scopes"]:
                 scope = item["scope"]
-                if scope is None:
-                    lines.append(f"- `{item['attempt_id']}` / {item['role']}: scope not reported by frozen contract")
-                    continue
                 lines.append(
                     f"- `{item['attempt_id']}` / {item['role']}: declared `{scope['completion']}`; "
                     f"checked {len(scope['checked'])}, outstanding {len(scope['outstanding'])}"
@@ -1907,9 +1857,7 @@ class ScriptoriumService:
         else:
             lines.append("- None")
         lines.extend(markdown_finding_groups(plain["findings_grouped"]))
-        lines.extend(
-            ScriptoriumService._markdown_findings(plain["findings"], ScriptoriumService._frozen_line_terminators(run))
-        )
+        lines.extend(ScriptoriumService._markdown_findings(plain["findings"]))
         lines.extend(markdown_decision_stats(plain["decision_stats"]))
         lines.extend(["", "## Patches", ""])
         if plain["patches"]:

@@ -1,8 +1,7 @@
 import asyncio
 
 from scriptorium.domain import AgentRole, AttemptStatus, canonical_json, digest_json
-import scriptorium.schemas
-from scriptorium.schemas import SEVERITY_RUBRIC, SEVERITY_RULES, InventoriedScientificReviewOutput, ScopedReviewOutput
+from scriptorium.schemas import SEVERITY_RUBRIC, SEVERITY_RULES
 from scriptorium.service import ScriptoriumService
 import scriptorium.workflow
 
@@ -142,23 +141,3 @@ def test_scope_entries_given_as_strings_are_explained_by_check(tmp_path):
         assert (issue["code"], issue["path"], issue["actual"]) == ("schema.type", "/scope/checked/0", "main.tex")
         assert "must be an object, not a string" in issue["message"]
         assert "source_path" in issue["message"] and "start_line" in issue["message"]
-
-
-def test_runs_frozen_before_the_rubric_accept_findings_without_a_consequence(tmp_path, monkeypatch):
-    repo = make_repository(tmp_path, roles=("substantive_review", "copyedit"))
-    with ScriptoriumService(repo, manuscript_manager=PdfBuildingManuscriptManager(repo)) as service:
-        with monkeypatch.context() as patch:
-            patch.setitem(scriptorium.schemas.SCHEMA_MODELS, "review", ScopedReviewOutput)
-            patch.setitem(scriptorium.schemas.SCHEMA_MODELS, "scientific_review", InventoriedScientificReviewOutput)
-            run = asyncio.run(service.start_run("HEAD", "quick"))["run"]
-        for role in (AgentRole.SUBSTANTIVE_REVIEW, AgentRole.COPYEDIT):
-            review = claim(service, run.id, role)
-            finding = review_finding(review)
-            assert "consequence" not in finding
-            receipt = submit(service, review, {"summary": "Checked the result.", "findings": [finding]})
-            assert receipt["attempt"].status == AttemptStatus.COMPLETED, receipt.get("validation_report")
-        findings = service.database.list_findings(run.id)
-        assert findings and all(item.consequence is None for item in findings)
-        report = service.render_report(run.id, "json")
-        assert all(item["finding"]["consequence"] is None for item in report["findings"])
-        assert service.render_report(run.id, "markdown")

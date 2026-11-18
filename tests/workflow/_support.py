@@ -61,12 +61,12 @@ def claim_inventory(claim_checks):
     ]
 
 
-def links_claims(schema):
-    return "verdict" in schema["properties"]
+def substantive(claim_data):
+    return claim_data["task"].stage == "review" and claim_data["task"].role == AgentRole.SUBSTANTIVE_REVIEW
 
 
 def link_claims(output, *, prior_high=False):
-    """Rewrite a claim-restating substantive output into the claim_index shape, adding a consistent verdict.
+    """Build a substantive output from checks that name their claim: link them by claim_index, add a verdict.
 
     prior_high says whether the task's earlier accepted outputs already hold a major or blocker finding.
     """
@@ -105,7 +105,7 @@ def submit(service, claim_data, output):
             **output,
             "scope": {"completion": "complete", "checked": [], "outstanding": [], "limitations": []},
         }
-    if "claim_checks" in claim_data["schema"]["required"] and "claim_checks" not in output:
+    if substantive(claim_data) and "claim_checks" not in output:
         findings = output.get("findings", [])
         output = {
             **output,
@@ -125,14 +125,12 @@ def submit(service, claim_data, output):
                 }
             ],
         }
-    if links_claims(claim_data["schema"]):
+    if substantive(claim_data):
         prior_high = any(
             finding.task_id == claim_data["task"].id and finding.severity.value in {"blocker", "major"}
             for finding in service.database.list_findings(claim_data["task"].run_id)
         )
         output = link_claims(output, prior_high=prior_high)
-    elif "claim_inventory" in claim_data["schema"]["required"] and "claim_inventory" not in output:
-        output = {**output, "claim_inventory": claim_inventory(output["claim_checks"])}
     return asyncio.run(
         service.submit_task(
             claim_data["attempt"].id,
@@ -140,15 +138,6 @@ def submit(service, claim_data, output):
             json.dumps(output),
         )
     )
-
-
-def finding_definition(schema):
-    reference = schema["properties"]["findings"]["items"]["$ref"].rpartition("/")[2]
-    return schema["$defs"][reference]
-
-
-def requires_consequence(schema):
-    return "consequence" in finding_definition(schema)["required"]
 
 
 def review_finding(claim_data):
@@ -170,10 +159,9 @@ def review_finding(claim_data):
         "explanation": "The typo makes the result sentence harder to read.",
         "suggested_action": "Replace the sentence with the corrected wording.",
         "confidence": 0.99,
+        "consequence": "A reader cannot tell what the main result sentence states.",
     }
-    if requires_consequence(claim_data["schema"]):
-        finding["consequence"] = "A reader cannot tell what the main result sentence states."
-    if "affected_claim" in finding_definition(claim_data["schema"])["properties"]:
+    if not substantive(claim_data):
         finding["affected_claim"] = "The main result sentence states that the result is clear."
     return finding
 

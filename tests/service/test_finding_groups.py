@@ -405,7 +405,7 @@ def test_grouping_without_navigation_is_unchanged():
 
 
 def _linked_claim_report(task_id, submitted, prominences):
-    """A post-claim_index substantive output: one check per inventoried claim, each linking one finding."""
+    """A substantive output: one check per inventoried claim, each linking one finding."""
     return {
         "task_id": task_id,
         "attempt_id": "attempt_substantive",
@@ -498,28 +498,6 @@ def test_a_headline_link_lifts_the_whole_group_and_mixed_compliance_is_not_compl
     assert lifted["primary_finding_id"] == "finding_d"
     assert lifted["claim"]["finding_id"] == "finding_h"
     assert lifted["categories"] == ["clarity", "submission_compliance"]
-
-
-def test_outputs_frozen_before_claim_index_link_through_inventory_check_indices():
-    finding = _finding("h", _lines("main.tex", 3), role=AgentRole.SUBSTANTIVE_REVIEW)
-    restated = {
-        "task_id": finding.task_id,
-        "attempt_id": "attempt_old",
-        "submitted_findings": [_submitted(finding)],
-        "claim_checks": [{"claim": "Restated claim.", "assessment": "finding", "finding_indices": [0]}],
-    }
-    inventoried = {
-        **restated,
-        "claim_inventory": [{"claim": "Restated claim.", "prominence": "supporting", "check_indices": [0]}],
-    }
-
-    without_inventory = finding_groups([finding], [restated])
-    assert without_inventory["groups"][0]["claim"] is None
-    assert without_inventory["groups"][0]["tier"] == "other"
-    assert without_inventory["verdict"] is None
-    with_inventory = finding_groups([finding], [inventoried])["groups"][0]
-    assert with_inventory["claim"] == {"text": "Restated claim.", "prominence": "supporting", "finding_id": "finding_h"}
-    assert with_inventory["tier"] == "supporting"
 
 
 def test_a_claim_check_from_another_task_does_not_link():

@@ -36,14 +36,10 @@ class EvidenceAnchorContract(StrictModel):
     source_line: _EvidenceRule
     pdf_page: _EvidenceRule
     revision_edit: _EvidenceRule
-    # Contracts frozen before task retrieval and validation shared a line definition omit this field; their runs
-    # keep str.splitlines(), which also breaks at form feeds and Unicode line separators.
-    line_terminators: tuple[str, ...] | None = None
+    line_terminators: tuple[str, ...]
 
     def split_lines(self, text: str, *, keepends: bool = False) -> list[str]:
         """Split source text into the numbered lines this frozen contract anchors."""
-        if self.line_terminators is None:
-            return text.splitlines(keepends)
         lines = []
         start = 0
         for match in _LINE_BREAK.finditer(text):
@@ -55,7 +51,7 @@ class EvidenceAnchorContract(StrictModel):
 
     @model_validator(mode="after")
     def validate_shapes(self) -> "EvidenceAnchorContract":
-        if self.line_terminators is not None and self.line_terminators != UNIVERSAL_LINE_TERMINATORS:
+        if self.line_terminators != UNIVERSAL_LINE_TERMINATORS:
             raise ValueError("source line terminators do not match the local parser")
         if (
             self.source_line.required_fields
@@ -259,17 +255,6 @@ class Evidence(StrictModel):
         return self
 
 
-class FindingCandidate(StrictModel):
-    category: str = Field(min_length=1)
-    severity: Severity
-    title: str = Field(min_length=1)
-    claim: str = Field(min_length=1)
-    evidence: list[Evidence] = Field(min_length=1)
-    explanation: str = Field(min_length=1)
-    suggested_action: str = Field(min_length=1)
-    confidence: float = Field(ge=0, le=1)
-
-
 SUBMISSION_COMPLIANCE_CATEGORY = "submission_compliance"
 _COMPLIANCE_SEVERITIES = (Severity.MINOR, Severity.SUGGESTION)
 SEVERITY_DEFINITIONS = {
@@ -382,7 +367,7 @@ def render_review_brief(brief: ReviewBrief) -> str:
     return "\n".join(lines)
 
 
-class RatedFinding(FindingCandidate):
+class RatedFinding(StrictModel):
     category: str = Field(min_length=1, description=f"A short finding category. {_COMPLIANCE_RULE}")
     severity: Severity = Field(
         description=" ".join(
@@ -392,6 +377,12 @@ class RatedFinding(FindingCandidate):
             )
         )
     )
+    title: str = Field(min_length=1)
+    claim: str = Field(min_length=1)
+    evidence: list[Evidence] = Field(min_length=1)
+    explanation: str = Field(min_length=1)
+    suggested_action: str = Field(min_length=1)
+    confidence: float = Field(ge=0, le=1)
     consequence: str = Field(min_length=1, description=f"One or two sentences: {_CONSEQUENCE}.")
 
     @field_validator("consequence")
@@ -430,11 +421,6 @@ class ClaimedFinding(RatedFinding):
                 "it changes, or be rated minor or suggestion"
             )
         return self
-
-
-class ReviewOutput(StrictModel):
-    summary: str = Field(min_length=1)
-    findings: list[FindingCandidate]
 
 
 def _json_kind(value: Any) -> str:
@@ -512,18 +498,10 @@ class ReviewScope(StrictModel):
         return self
 
 
-class ScopedReviewOutput(ReviewOutput):
-    model_config = ConfigDict(extra="forbid", title="ReviewOutput")
-
-    scope: ReviewScope
-
-
-class RatedReviewOutput(ScopedReviewOutput):
-    findings: list[RatedFinding]
-
-
-class ClaimedReviewOutput(RatedReviewOutput):
+class ReviewOutput(StrictModel):
+    summary: str = Field(min_length=1)
     findings: list[ClaimedFinding]
+    scope: ReviewScope
 
 
 def _integral_indices(value: Any) -> Any:
@@ -542,39 +520,6 @@ def _integral_indices(value: Any) -> Any:
     ]
 
 
-class ClaimCheck(StrictModel):
-    claim: str = Field(min_length=1)
-    evidence: list[Evidence] = Field(min_length=1)
-    critical_question: str = Field(min_length=1)
-    countercheck: str = Field(min_length=1)
-    assessment: Literal["supported", "unresolved", "finding"]
-    finding_indices: list[Annotated[int, Field(ge=0, strict=True)]]
-
-    @field_validator("finding_indices", mode="before")
-    @classmethod
-    def accept_integral_indices(cls, value: Any) -> Any:
-        return _integral_indices(value)
-
-
-class ScientificReviewOutput(ScopedReviewOutput):
-    claim_checks: list[ClaimCheck]
-
-    @model_validator(mode="after")
-    def validate_claim_checks(self) -> "ScientificReviewOutput":
-        if self.scope.completion == "complete" and not self.claim_checks:
-            raise ValueError("a complete substantive review requires claim checks")
-        linked: set[int] = set()
-        for check in self.claim_checks:
-            if (check.assessment == "finding") != bool(check.finding_indices):
-                raise ValueError("only a retained claim check may link findings")
-            if any(index >= len(self.findings) for index in check.finding_indices):
-                raise ValueError("claim check refers to an unknown finding index")
-            linked.update(check.finding_indices)
-        if linked != set(range(len(self.findings))):
-            raise ValueError("every substantive finding must be linked to a claim check")
-        return self
-
-
 class Recomputation(StrictModel):
     inputs: list[Annotated[str, Field(min_length=1)]] = Field(
         min_length=1, description="Each reported value used, with where the manuscript states it."
@@ -585,119 +530,6 @@ class Recomputation(StrictModel):
     outcome: Literal["matches", "differs"] = Field(
         description='"matches" only when the result agrees with the reported value within the stated rounding.'
     )
-
-
-class JudgedClaimCheck(ClaimCheck):
-    claim_anchor: Evidence = Field(description="Where the authors state the claim, as an exact frozen anchor.")
-    stated_scope: str = Field(
-        min_length=1,
-        description="The population, conditions, range, threshold, and qualifications under which the authors "
-        "state the claim.",
-    )
-    check_type: Literal[
-        "reporting_consistency",
-        "recomputation",
-        "design_and_analysis",
-        "alternative_explanation",
-        "scope_and_generality",
-    ] = Field(description="What the countercheck examined.")
-    question_answer: Literal["yes", "partly", "no", "not_checkable"] = Field(
-        description="Whether the countercheck shows the claim holds at its stated scope: yes, partly, no, or "
-        "not_checkable when the frozen bundle cannot decide it."
-    )
-    exceptions: list[Annotated[str, Field(min_length=1)]] = Field(
-        description="Cases, conditions, or values within the stated scope where the claim fails or is not shown."
-    )
-    recomputation: Recomputation | None = Field(
-        default=None, description='Required when check_type is "recomputation"; omit it otherwise.'
-    )
-
-    @model_validator(mode="after")
-    def validate_judgment(self) -> "JudgedClaimCheck":
-        _validate_judgment(self)
-        return self
-
-
-def _validate_judgment(check: JudgedClaimCheck | LinkedClaimCheck) -> None:
-    if (check.check_type == "recomputation") != (check.recomputation is not None):
-        raise ValueError('a recomputation is recorded exactly when check_type is "recomputation"')
-    if (check.assessment == "supported") != (check.question_answer == "yes"):
-        raise ValueError('assessment "supported" goes with question_answer "yes", and only with it')
-    if check.question_answer == "yes" and check.exceptions:
-        raise ValueError('question_answer "yes" lists no exceptions; use "partly"')
-    if check.question_answer == "partly" and not check.exceptions:
-        raise ValueError('question_answer "partly" lists at least one exception')
-    if check.recomputation is not None and (check.recomputation.outcome, check.question_answer) in {
-        ("matches", "no"),
-        ("differs", "yes"),
-    }:
-        raise ValueError('a recomputation that differs cannot answer "yes", and one that matches cannot answer "no"')
-    if check.question_answer == "not_checkable" and check.assessment != "unresolved":
-        raise ValueError('question_answer "not_checkable" requires assessment "unresolved"')
-
-
-class JudgedScientificReviewOutput(ScientificReviewOutput):
-    claim_checks: list[JudgedClaimCheck]
-
-
-class InventoriedClaim(StrictModel):
-    claim: str = Field(min_length=1, description="The central claim as the authors state it.")
-    claim_anchor: Evidence = Field(description="Where the authors state the claim, as an exact frozen anchor.")
-    prominence: Literal["headline", "supporting"] = Field(
-        description='"headline" for a claim in the abstract, stated contributions, or conclusions; "supporting" '
-        "for a claim the headline claims depend on."
-    )
-    check_indices: list[Annotated[int, Field(ge=0, strict=True)]] = Field(
-        description="Zero-based positions in this output's claim_checks that assess this claim."
-    )
-    not_checked_reason: str | None = Field(
-        default=None,
-        min_length=1,
-        description="Why this submission has no claim check for the claim; omit it when check_indices is not empty.",
-    )
-
-    @field_validator("check_indices", mode="before")
-    @classmethod
-    def accept_integral_indices(cls, value: Any) -> Any:
-        return _integral_indices(value)
-
-    @model_validator(mode="after")
-    def validate_status(self) -> "InventoriedClaim":
-        if bool(self.check_indices) == (self.not_checked_reason is not None):
-            raise ValueError("an inventoried claim lists check_indices or a not_checked_reason, not both or neither")
-        return self
-
-
-class InventoriedScientificReviewOutput(JudgedScientificReviewOutput):
-    claim_inventory: list[InventoriedClaim] = Field(
-        description="The central claims identified in the manuscript, each linked to its claim checks or left "
-        "unchecked with a reason."
-    )
-
-    @model_validator(mode="after")
-    def validate_claim_inventory(self) -> "InventoriedScientificReviewOutput":
-        listed: list[int] = []
-        for entry in self.claim_inventory:
-            if any(index >= len(self.claim_checks) for index in entry.check_indices):
-                raise ValueError("an inventoried claim refers to an unknown claim check index")
-            if any(
-                (self.claim_checks[index].claim, self.claim_checks[index].claim_anchor)
-                != (entry.claim, entry.claim_anchor)
-                for index in entry.check_indices
-            ):
-                raise ValueError("a linked claim check must restate its inventoried claim and claim_anchor exactly")
-            listed.extend(entry.check_indices)
-        if sorted(listed) != list(range(len(self.claim_checks))):
-            raise ValueError("each claim check must assess exactly one inventoried claim")
-        if self.scope.completion == "complete" and any(
-            entry.prominence == "headline" and not entry.check_indices for entry in self.claim_inventory
-        ):
-            raise ValueError("a complete substantive review must check every inventoried headline claim")
-        return self
-
-
-class RatedScientificReviewOutput(InventoriedScientificReviewOutput):
-    findings: list[RatedFinding]
 
 
 class LinkedClaimCheck(StrictModel):
@@ -744,7 +576,23 @@ class LinkedClaimCheck(StrictModel):
 
     @model_validator(mode="after")
     def validate_judgment(self) -> "LinkedClaimCheck":
-        _validate_judgment(self)
+        if (self.check_type == "recomputation") != (self.recomputation is not None):
+            raise ValueError('a recomputation is recorded exactly when check_type is "recomputation"')
+        if (self.assessment == "supported") != (self.question_answer == "yes"):
+            raise ValueError('assessment "supported" goes with question_answer "yes", and only with it')
+        if self.question_answer == "yes" and self.exceptions:
+            raise ValueError('question_answer "yes" lists no exceptions; use "partly"')
+        if self.question_answer == "partly" and not self.exceptions:
+            raise ValueError('question_answer "partly" lists at least one exception')
+        if self.recomputation is not None and (self.recomputation.outcome, self.question_answer) in {
+            ("matches", "no"),
+            ("differs", "yes"),
+        }:
+            raise ValueError(
+                'a recomputation that differs cannot answer "yes", and one that matches cannot answer "no"'
+            )
+        if self.question_answer == "not_checkable" and self.assessment != "unresolved":
+            raise ValueError('question_answer "not_checkable" requires assessment "unresolved"')
         return self
 
 
@@ -777,7 +625,13 @@ class Verdict(StrictModel):
 _HIGH_SEVERITIES = (Severity.BLOCKER, Severity.MAJOR)
 
 
-class LinkedScientificReviewOutput(RatedScientificReviewOutput):
+class ScientificReviewOutput(StrictModel):
+    # Both review kinds publish their output schema under the title ReviewOutput.
+    model_config = ConfigDict(extra="forbid", title="ReviewOutput")
+
+    summary: str = Field(min_length=1)
+    findings: list[RatedFinding]
+    scope: ReviewScope
     claim_checks: list[LinkedClaimCheck]
     claim_inventory: list[LinkedClaim] = Field(
         description="The central claims identified in the manuscript; claim checks refer to them by claim_index."
@@ -785,7 +639,22 @@ class LinkedScientificReviewOutput(RatedScientificReviewOutput):
     verdict: Verdict
 
     @model_validator(mode="after")
-    def validate_claim_inventory(self) -> "LinkedScientificReviewOutput":
+    def validate_claim_checks(self) -> "ScientificReviewOutput":
+        if self.scope.completion == "complete" and not self.claim_checks:
+            raise ValueError("a complete substantive review requires claim checks")
+        linked: set[int] = set()
+        for check in self.claim_checks:
+            if (check.assessment == "finding") != bool(check.finding_indices):
+                raise ValueError("only a retained claim check may link findings")
+            if any(index >= len(self.findings) for index in check.finding_indices):
+                raise ValueError("claim check refers to an unknown finding index")
+            linked.update(check.finding_indices)
+        if linked != set(range(len(self.findings))):
+            raise ValueError("every substantive finding must be linked to a claim check")
+        return self
+
+    @model_validator(mode="after")
+    def validate_claim_inventory(self) -> "ScientificReviewOutput":
         if any(check.claim_index >= len(self.claim_inventory) for check in self.claim_checks):
             raise ValueError("a claim check refers to an unknown claim_index")
         referenced = {check.claim_index for check in self.claim_checks}
@@ -889,8 +758,8 @@ class ValidationReport(StrictModel):
 
 
 SCHEMA_MODELS: dict[str, type[StrictModel]] = {
-    "review": ClaimedReviewOutput,
-    "scientific_review": LinkedScientificReviewOutput,
+    "review": ReviewOutput,
+    "scientific_review": ScientificReviewOutput,
     "revision": RevisionOutput,
     "verification": VerificationOutput,
 }
@@ -899,11 +768,8 @@ SCHEMA_MODELS: dict[str, type[StrictModel]] = {
 def output_schema(
     kind: str,
     contract: EvidenceAnchorContract = DEFAULT_EVIDENCE_ANCHOR_CONTRACT,
-    *,
-    legacy_review: bool = False,
 ) -> dict[str, Any]:
-    model = ReviewOutput if kind == "review" and legacy_review else SCHEMA_MODELS[kind]
-    schema = model.model_json_schema()
+    schema = SCHEMA_MODELS[kind].model_json_schema()
     if kind in {"review", "scientific_review", "verification"}:
         evidence = schema["$defs"]["Evidence"]
         evidence["properties"]["source_path"]["description"] = (
@@ -912,7 +778,7 @@ def output_schema(
         )
         evidence["properties"]["quoted_text"]["description"] = contract.source_line.matching_rule
         evidence["oneOf"] = _evidence_anchor_schema(contract)
-        if kind in {"review", "scientific_review"} and not legacy_review:
+        if kind in {"review", "scientific_review"}:
             schema["$defs"]["ReviewScopeArea"]["oneOf"] = [
                 {
                     "title": "Compiled PDF page",

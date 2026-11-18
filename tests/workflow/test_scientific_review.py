@@ -3,8 +3,6 @@ import asyncio
 import pytest
 
 from scriptorium.domain import AgentRole, AttemptStatus, RunStatus
-import scriptorium.schemas
-from scriptorium.schemas import JudgedScientificReviewOutput, RatedScientificReviewOutput, ScientificReviewOutput
 from scriptorium.service import ScriptoriumService
 
 from ._support import PdfBuildingManuscriptManager, claim, make_repository, review_finding, submit
@@ -179,28 +177,6 @@ def test_scientific_review_rejects_missing_or_invalid_checks_without_findings(tm
         assert not service.evaluate_gate(run.id)["passed"]
 
 
-def test_claim_anchor_quote_is_validated_like_evidence(tmp_path, monkeypatch):
-    repo = make_repository(tmp_path, roles=("substantive_review",))
-    with ScriptoriumService(repo, manuscript_manager=PdfBuildingManuscriptManager(repo)) as service:
-        # Checks restate their claim anchor only in runs frozen before the verdict.
-        with monkeypatch.context() as patch:
-            patch.setitem(scriptorium.schemas.SCHEMA_MODELS, "scientific_review", RatedScientificReviewOutput)
-            run = asyncio.run(service.start_run("HEAD", "quick"))["run"]
-        review = claim(service, run.id, AgentRole.SUBSTANTIVE_REVIEW)
-        anchor = {**review_finding(review)["evidence"][0], "quoted_text": "This text is not in the manuscript."}
-        receipt = submit(
-            service,
-            review,
-            {
-                "summary": "Checked the result.",
-                "findings": [],
-                "claim_checks": [{**_claim_check(), "claim_anchor": anchor}],
-            },
-        )
-        assert receipt["attempt"].status == AttemptStatus.FAILED
-        assert any("/claim_checks/0/claim_anchor" in str(issue) for issue in receipt["validation_report"]["issues"])
-
-
 def test_report_renders_claim_judgments_and_recomputation(tmp_path):
     repo = make_repository(tmp_path, roles=("substantive_review",))
     with ScriptoriumService(repo, manuscript_manager=PdfBuildingManuscriptManager(repo)) as service:
@@ -228,26 +204,6 @@ def test_report_renders_claim_judgments_and_recomputation(tmp_path):
         assert "recomputation; answer: partly" in markdown
         assert "exception: The second condition is not reported." in markdown
         assert "recomputation matches: a + b = 5; reported 5; inputs: a = 2 (line 3); b = 3 (line 3)" in markdown
-
-
-def test_runs_frozen_before_claim_judgments_keep_their_claim_check_shape(tmp_path, monkeypatch):
-    repo = make_repository(tmp_path, roles=("substantive_review",))
-    with ScriptoriumService(repo, manuscript_manager=PdfBuildingManuscriptManager(repo)) as service:
-        with monkeypatch.context() as patch:
-            patch.setitem(scriptorium.schemas.SCHEMA_MODELS, "scientific_review", ScientificReviewOutput)
-            run = asyncio.run(service.start_run("HEAD", "quick"))["run"]
-        review = claim(service, run.id, AgentRole.SUBSTANTIVE_REVIEW)
-        assert "JudgedClaimCheck" not in review["schema"]["$defs"]
-        legacy = {
-            key: value
-            for key, value in _claim_check().items()
-            if key not in {"claim_anchor", "stated_scope", "check_type", "question_answer", "exceptions"}
-        }
-        receipt = submit(service, review, {"summary": "Checked the result.", "findings": [], "claim_checks": [legacy]})
-        assert receipt["attempt"].status == AttemptStatus.COMPLETED
-        markdown = service.render_report(run.id, "markdown")
-        assert "Scientific claim checks" in markdown
-        assert "stated scope" not in markdown
 
 
 def test_claim_inventory_anchor_is_validated_and_rendered(tmp_path):
@@ -326,20 +282,6 @@ def test_complete_review_must_check_every_inventoried_headline_claim(tmp_path):
         )
         assert receipt["attempt"].status == AttemptStatus.FAILED
         assert "must check every inventoried headline claim" in str(receipt["validation_report"]["issues"])
-
-
-def test_runs_frozen_before_the_claim_inventory_accept_judged_checks_alone(tmp_path, monkeypatch):
-    repo = make_repository(tmp_path, roles=("substantive_review",))
-    with ScriptoriumService(repo, manuscript_manager=PdfBuildingManuscriptManager(repo)) as service:
-        with monkeypatch.context() as patch:
-            patch.setitem(scriptorium.schemas.SCHEMA_MODELS, "scientific_review", JudgedScientificReviewOutput)
-            run = asyncio.run(service.start_run("HEAD", "quick"))["run"]
-        review = claim(service, run.id, AgentRole.SUBSTANTIVE_REVIEW)
-        assert "claim_inventory" not in review["schema"]["properties"]
-        output = {"summary": "Checked the result.", "findings": [], "claim_checks": [_claim_check()]}
-        receipt = submit(service, review, output)
-        assert receipt["attempt"].status == AttemptStatus.COMPLETED
-        assert "claim_inventory" not in service.render_report(run.id, "json")["review_claim_checks"][0]
 
 
 def test_continuation_preserves_prior_claim_checks_and_accepts_new_checks(tmp_path):

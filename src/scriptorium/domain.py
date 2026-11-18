@@ -296,9 +296,9 @@ class Finding:
     explanation: str
     suggested_action: str
     confidence: float
-    # Findings recorded before the severity rubric have no consequence.
-    consequence: str | None = None
-    # Findings without a claim inventory name the claim they change at moderate or above; earlier ones have none.
+    consequence: str
+    # Detail-role findings name the claim they change at moderate or above; substantive findings link claims through
+    # their claim checks and leave this empty.
     affected_claim: str | None = None
     id: str = field(default_factory=lambda: new_id("finding"))
     status: FindingStatus = FindingStatus.PENDING
