@@ -98,6 +98,30 @@ def test_attempt_session_is_recorded_once_while_running(tmp_path) -> None:
             database.record_attempt_session(attempt.id, "session-1")
 
 
+def test_finish_attempt_advances_the_run_updated_at(tmp_path, monkeypatch) -> None:
+    with Database(tmp_path) as database:
+        run = database.create_run(make_run())
+        task = database.create_task(
+            Task(
+                run_id=run.id,
+                stage="review",
+                role=AgentRole.CONSISTENCY,
+                input_digest="d" * 64,
+            )
+        )
+        attempt = database.begin_attempt(task.id)
+        finished_at = "2999-01-01T00:00:00+00:00"
+        monkeypatch.setattr("scriptorium.storage.utc_now", lambda: finished_at)
+
+        finished = database.finish_attempt(attempt.id, AttemptStatus.COMPLETED)
+
+        assert finished.completed_at == finished_at
+        assert database.get_run(run.id).updated_at == finished_at
+
+    with Database(tmp_path) as reopened:
+        assert reopened.get_run(run.id).updated_at == finished_at
+
+
 def test_finish_attempt_rejects_a_different_recorded_session(tmp_path) -> None:
     with Database(tmp_path) as database:
         run = database.create_run(make_run())

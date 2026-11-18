@@ -527,6 +527,7 @@ class Database:
             state.set_task(
                 replace(state.tasks[attempt.task_id], status=TaskStatus(status.value), updated_at=completed_at)
             )
+            state.set_run(replace(state.run, updated_at=completed_at))
             state.add_event(
                 Event(
                     run_id=state.run.id,
