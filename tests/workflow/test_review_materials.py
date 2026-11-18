@@ -12,7 +12,6 @@ from scriptorium.domain import AgentRole, RunStatus
 from scriptorium.errors import ConfigurationError, InfrastructureError
 from scriptorium.manuscript import BuildResult, CompilerInput, ManuscriptManager
 from scriptorium.service import ScriptoriumService
-from scriptorium.tool_output import MAX_TOOL_RESPONSE_BYTES
 
 from ._support import claim, make_repository, review_finding, submit
 
@@ -58,10 +57,9 @@ def test_supplement_retrieval_survives_processes_and_records_unambiguous_pages(t
         review = claim(service, run.id, AgentRole.SUBSTANTIVE_REVIEW)
         attempt_id = review["attempt"].id
         (repo / "supplement.tex").write_text("uncommitted replacement")
-        matches = service.search_task(attempt_id, "limited to adults", None, 0, 20)
-        assert matches["matches"][0]["path"] == "supplement.tex"
-        read = service.read_task(attempt_id, "sources/supplement.tex", 3, 1, 0, 6000)
-        assert read["lines"][0]["text"] == "The result is limited to adults."
+        service.export_task(attempt_id, tmp_path / "export")
+        exported = (tmp_path / "export/sources/supplement.tex").read_text(encoding="utf-8")
+        assert exported.splitlines()[2] == "The result is limited to adults."
         main = service.page_task(attempt_id, 1, "main.tex")
         assert main["page"] == 1 and main["document_page"] == 1
     result = subprocess.run(
@@ -83,7 +81,6 @@ def test_supplement_retrieval_survives_processes_and_records_unambiguous_pages(t
         text=True,
         check=True,
     )
-    assert len(result.stdout.encode()) <= MAX_TOOL_RESPONSE_BYTES
     page = json.loads(result.stdout)["data"]
     assert page["page"] == 2 and page["document_page"] == 1
     assert page["document"] == "supplement.tex" and page["source_path"] == "manuscript.pdf"
@@ -140,7 +137,7 @@ def test_corrupt_supplement_blocks_submission_without_partial_findings(tmp_path,
         (Path(review["bundle_path"]) / artifact).write_text("corrupt")
         with pytest.raises(InfrastructureError):
             if artifact == "sources/supplement.tex":
-                service.read_task(review["attempt"].id, "supplement.tex", 1, 40, 0, 6000)
+                service.export_task(review["attempt"].id, tmp_path / "export")
             else:
                 service.page_task(review["attempt"].id, 1, "supplement.tex")
         with pytest.raises(InfrastructureError):

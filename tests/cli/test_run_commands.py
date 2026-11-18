@@ -3,7 +3,7 @@ import json
 import pytest
 
 from scriptorium import cli
-from scriptorium.errors import DuplicateRunError, ExampleUnavailableError
+from scriptorium.errors import DuplicateRunError
 
 from ._fake_service import FakeService, install_fake_service
 
@@ -64,42 +64,36 @@ def test_start_rejects_an_unreadable_brief_before_calling_the_service(
     assert error["code"] == "configuration_error" and message in error["message"]
 
 
-def test_task_show_accepts_the_brief_part(monkeypatch, capsys) -> None:
+def test_task_show_returns_the_overview(monkeypatch, capsys) -> None:
     service = FakeService()
     install_fake_service(monkeypatch, service)
 
-    assert cli.main(["--json", "task", "show", "attempt_1", "--part", "brief", "--offset", "3"]) == 0
-    assert cli.main(["--json", "task", "show", "attempt_1", "--part", "summary"]) == 2
+    assert cli.main(["--json", "task", "show", "attempt_1"]) == 0
 
-    assert service.calls == [("show_task", "attempt_1"), ("task_view", "attempt_1", "brief", 3)]
+    assert service.calls == [("show_task", "attempt_1"), ("task_view", "attempt_1")]
+    assert json.loads(capsys.readouterr().out)["data"] == {"attempt": {"id": "attempt_1"}}
 
 
-def test_task_show_accepts_the_example_part(monkeypatch, capsys) -> None:
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        ["task", "read", "attempt_1", "--path", "main.tex"],
+        ["task", "search", "attempt_1", "--query", "result"],
+        ["task", "nav", "attempt_1", "--command", "heading"],
+        ["task", "show", "attempt_1", "--part", "prompt"],
+        ["task", "show", "attempt_1", "--offset", "3"],
+        ["task", "page", "attempt_1", "--number", "1", "--text", "--offset", "3"],
+        ["task", "page", "attempt_1", "--number", "1", "--text", "--text-digest", "abc"],
+    ],
+)
+def test_removed_retrieval_commands_and_options_are_rejected(monkeypatch, capsys, arguments) -> None:
     service = FakeService()
     install_fake_service(monkeypatch, service)
 
-    assert cli.main(["--json", "task", "show", "attempt_1", "--part", "example", "--offset", "5"]) == 0
+    assert cli.main(["--json", *arguments]) == 2
 
-    assert service.calls == [("show_task", "attempt_1"), ("task_view", "attempt_1", "example", 5)]
-    assert json.loads(capsys.readouterr().out)["data"] == {"part": "example", "offset": 5}
-
-
-def test_an_unavailable_example_is_a_structured_error(monkeypatch, capsys) -> None:
-    class NoExampleService(FakeService):
-        def task_view(self, context, part=None, offset=0):
-            raise ExampleUnavailableError(
-                "no example is available for this attempt's frozen review output schema shape"
-            )
-
-    install_fake_service(monkeypatch, NoExampleService())
-
-    assert cli.main(["--json", "task", "show", "attempt_1", "--part", "example"]) == 2
-
-    error = json.loads(capsys.readouterr().out)["error"]
-    assert error == {
-        "code": "example_unavailable",
-        "message": "no example is available for this attempt's frozen review output schema shape",
-    }
+    assert json.loads(capsys.readouterr().out)["error"]["code"] == "invalid_arguments"
+    assert service.calls == []
 
 
 def test_start_passes_allow_duplicate(monkeypatch, capsys) -> None:
@@ -211,35 +205,15 @@ def test_init_calls_configuration_boundary(monkeypatch, tmp_path, capsys) -> Non
     assert output["data"]["initialized"] is True
 
 
-def test_report_fragments_dispatch_with_continuation_identity(monkeypatch, capsys):
+@pytest.mark.parametrize("part", ["findings", "decision_stats", "findings_grouped"])
+@pytest.mark.parametrize("json_output", [True, False], ids=["json", "plain"])
+def test_a_report_part_prints_the_whole_section(monkeypatch, capsys, part, json_output):
     service = FakeService()
     install_fake_service(monkeypatch, service)
-    assert cli.main(["--json", "run", "report", "run_1", "--part", "findings"]) == 0
-    assert service.calls[-1] == ("read_report", "run_1", "findings", 0, None)
-    assert json.loads(capsys.readouterr().out)["data"]["text"] == "[]"
-    assert (
-        cli.main(
-            ["--json", "run", "report", "run_1", "--part", "findings", "--offset", "120", "--report-digest", "abc"]
-        )
-        == 0
-    )
-    assert service.calls[-1] == ("read_report", "run_1", "findings", 120, "abc")
-
-
-def test_decision_stats_part_dispatches_through_the_bounded_report_reader(monkeypatch, capsys):
-    service = FakeService()
-    install_fake_service(monkeypatch, service)
-    assert cli.main(["--json", "run", "report", "run_1", "--part", "decision_stats"]) == 0
-    assert service.calls[-1] == ("read_report", "run_1", "decision_stats", 0, None)
-    assert json.loads(capsys.readouterr().out)["data"]["part"] == "decision_stats"
-
-
-def test_findings_grouped_part_dispatches_through_the_bounded_report_reader(monkeypatch, capsys):
-    service = FakeService()
-    install_fake_service(monkeypatch, service)
-    assert cli.main(["--json", "run", "report", "run_1", "--part", "findings_grouped"]) == 0
-    assert service.calls[-1] == ("read_report", "run_1", "findings_grouped", 0, None)
-    assert json.loads(capsys.readouterr().out)["data"]["part"] == "findings_grouped"
+    assert cli.main([*(["--json"] if json_output else []), "run", "report", "run_1", "--part", part]) == 0
+    assert service.calls[-1] == ("read_report", "run_1", part)
+    output = json.loads(capsys.readouterr().out)
+    assert (output["data"] if json_output else output) == [{"part": part}]
 
 
 @pytest.mark.parametrize(
@@ -248,13 +222,15 @@ def test_findings_grouped_part_dispatches_through_the_bounded_report_reader(monk
         ["--part", "missing"],
         ["--offset", "3"],
         ["--report-digest", "abc"],
+        ["--part", "findings", "--offset", "3"],
+        ["--part", "findings", "--report-digest", "abc"],
         ["--part", "findings", "--format", "json"],
         ["--part", "findings", "--format", "markdown"],
         ["--format", "json", "--part", "findings"],
         ["--format", "markdown", "--part", "findings"],
     ],
 )
-def test_report_fragment_options_are_not_silently_ignored(monkeypatch, capsys, options):
+def test_report_options_are_not_silently_ignored(monkeypatch, capsys, options):
     service = FakeService()
     install_fake_service(monkeypatch, service)
     assert cli.main(["--json", "run", "report", "run_1", *options]) == 2

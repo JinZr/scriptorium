@@ -94,7 +94,7 @@ figure inputs.
 The generated `benchmark.tex` is only a configuration sentinel: the core project parser currently requires a `.tex`
 `manuscript.main`, but the file is never compiled or exposed as a manuscript source.
 
-The command prints the new run directory. For each generated paper project, use `scriptorium --json task list RUN_ID`, claim the four review tasks from the chosen host, inspect the frozen bundle through `task search`, `task read`, and `task page`, then submit each structured result. Run this wrapper again with `--resume` to collect validated findings. A paper is complete only when all four review tasks finish and the core run reaches `awaiting_decision`. The wrapper never advances into revision.
+The command prints the new run directory. For each generated paper project, use `scriptorium --json task list RUN_ID`, claim the four review tasks from the chosen host, read the frozen bundle from `task export` and rendered pages from `task page`, then submit each structured result. Run this wrapper again with `--resume` to collect validated findings. A paper is complete only when all four review tasks finish and the core run reaches `awaiting_decision`. The wrapper never advances into revision.
 
 Its atomic `run_manifest.json` freezes the Scriptorium commit, relevant source hashes, dataset and upstream revisions, paper selection, core run IDs, attempt provenance, prompt/schema/artifact digests, finding payload digest, and status. External model tokens and cost remain unknown unless independently recorded by the host. The wrapper rechecks the frozen code and source hashes at paper boundaries.
 

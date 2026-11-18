@@ -28,7 +28,7 @@ need not be committed.
   prompts.
 
 The brief is rendered into every review role's frozen prompt and joins every task's input digest. Reviewers read it
-with `task show ATTEMPT_ID --part brief`. A run cannot change its brief; start a new run instead.
+as `task/brief.json` in their `task export` directory. A run cannot change its brief; start a new run instead.
 
 `doctor` reports `detected_template`: the first known class or package declared by the main entrypoint or a
 supplement, and the venue family it suggests, or `unknown`. It is a default for the brief, not a venue policy.

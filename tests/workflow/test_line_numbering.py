@@ -1,5 +1,6 @@
 import asyncio
 import json
+import re
 import shutil
 import subprocess
 
@@ -84,13 +85,15 @@ def _revise_verify_apply(service, run, source, line, before, after):
     return diff, (service.repo / "main.tex").read_text(encoding="utf-8")
 
 
-def test_read_tool_line_numbers_produce_accepted_evidence(tmp_path):
+def test_exported_line_numbers_produce_accepted_evidence(tmp_path):
     service, run = _start(tmp_path)
     with service:
         context = claim(service, run.id, "copyedit")
         source = next(item for item in context["source_map"]["sources"] if item["source_path"] == "main.tex")
-        read = service.read_task(context["attempt"].id, "main.tex", 1, 100, 0, 8000)
-        lines = {piece["line"]: piece["text"] for piece in read["lines"]}
+        service.export_task(context["attempt"].id, tmp_path / "export")
+        # A line ends only at \n, \r\n, or \r, so the form feed stays inside line 3.
+        text = (tmp_path / "export" / source["read_path"]).read_bytes().decode("utf-8")
+        lines = dict(enumerate(re.split(r"\r\n|\r|\n", text.removesuffix("\n")), 1))
         assert lines[3] == "alpha\fbeta"
         assert source["line_count"] == max(lines) == 5
         receipt = submit(

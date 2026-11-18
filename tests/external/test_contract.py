@@ -103,14 +103,12 @@ def test_each_host_uses_the_same_frozen_task_contract(tmp_path: Path, client: st
         )
         with pytest.raises(StateError, match="different session"):
             service.claim_task(task_id, client, "selected-model", "max", "session-2", "host")
-        supplement = service.search_task(attempt_id, "explains", None, 0, 1)
-        assert supplement["matches"][0]["path"] == "supplement.tex"
-        assert service.read_task(attempt_id, "supplement.tex", 1, 1, 0, 15)["next_offset"] == 15
-        assert service.read_task(attempt_id, "sources/supplement.tex", 1, 1, 0, 8000)["lines"][0]["text"].startswith(
-            "The supplement"
-        )
-        assert service.read_task(attempt_id, "manifest.json", 1, 1, 0, 8000)["lines"]
-        assert service.search_task(attempt_id, "supplement.tex", "manifest.json", 0, 1)["matches"]
+        exported = tmp_path / "export"
+        service.export_task(attempt_id, exported)
+        assert (exported / "sources/supplement.tex").read_text(encoding="utf-8").startswith("The supplement")
+        manifest = json.loads((exported / "manifest.json").read_text(encoding="utf-8"))
+        assert "supplement.tex" in {item["path"] for item in manifest["sources"]}
+        assert json.loads((exported / "task/schema.json").read_text(encoding="utf-8")) == claim["schema"]
         assert len(service.page_task(attempt_id, 1)["digest"]) == 64
         result = asyncio.run(
             service.submit_task(
@@ -129,11 +127,7 @@ def test_each_host_uses_the_same_frozen_task_contract(tmp_path: Path, client: st
             )
         )
         assert repeated["output_digest"] == result["output_digest"]
-        assert {event.event_type for event in service.database.list_events(run_id)} >= {
-            "tool.search",
-            "tool.read",
-            "tool.page",
-        }
+        assert {event.event_type for event in service.database.list_events(run_id)} >= {"tool.export", "tool.page"}
 
 
 def test_invalid_submission_requires_explicit_retry_and_never_creates_findings(tmp_path: Path) -> None:
@@ -292,8 +286,9 @@ def test_json_cli_reads_and_submits_from_stdin_across_processes(tmp_path: Path) 
     conflict_args = list(claim_args)
     conflict_args[-3] = "other-session"
     assert command(*conflict_args, success=False)["error"]["code"] == "invalid_state"
-    searched = command("task", "search", attempt_id, "--query", "explains")
-    assert searched["ok"] and searched["data"]["matches"][0]["path"] == "supplement.tex"
+    exported = command("task", "export", attempt_id, "--dir", str(tmp_path / "export"))
+    assert exported["ok"] and exported["data"]["attempt_id"] == attempt_id
+    assert (tmp_path / "export/sources/supplement.tex").read_text(encoding="utf-8").startswith("The supplement")
     output = _review_json("Read the supplement.")
     unescaped = output.replace("Read the supplement.", "Read the \\AA supplement.")
     checked = command(
@@ -356,9 +351,10 @@ def test_json_cli_reads_and_submits_from_stdin_across_processes(tmp_path: Path) 
     assert command("task", "list", run_id)["data"]["run_status"] == "awaiting_decision"
 
 
-def test_search_paging_long_line_and_bundle_path_boundary(tmp_path: Path) -> None:
+def test_export_writes_a_long_line_whole(tmp_path: Path) -> None:
     repo = _repo(tmp_path / "paper")
-    (repo / "supplement.tex").write_text("result " * 1500 + "counterevidence\n", encoding="utf-8")
+    text = "result " * 1500 + "counterevidence\n"
+    (repo / "supplement.tex").write_text(text, encoding="utf-8")
     subprocess.run(["git", "-C", str(repo), "add", "supplement.tex"], check=True, capture_output=True)
     subprocess.run(
         [
@@ -379,69 +375,8 @@ def test_search_paging_long_line_and_bundle_path_boundary(tmp_path: Path) -> Non
     _, task_id = _start(repo)
     with ScriptoriumService(repo) as service:
         claim = service.claim_task(task_id, "codex", "model", "max", "session", "host")
-        attempt_id = claim["attempt"].id
-        first = service.search_task(attempt_id, "result", "supplement.tex", 0, 1)
-        second = service.search_task(attempt_id, "result", "supplement.tex", first["next_cursor"], 1)
-        assert first["matches"][0]["column"] == 1
-        assert second["matches"][0]["column"] == 8
-        read = service.read_task(attempt_id, "supplement.tex", 1, 1, 0, 8000)
-        assert read["next_line"] == 1 and 0 < read["next_offset"] < 8000
-        continued = service.read_task(attempt_id, "supplement.tex", read["next_line"], 1, read["next_offset"], 8000)
-        assert "counterevidence" in continued["lines"][0]["text"]
-        accesses = [
-            event.payload
-            for event in service.database.list_events(claim["task"].run_id)
-            if event.event_type == "tool.read"
-        ]
-        for response, access in zip((read, continued), accesses):
-            assert access["path"] == response["path"]
-            assert access["source_digest"] == response["source_digest"]
-            assert access["ranges"] == [
-                {
-                    "line": item["line"],
-                    "start_offset": item["offset"],
-                    "end_offset": item["offset"] + len(item["text"]),
-                }
-                for item in response["lines"]
-            ]
-            assert (access["next_line"], access["next_offset"]) == (
-                response["next_line"],
-                response["next_offset"],
-            )
-        assert accesses[0]["ranges"] != accesses[1]["ranges"]
-        with pytest.raises(ConfigurationError, match="not a text source"):
-            service.read_task(attempt_id, "../scriptorium.toml", 1, 1, 0, 8000)
-
-
-def test_search_maps_casefolded_matches_to_source_columns(tmp_path: Path) -> None:
-    repo = _repo(tmp_path / "paper")
-    (repo / "supplement.tex").write_text("ß" * 150 + "Needle and Straße.\n", encoding="utf-8")
-    subprocess.run(["git", "-C", str(repo), "add", "supplement.tex"], check=True, capture_output=True)
-    subprocess.run(
-        [
-            "git",
-            "-C",
-            str(repo),
-            "-c",
-            "user.name=Test",
-            "-c",
-            "user.email=test@example.org",
-            "commit",
-            "-m",
-            "unicode",
-        ],
-        check=True,
-        capture_output=True,
-    )
-    _, task_id = _start(repo)
-    with ScriptoriumService(repo) as service:
-        attempt = service.claim_task(task_id, "codex", "model", "max", "session", "host")["attempt"]
-        needle = service.search_task(attempt.id, "needle", "supplement.tex", 0, 10)["matches"][0]
-        assert needle["column"] == 151
-        assert "Needle" in needle["excerpt"]
-        street = service.search_task(attempt.id, "STRASSE", "supplement.tex", 0, 10)["matches"][0]
-        assert street["column"] == 162
-        assert "Straße" in street["excerpt"]
+        service.export_task(claim["attempt"].id, tmp_path / "export")
+        assert (tmp_path / "export/sources/supplement.tex").read_text(encoding="utf-8") == text
 
 
 def test_retrieval_checks_requested_files_without_reloading_the_bundle(tmp_path: Path, monkeypatch) -> None:
@@ -461,15 +396,18 @@ def test_retrieval_checks_requested_files_without_reloading_the_bundle(tmp_path:
 
         monkeypatch.setattr(ArtifactStore, "digest_file", staticmethod(record_digest))
         monkeypatch.setattr(service.armarius, "_external_bundle", lambda *args: pytest.fail("full bundle reload"))
-        assert service.read_task(attempt.id, "supplement.tex", 1, 1, 0, 8000)["lines"]
-        assert service.search_task(attempt.id, "explains", "supplement.tex", 0, 10)["matches"]
         assert service.page_task(attempt.id, 1)["page"] == 1
+        assert set(touched) == {"manifest.json", "source-map.json", "navigation.json", "pages/page-0001.png"}
+        touched.clear()
+        assert service.export_task(attempt.id, tmp_path / "export")["file_count"]
+        # Export checks every file it writes and no page image.
         assert set(touched) == {
             "manifest.json",
             "source-map.json",
             "navigation.json",
+            "manuscript.pdf",
+            "sources/main.tex",
             "sources/supplement.tex",
-            "pages/page-0001.png",
         }
 
 
@@ -480,7 +418,10 @@ def test_retrieval_rejects_selected_corruption_and_submission_checks_the_whole_b
         claim = service.claim_task(task_id, "codex", "model", "max", "session", "host")
         workspace = repo / ".scriptorium" / "runs" / run_id / "bundle"
         (workspace / "sources/main.tex").write_text("damaged\n", encoding="utf-8")
-        assert service.read_task(claim["attempt"].id, "supplement.tex", 1, 1, 0, 8000)["lines"]
+        assert service.page_task(claim["attempt"].id, 1)["page"] == 1
+        with pytest.raises(InfrastructureError, match="frozen bundle file digest"):
+            service.export_task(claim["attempt"].id, tmp_path / "export")
+        assert not (tmp_path / "export").exists()
         with pytest.raises(InfrastructureError, match="bundle source digest"):
             asyncio.run(
                 service.submit_task(
@@ -489,9 +430,6 @@ def test_retrieval_rejects_selected_corruption_and_submission_checks_the_whole_b
                     _review_json("Review complete."),
                 )
             )
-        (workspace / "sources/supplement.tex").write_text("also damaged\n", encoding="utf-8")
-        with pytest.raises(InfrastructureError, match="frozen bundle file digest"):
-            service.read_task(claim["attempt"].id, "supplement.tex", 1, 1, 0, 8000)
         (workspace / "pages/page-0001.png").write_bytes(b"damaged")
         with pytest.raises(InfrastructureError, match="frozen bundle file digest"):
             service.page_task(claim["attempt"].id, 1)
@@ -505,7 +443,7 @@ def test_retrieval_rebuilds_a_missing_index_after_full_validation(tmp_path: Path
         index = service.artifacts.path_for(claim["bundle_digest"])
         assert index.is_file()
         index.unlink()
-        assert service.read_task(claim["attempt"].id, "supplement.tex", 1, 1, 0, 8000)["lines"]
+        assert service.page_task(claim["attempt"].id, 1)["page"] == 1
         assert index.is_file()
 
 
@@ -518,7 +456,10 @@ def test_retrieval_rejects_corrupt_frozen_metadata(tmp_path: Path, name: str) ->
         metadata = repo / ".scriptorium" / "runs" / run_id / "bundle" / name
         metadata.write_text("{}\n", encoding="utf-8")
         with pytest.raises(InfrastructureError, match="frozen bundle file digest"):
-            service.read_task(claim["attempt"].id, "supplement.tex", 1, 1, 0, 8000)
+            service.page_task(claim["attempt"].id, 1)
+        with pytest.raises(InfrastructureError, match="frozen bundle file digest"):
+            service.export_task(claim["attempt"].id, tmp_path / "export")
+        assert not (tmp_path / "export").exists()
 
 
 def test_retrieval_rejects_corrupt_bundle_index(tmp_path: Path) -> None:
@@ -528,10 +469,10 @@ def test_retrieval_rejects_corrupt_bundle_index(tmp_path: Path) -> None:
         claim = service.claim_task(task_id, "codex", "model", "max", "session", "host")
         service.artifacts.path_for(claim["bundle_digest"]).write_bytes(b"corrupt")
         with pytest.raises(InfrastructureError, match="bundle index is corrupt"):
-            service.read_task(claim["attempt"].id, "supplement.tex", 1, 1, 0, 8000)
+            service.page_task(claim["attempt"].id, 1)
 
 
-def test_read_preserves_both_sources_with_colliding_bundle_alias(tmp_path: Path) -> None:
+def test_export_preserves_both_sources_with_colliding_bundle_alias(tmp_path: Path) -> None:
     repo = _repo(tmp_path / "paper")
     nested = repo / "sources" / "supplement.tex"
     nested.parent.mkdir()
@@ -552,12 +493,18 @@ def test_read_preserves_both_sources_with_colliding_bundle_alias(tmp_path: Path)
     _, task_id = _start(repo)
     with ScriptoriumService(repo) as service:
         attempt = service.claim_task(task_id, "codex", "model", "max", "session", "host")["attempt"]
-        root = service.read_task(attempt.id, "sources/supplement.tex", 1, 1, 0, 8000)
-        assert root["source_path"] == "supplement.tex"
-        assert root["lines"][0]["text"] == "The supplement explains that result."
-        nested = service.read_task(attempt.id, "sources/sources/supplement.tex", 1, 1, 0, 8000)
-        assert nested["source_path"] == "sources/supplement.tex"
-        assert nested["lines"][0]["text"] == "Canonical nested source."
+        exported = tmp_path / "export"
+        service.export_task(attempt.id, exported)
+        source_map = json.loads((exported / "source-map.json").read_text(encoding="utf-8"))
+        read_paths = {item["source_path"]: item["read_path"] for item in source_map["sources"]}
+        assert read_paths["supplement.tex"] == "sources/supplement.tex"
+        assert read_paths["sources/supplement.tex"] == "sources/sources/supplement.tex"
+        assert (exported / "sources/supplement.tex").read_text(encoding="utf-8") == (
+            "The supplement explains that result.\n"
+        )
+        assert (exported / "sources/sources/supplement.tex").read_text(encoding="utf-8") == (
+            "Canonical nested source.\n"
+        )
 
 
 def test_frozen_navigation_damage_blocks_claim_before_any_attempt(tmp_path: Path) -> None:
@@ -716,9 +663,9 @@ def test_json_cli_freezes_a_review_brief_and_detects_a_committed_template(tmp_pa
         "--session-source",
         "host",
     )
-    shown = command("task", "show", claim["attempt"]["id"], "--part", "brief")
-    assert shown["next_command"] is None
-    assert json.loads(shown["text"]) == {
+    exported = command("task", "export", claim["attempt"]["id"], "--dir", str(tmp_path / "export"))
+    assert {"path": "task/brief.json", "digest": started["review_brief"]["digest"]} in exported["task_inputs"]
+    assert json.loads((tmp_path / "export/task/brief.json").read_text(encoding="utf-8")) == {
         **brief,
         "venue": None,
         "known_weaknesses": [],
@@ -743,7 +690,7 @@ def test_duplicate_start_on_a_real_project_is_refused_until_the_first_run_ends(t
         assert restarted.id != run_id
 
 
-def test_export_writes_the_frozen_bundle_and_records_each_export(tmp_path: Path) -> None:
+def test_export_writes_the_frozen_bundle_and_task_inputs_and_records_each_export(tmp_path: Path) -> None:
     repo = _repo(tmp_path / "paper")
     run_id, task_id = _start(repo)
     destination = tmp_path / "exported"
@@ -759,21 +706,22 @@ def test_export_writes_the_frozen_bundle_and_records_each_export(tmp_path: Path)
             "sources/main.tex",
             "sources/supplement.tex",
         }
+        inputs = {"task/prompt.md", "task/schema.json", "task/example.json"}
         assert response["directory"] == str(destination.resolve())
-        assert {item["path"] for item in response["files"]} == expected and not response["listing_truncated"]
-        assert "only task command" in response["note"] and "task read --anchor" in response["note"]
+        assert response["file_count"] == len(expected | inputs)
+        assert {item["path"] for item in response["task_inputs"]} == inputs
         bundle = Path(claim["bundle_path"])
         on_disk = {path.relative_to(destination).as_posix() for path in destination.rglob("*") if path.is_file()}
-        assert on_disk == expected
-        for item in response["files"]:
+        assert on_disk == expected | inputs
+        events = [e for e in service.database.list_events(run_id) if e.event_type == "tool.export"]
+        assert len(events) == 1 and events[0].entity_id == attempt_id
+        for item in events[0].payload["files"]:
             exported = destination / item["path"]
-            assert exported.read_bytes() == (bundle / item["path"]).read_bytes()
+            if item["path"] in expected:
+                assert exported.read_bytes() == (bundle / item["path"]).read_bytes()
             assert ArtifactStore.digest_file(exported) == item["digest"]
             assert exported.stat().st_mode & 0o777 == 0o444
         assert (destination / "sources/main.tex").read_bytes() == (repo / "main.tex").read_bytes()
-        events = [e for e in service.database.list_events(run_id) if e.event_type == "tool.export"]
-        assert len(events) == 1 and events[0].entity_id == attempt_id
-        assert events[0].payload["files"] == sorted(response["files"], key=lambda item: item["path"])
         # A used directory is never overwritten, and a refused export records nothing.
         with pytest.raises(ConfigurationError, match="empty directory"):
             service.export_task(attempt_id, destination)
@@ -783,9 +731,7 @@ def test_export_writes_the_frozen_bundle_and_records_each_export(tmp_path: Path)
         assert len([e for e in service.database.list_events(run_id) if e.event_type == "tool.export"]) == 2
         receipt = asyncio.run(service.submit_task(attempt_id, claim["input_digest"], _review_json("Checked.")))
         assert receipt["attempt"].status.value == "completed"
-        with pytest.raises(StateError, match="active attempt"):
-            service.export_task(attempt_id, tmp_path / "after")
-        assert not (tmp_path / "after").exists()
+        assert service.export_task(attempt_id, tmp_path / "after")["files_digest"] == response["files_digest"]
 
 
 def test_json_cli_export_command(tmp_path: Path) -> None:
@@ -803,8 +749,7 @@ def test_json_cli_export_command(tmp_path: Path) -> None:
     claim_args += ["--session-id", "s", "--session-source", "host"]
     attempt_id = command(*claim_args)[1]["data"]["attempt"]["id"]
     code, exported = command("task", "export", attempt_id, "--dir", str(destination))
-    assert code == 0 and exported["data"]["file_count"] == 6
-    assert len(json.dumps(exported, ensure_ascii=False).encode()) <= 7000
+    assert code == 0 and exported["data"]["file_count"] == 9
     assert (destination / "manuscript.pdf").stat().st_mode & 0o777 == 0o444
     code, refused = command("task", "export", attempt_id, "--dir", str(destination))
     assert code == 2 and refused["error"]["code"] == "configuration_error"

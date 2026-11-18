@@ -49,8 +49,7 @@ def test_collect_preserves_prepared_inputs_failures_retries_and_unknowns(tmp_pat
     assert (output / "host-records/001.bin").read_bytes() == host.read_bytes()
     assert (output / "artifacts" / rejected["attempt"].output_artifact_digest).read_text() == "{broken"
     for call in read_json(output / "inspection-calls.json"):
-        assert call["arguments"][1:3] in (["run", "status"], ["run", "report"])
-        assert len(call["stdout"].encode()) <= 7000
+        assert call["arguments"][1:3] == ["run", "report"]
     with ScriptoriumService(root) as service:
         assert service.render_report(run_id, "json") == before
     assert file_records(root / ".scriptorium/artifacts") == artifacts
@@ -186,7 +185,7 @@ def test_run_change_during_collection_rejects_mixed_report(tmp_path, monkeypatch
     def advancing_cli(project_path, arguments, records):
         nonlocal changed
         result = original_cli(project_path, arguments, records)
-        if "--part" in arguments and not changed:
+        if "report" in arguments and not changed:
             with ScriptoriumService(root) as service:
                 service.claim_task(task_id, "codex", "model", "low", "session", "host")
             changed = True

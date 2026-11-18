@@ -131,7 +131,7 @@ def test_cancel_waits_for_in_progress_operation_then_invalidates_claim(tmp_path)
         assert service.database.get_attempt(review["attempt"].id).status.value == "interrupted"
 
 
-@pytest.mark.parametrize("operation", ["read", "search", "page"])
+@pytest.mark.parametrize("operation", ["export", "page"])
 def test_cancel_waits_for_retrieval_and_records_access_before_cancellation(tmp_path, monkeypatch, operation):
     repo, run = _started(tmp_path)
     entered = threading.Event()
@@ -150,8 +150,7 @@ def test_cancel_waits_for_retrieval_and_records_access_before_cancellation(tmp_p
 
         monkeypatch.setattr(service.armarius, "_retrieval_bundle", held_bundle)
         actions = {
-            "read": lambda: service.read_task(review["attempt"].id, "main.tex", 1, 1, 0, 100),
-            "search": lambda: service.search_task(review["attempt"].id, "result", "main.tex", 0, 1),
+            "export": lambda: service.export_task(review["attempt"].id, tmp_path / "export"),
             "page": lambda: service.page_task(review["attempt"].id, 1),
         }
 
@@ -179,11 +178,12 @@ def test_cancel_waits_for_retrieval_and_records_access_before_cancellation(tmp_p
         assert result["cancelled"].status == RunStatus.CANCELLED
         events = [event.event_type for event in service.database.list_events(run.id)]
         assert events.index(f"tool.{operation}") < events.index("run.cancelled")
-        with pytest.raises(StateError, match="active attempt"):
-            actions[operation]()
+        if operation == "page":
+            with pytest.raises(StateError, match="active attempt"):
+                actions[operation]()
 
 
-def test_submit_is_busy_during_read_then_succeeds_after_access_event(tmp_path, monkeypatch):
+def test_submit_is_busy_during_export_then_succeeds_after_access_event(tmp_path, monkeypatch):
     repo, run = _started(tmp_path)
     entered = threading.Event()
     release = threading.Event()
@@ -200,22 +200,22 @@ def test_submit_is_busy_during_read_then_succeeds_after_access_event(tmp_path, m
 
         monkeypatch.setattr(service.armarius, "_retrieval_bundle", held_bundle)
 
-        def read():
-            result["read"] = service.read_task(review["attempt"].id, "main.tex", 1, 1, 0, 100)
+        def export():
+            result["export"] = service.export_task(review["attempt"].id, tmp_path / "export")
 
-        reader = threading.Thread(target=read)
+        reader = threading.Thread(target=export)
         reader.start()
         try:
             assert entered.wait(5)
             with ScriptoriumService(repo, manuscript_manager=PdfBuildingManuscriptManager(repo)) as contender:
-                with pytest.raises(StateError, match="already being changed by task read"):
+                with pytest.raises(StateError, match="already being changed by task export"):
                     submit(contender, review, {"summary": "Reviewed.", "findings": []})
         finally:
             release.set()
             reader.join(timeout=5)
-        assert result["read"]["lines"]
+        assert result["export"]["file_count"]
         with ScriptoriumService(repo, manuscript_manager=PdfBuildingManuscriptManager(repo)) as contender:
             receipt = submit(contender, review, {"summary": "Reviewed.", "findings": []})
         assert receipt["run_status"] == RunStatus.AWAITING_DECISION
         events = [event.event_type for event in service.database.list_events(run.id)]
-        assert events.index("tool.read") < events.index("attempt.finished")
+        assert events.index("tool.export") < events.index("attempt.finished")

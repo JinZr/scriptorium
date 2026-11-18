@@ -1,13 +1,11 @@
 import asyncio
 import json
-import shlex
 
 import pytest
 
 from scriptorium import cli
-from scriptorium.domain import AgentRole, canonical_json
+from scriptorium.domain import AgentRole
 from scriptorium.service import ScriptoriumService
-from scriptorium.tool_output import MAX_TOOL_RESPONSE_BYTES
 
 from ._support import PdfBuildingManuscriptManager, claim, make_repository, review_finding, submit
 
@@ -70,7 +68,7 @@ def test_findings_from_several_roles_on_shared_evidence_are_grouped_and_ordered(
         service.decide_findings([ids["Misspelled word in the result"]], "reject", "Covered by the headline finding.")
         report = service.render_report(run.id, "json")
         markdown = service.render_report(run.id, "markdown")
-        fragment = service.read_report(run.id, "findings_grouped")
+        part = service.read_report(run.id, "findings_grouped")
 
     grouped = report["findings_grouped"]
     substantive = ids["Typo obscures the claim"]
@@ -102,7 +100,7 @@ def test_findings_from_several_roles_on_shared_evidence_are_grouped_and_ordered(
         "decisive_questions": ["Does the reported result support the conclusion?"],
     }
 
-    assert json.loads(fragment["text"]) == grouped and fragment["next_command"] is None
+    assert part == grouped
     section = markdown.index("## Findings by group")
     assert section < markdown.index("\n## Findings\n")
     lines = [line for line in markdown[section:].split("\n## Findings\n")[0].splitlines() if line]
@@ -163,7 +161,7 @@ def test_a_substantive_repeat_of_a_stored_detail_finding_lifts_it_to_the_headlin
     ]
 
 
-def test_a_long_grouped_findings_part_is_bounded_and_traversable(tmp_path, monkeypatch, capsys):
+def test_a_long_grouped_findings_part_is_returned_whole(tmp_path, monkeypatch, capsys):
     repo = make_repository(tmp_path, roles=("copyedit",))
     with _service(repo) as service:
         run = asyncio.run(service.start_run("HEAD", "quick"))["run"]
@@ -175,22 +173,8 @@ def test_a_long_grouped_findings_part_is_bounded_and_traversable(tmp_path, monke
             [lambda review, title=title: _finding(review, 3, title) for title in titles],
         )
         full = service.render_report(run.id, "json")
-        content = canonical_json(full["findings_grouped"])
-        assert len(content.encode()) > 2 * MAX_TOOL_RESPONSE_BYTES
         assert len(full["findings_grouped"]["groups"]) == 1
         monkeypatch.chdir(repo)
         monkeypatch.setattr(cli, "_build_service", lambda _: service)
-        arguments = ["--json", "run", "report", run.id, "--part", "findings_grouped"]
-        text, fragments = "", 0
-        while arguments:
-            assert cli.main(arguments) == 0
-            raw = capsys.readouterr().out
-            assert len(raw.encode()) <= MAX_TOOL_RESPONSE_BYTES
-            fragment = json.loads(raw)["data"]
-            assert fragment["offset"] == len(text)
-            text += fragment["text"]
-            fragments += 1
-            arguments = shlex.split(fragment["next_command"])[1:] if fragment["next_command"] else None
-        assert fragments > 2
-        assert text == content
-        assert json.loads(text) == full["findings_grouped"]
+        assert cli.main(["--json", "run", "report", run.id, "--part", "findings_grouped"]) == 0
+        assert json.loads(capsys.readouterr().out)["data"] == full["findings_grouped"]

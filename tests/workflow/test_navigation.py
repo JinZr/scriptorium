@@ -9,16 +9,14 @@ from scriptorium.service import ScriptoriumService
 from ._support import MANUSCRIPT, PdfBuildingManuscriptManager, claim, make_repository
 
 
-def test_run_uses_frozen_navigation_after_worktree_changes(tmp_path):
+def test_run_uses_frozen_sources_after_worktree_changes(tmp_path):
     repo = make_repository(tmp_path, roles=("substantive_review",))
     with ScriptoriumService(repo, manuscript_manager=PdfBuildingManuscriptManager(repo)) as service:
         run = asyncio.run(service.start_run("HEAD", "quick"))["run"]
         review = claim(service, run.id, AgentRole.SUBSTANTIVE_REVIEW)
-        original = service.read_task(review["attempt"].id, "main.tex", 1, 4, 0, 8000)
         (repo / "main.tex").write_text("changed working tree\n", encoding="utf-8")
-        frozen = service.read_task(review["attempt"].id, "main.tex", 1, 4, 0, 8000)
-        assert frozen == original
-        assert "The result is teh clear." in "".join(line["text"] for line in frozen["lines"])
+        service.export_task(review["attempt"].id, tmp_path / "export")
+        assert (tmp_path / "export/sources/main.tex").read_text(encoding="utf-8") == MANUSCRIPT
         assert MANUSCRIPT != (repo / "main.tex").read_text()
 
 

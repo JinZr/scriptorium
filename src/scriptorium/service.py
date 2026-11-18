@@ -1,10 +1,8 @@
 from __future__ import annotations
 
-from collections import Counter, deque
 from contextlib import ExitStack, contextmanager
 from dataclasses import asdict, is_dataclass, replace
 from datetime import datetime, timezone
-import difflib
 from enum import Enum
 import fcntl
 from hashlib import sha256
@@ -38,23 +36,14 @@ from .domain import (
     Task,
     TaskStatus,
     VerificationResult,
+    canonical_json,
+    digest_json,
     new_id,
     utc_now,
 )
 from .errors import ConfigurationError, DuplicateRunError, InfrastructureError, NotFoundError, StateError
 from .finding_groups import finding_groups, markdown_lines as markdown_finding_groups
-from .manuscript import (
-    EQUATION_ENVIRONMENTS,
-    FIGURE_ENVIRONMENTS,
-    QUANTITY_COMMANDS,
-    REFERENCE_COMMANDS,
-    TABLE_ENVIRONMENTS,
-    ManuscriptManager,
-    export_files,
-    export_root,
-    page_text,
-    render_page_view,
-)
+from .manuscript import ManuscriptManager, export_files, export_root, page_text, render_page_view
 from .schemas import (
     SCHEMA_MODELS,
     UNIVERSAL_LINE_TERMINATORS,
@@ -63,19 +52,7 @@ from .schemas import (
     ScientificReviewOutput,
 )
 from .storage import ConflictError, Database, NotFoundError as StorageNotFoundError, StorageError
-from .tool_output import (
-    REPORT_PARTS,
-    bound_export,
-    bound_nav,
-    bound_read,
-    bound_search,
-    page_text_fragment,
-    report_fragment,
-    require_bounded,
-    run_list,
-    run_overview,
-    task_view,
-)
+from .tool_output import REPORT_PARTS, run_list, run_overview, task_view
 from .workflow import Armarius, task_input_digest
 
 RUN_LIST_MAX_LIMIT = 100
@@ -537,7 +514,6 @@ class ScriptoriumService:
         bundle = self.armarius._external_bundle(run, metadata)
         prompt = self.armarius._load_prompt_artifact(attempt.prompt_digest)
         schema = self.armarius._load_schema_artifact(run, metadata["schema_kind"], attempt.schema_digest)
-        source_map_bytes = (bundle.workspace / "source-map.json").read_bytes()
         example = self.armarius.frozen_output_example(metadata)
         return {
             "run_id": run.id,
@@ -550,20 +526,14 @@ class ScriptoriumService:
             "bundle_path": str(bundle.workspace),
             "navigation_digest": ArtifactStore.digest_file(bundle.workspace / "navigation.json"),
             "source_map": bundle.anchor_map.model_dump(mode="json"),
-            "source_map_text": source_map_bytes.decode("utf-8"),
-            "source_map_digest": ArtifactStore.digest_bytes(source_map_bytes),
             "brief": self.armarius.review_brief(run),
             "example": example,
             "example_digest": metadata.get("example_digest"),
         }
 
-    def task_view(self, context: dict[str, Any], part: str | None = None, offset: int = 0):
-        response = task_view(context, part, offset)
-        access = {"part": part or "overview", "input_digest": context["input_digest"]}
-        if part is not None:
-            access.update(digest=response["digest"], start_offset=offset, end_offset=offset + len(response["text"]))
-        self._record_access(context["run_id"], context["attempt"].id, "show", access)
-        return response
+    @staticmethod
+    def task_view(context: dict[str, Any]) -> dict[str, Any]:
+        return task_view(context)
 
     async def submit_task(self, attempt_id: str, input_digest: str, output_text: str) -> dict[str, Any]:
         if len(output_text.encode("utf-8")) > 2_000_000:
@@ -626,247 +596,18 @@ class ScriptoriumService:
         with self._run_operation(task.run_id, operation, wait=True):
             yield
 
-    def _readable_task(self, attempt_id: str):
+    def _task_bundle(self, attempt_id: str, *, active: bool):
         attempt = self._storage(self.database.get_attempt, attempt_id)
         task = self._storage(self.database.get_task, attempt.task_id)
         run = self._storage(self.database.get_run, task.run_id)
         self.armarius.require_external_run(run)
-        if attempt.status != AttemptStatus.RUNNING or task.status != TaskStatus.RUNNING:
-            raise StateError("retrieval requires an active attempt")
+        if active and (attempt.status != AttemptStatus.RUNNING or task.status != TaskStatus.RUNNING):
+            raise StateError("rendering pages requires an active attempt")
         metadata = self._storage(self.database.get_external_task, task.id)
+        if attempt.schema_digest != metadata["schema_digest"]:
+            raise InfrastructureError("attempt is not bound to its frozen task")
         bundle, files = self.armarius._retrieval_bundle(run, metadata)
-        return attempt, task, bundle, files
-
-    def read_task(
-        self,
-        attempt_id: str,
-        path: str,
-        start_line: int,
-        max_lines: int,
-        offset: int,
-        max_chars: int,
-        end_line: int | None = None,
-        anchor: bool = False,
-    ):
-        with self._retrieval_operation(attempt_id, "task read"):
-            return self._read_task(attempt_id, path, start_line, max_lines, offset, max_chars, end_line, anchor)
-
-    def _read_task(
-        self,
-        attempt_id: str,
-        path: str,
-        start_line: int,
-        max_lines: int,
-        offset: int,
-        max_chars: int,
-        end_line: int | None,
-        anchor: bool,
-    ):
-        attempt, task, bundle, files = self._readable_task(attempt_id)
-        if start_line < 1 or not 1 <= max_lines <= 100 or offset < 0 or not 1 <= max_chars <= 8000:
-            raise ConfigurationError("invalid read range or size")
-        if end_line is not None and end_line < start_line:
-            raise ConfigurationError("end line cannot precede start line")
-        source = next((item for item in bundle.anchor_map.sources if item.read_path == path), None)
-        if source is None:
-            source = next((item for item in bundle.anchor_map.sources if item.source_path == path), None)
-        if path in _BUNDLE_METADATA:
-            source = None
-            read_path = bundle.workspace / path
-            source_digest = files[path]["digest"]
-        elif source is not None and source.text_anchorable:
-            read_path = bundle.workspace / source.read_path
-            source_digest = source.source_digest
-        else:
-            raise _unknown_text_path(path, bundle.anchor_map)
-        self.armarius._verify_retrieval_file(
-            bundle.workspace, files, read_path.relative_to(bundle.workspace).as_posix()
-        )
-        window = max_lines if end_line is None else min(max_lines, end_line - start_line + 1)
-        pieces, next_line, next_offset = _read_text_window(read_path, start_line, window, offset, max_chars)
-        if end_line is not None and next_line is not None and next_line > end_line:
-            next_line = next_offset = None
-        response = bound_read(
-            {
-                "path": path,
-                "source_path": source.source_path if source is not None else None,
-                "source_digest": source_digest,
-                "lines": pieces,
-                "next_line": next_line,
-                "next_offset": next_offset,
-            },
-            attempt_id,
-            max_lines,
-            max_chars,
-            end_line,
-            anchor,
-        )
-        self._record_access(
-            task.run_id,
-            attempt.id,
-            "read",
-            {
-                "path": path,
-                "source_path": response["source_path"],
-                "source_digest": source_digest,
-                "ranges": [
-                    {
-                        "line": item["line"],
-                        "start_offset": item["offset"],
-                        "end_offset": item["offset"] + len(item["text"]),
-                    }
-                    for item in response["lines"]
-                ],
-                "next_line": response["next_line"],
-                "next_offset": response["next_offset"],
-            },
-        )
-        return response
-
-    def search_task(
-        self,
-        attempt_id: str,
-        query: str,
-        path: str | None,
-        cursor: int,
-        limit: int,
-        context: int = 0,
-        include_metadata: bool = False,
-    ):
-        with self._retrieval_operation(attempt_id, "task search"):
-            return self._search_task(attempt_id, query, path, cursor, limit, context, include_metadata)
-
-    def _search_task(
-        self,
-        attempt_id: str,
-        query: str,
-        path: str | None,
-        cursor: int,
-        limit: int,
-        context: int,
-        include_metadata: bool,
-    ):
-        attempt, task, bundle, files = self._readable_task(attempt_id)
-        if not query or len(query) > 200 or cursor < 0 or not 1 <= limit <= 50 or not 0 <= context <= 3:
-            raise ConfigurationError("invalid search query, cursor, limit, or context")
-        search_items, path = self._search_items(bundle, files, path, include_metadata)
-        matches = []
-        total_matches = 0
-        for source_path, read_path, source_digest in search_items:
-            self.armarius._verify_retrieval_file(
-                bundle.workspace, files, read_path.relative_to(bundle.workspace).as_posix()
-            )
-            for match in _scan_matches(read_path, query, cursor - total_matches, limit - len(matches), context):
-                if match is None:
-                    total_matches += 1
-                    continue
-                matches.append({"path": source_path, **match, "source_digest": source_digest})
-                total_matches += 1
-        response = bound_search(
-            matches, total_matches, attempt_id, query, path, cursor, limit, context, include_metadata
-        )
-        self._record_access(
-            task.run_id,
-            attempt.id,
-            "search",
-            {
-                "query": query,
-                "path": path,
-                "include_metadata": include_metadata,
-                "matches": [_search_access(item) for item in response["matches"]],
-                "next_cursor": response["next_cursor"],
-            },
-        )
-        return response
-
-    @staticmethod
-    def _search_items(bundle, files, path: str | None, include_metadata: bool):
-        sources = [item for item in bundle.anchor_map.sources if item.text_anchorable]
-        source_items = [(item.source_path, bundle.workspace / item.read_path, item.source_digest) for item in sources]
-        metadata_items = [(name, bundle.workspace / name, files[name]["digest"]) for name in _BUNDLE_METADATA]
-        if path is None:
-            # Generated metadata repeats every label and citation, so whole-bundle searches omit it by default.
-            return source_items + (metadata_items if include_metadata else []), None
-        path_items = {item[0]: item for item in source_items}
-        path_items.update((source.read_path, item) for source, item in zip(sources, source_items))
-        path_items.update((item[0], item) for item in metadata_items)
-        item = path_items.get(path)
-        if item is None:
-            raise _unknown_text_path(path, bundle.anchor_map)
-        return [item], item[0] if path_items[item[0]] == item else path
-
-    def nav_task(
-        self,
-        attempt_id: str,
-        commands: list[str] | None = None,
-        query: str | None = None,
-        path: str | None = None,
-        cursor: int = 0,
-        limit: int = 50,
-    ):
-        with self._retrieval_operation(attempt_id, "task nav"):
-            return self._nav_task(attempt_id, commands or [], query, path, cursor, limit)
-
-    def _nav_task(self, attempt_id: str, commands: list[str], query: str | None, path: str | None, cursor, limit):
-        attempt, task, bundle, files = self._readable_task(attempt_id)
-        if cursor < 0 or not 1 <= limit <= 100 or (query is not None and not 1 <= len(query) <= 200):
-            raise ConfigurationError("invalid navigation query, cursor, or limit")
-        selected = _navigation_commands(commands)
-        source_path = None
-        if path is not None:
-            # Read paths take priority over a colliding source path, exactly as in task read.
-            source = next((item for item in bundle.anchor_map.sources if item.read_path == path), None)
-            if source is None:
-                source = next((item for item in bundle.anchor_map.sources if item.source_path == path), None)
-            if source is None:
-                raise _unknown_text_path(path, bundle.anchor_map)
-            source_path = source.source_path
-        if "navigation.json" not in files:
-            raise StateError("this run has no frozen navigation index")
-        navigation = self.armarius._verify_retrieval_file(bundle.workspace, files, "navigation.json")
-        index = json.loads(navigation.read_text(encoding="utf-8"))
-        entries = index["entries"]
-        indexed = set(index.get("commands", _LEGACY_NAVIGATION_COMMANDS))
-        if selected is not None and not selected <= indexed:
-            raise ConfigurationError(
-                "this run's navigation index predates table, figure, equation, and quantity entries; "
-                "use task search to locate them"
-            )
-        folded = query.casefold() if query is not None else None
-        matched = [
-            entry
-            for entry in entries
-            if (selected is None or entry["command"] in selected)
-            and (source_path is None or entry["source_path"] == source_path)
-            and (folded is None or folded in entry["value"].casefold())
-        ]
-        # A repeated filter selects nothing new; keep one of each so continuations stay bounded.
-        filters = {"commands": list(dict.fromkeys(commands)), "query": query, "path": path}
-        response = bound_nav(
-            [_navigation_entry(entry) for entry in matched[cursor : cursor + limit]],
-            len(matched),
-            dict(Counter(entry["command"] for entry in matched)),
-            attempt_id,
-            filters,
-            cursor,
-            limit,
-            {item.source_path: index for index, item in enumerate(bundle.anchor_map.sources)},
-        )
-        self._record_access(
-            task.run_id,
-            attempt.id,
-            "nav",
-            {
-                **filters,
-                # Record the index entries themselves; returned entries may omit fields to fit the bound.
-                "entries": [
-                    {key: entry[key] for key in ("command", "source_path", "start_line", "end_line")}
-                    for entry in matched[cursor : cursor + len(response["entries"])]
-                ],
-                "next_cursor": response["next_cursor"],
-            },
-        )
-        return response
+        return attempt, task, run, metadata, bundle, files
 
     def page_task(
         self,
@@ -876,24 +617,22 @@ class ScriptoriumService:
         scale: float | None = None,
         crop: tuple[float, float, float, float] | None = None,
         text: bool = False,
-        offset: int = 0,
-        text_digest: str | None = None,
     ):
-        _validate_page_view(scale, crop, text, offset, text_digest)
+        _validate_page_view(scale, crop, text)
         with self._retrieval_operation(attempt_id, "task page"):
-            attempt, task, bundle, files = self._readable_task(attempt_id)
+            attempt, task, _, _, bundle, files = self._task_bundle(attempt_id, active=True)
             location, page = self._page_location(bundle, page_number, document)
             if text:
-                request = {"number": page_number, "document": document, "offset": offset, "text_digest": text_digest}
-                return self._page_text(attempt, task, bundle, files, location, request)
-            self.armarius._verify_retrieval_file(bundle.workspace, files, page.read_path)
-            response = {**location, "path": str(bundle.workspace / page.read_path), "digest": page.page_digest}
-            access = {**location, "read_path": page.read_path}
-            if scale is not None or crop is not None:
-                view = self._page_view(task.run_id, bundle, files, location["page"], scale or 1.5, crop)
-                response.update(path=view.pop("path"), view=view)
-                access["view"] = view
-            response = require_bounded(response)
+                response = self._page_text(task.run_id, bundle, files, location)
+                access = {**location, "text": {key: response[key] for key in ("digest", "path")}}
+            else:
+                self.armarius._verify_retrieval_file(bundle.workspace, files, page.read_path)
+                response = {**location, "path": str(bundle.workspace / page.read_path), "digest": page.page_digest}
+                access = {**location, "read_path": page.read_path}
+                if scale is not None or crop is not None:
+                    view = self._page_view(task.run_id, bundle, files, location["page"], scale or 1.5, crop)
+                    response.update(path=view.pop("path"), view=view)
+                    access["view"] = view
             self._record_access(task.run_id, attempt.id, "page", access)
             return response
 
@@ -924,60 +663,109 @@ class ScriptoriumService:
     def _page_view(self, run_id: str, bundle, files, page: int, scale: float, crop) -> dict[str, Any]:
         pdf = self.armarius._verify_retrieval_file(bundle.workspace, files, "manuscript.pdf")
         view = {"scale": scale, "crop": list(crop) if crop is not None else None}
-        views = self.state_dir / "runs" / run_id / "page-views"
-        pending = views / ".pending.png"
-        render_page_view(pdf, page, scale, crop, pending)
+        digest, path = self._keep_page_view(
+            run_id, ".png", lambda pending: render_page_view(pdf, page, scale, crop, pending)
+        )
+        return {**view, "digest": digest, "path": str(path)}
+
+    def _page_text(self, run_id: str, bundle, files, location: dict[str, Any]) -> dict[str, Any]:
+        pdf = self.armarius._verify_retrieval_file(bundle.workspace, files, "manuscript.pdf")
+        content = page_text(pdf, location["page"]).encode("utf-8")
+
+        def write(pending: Path) -> None:
+            pending.parent.mkdir(parents=True, exist_ok=True)
+            pending.write_bytes(content)
+
+        digest, path = self._keep_page_view(run_id, ".txt", write)
+        return {
+            **location,
+            "text_layer": "pdf",
+            "evidence": False,
+            "path": str(path),
+            "digest": digest,
+            "bytes": len(content),
+            "note": PAGE_TEXT_NOTE,
+        }
+
+    def _keep_page_view(self, run_id: str, suffix: str, write) -> tuple[str, Path]:
         # A returned path keeps its bytes: views are named by digest, never overwritten, and bounded per run.
+        views = self.state_dir / "runs" / run_id / "page-views"
+        pending = views / f".pending{suffix}"
+        write(pending)
         digest = ArtifactStore.digest_file(pending)
-        destination = views / f"{digest}.png"
+        destination = views / f"{digest}{suffix}"
         if destination.exists():
             pending.unlink()
-            return {**view, "digest": digest, "path": str(destination)}
-        kept = sum(path.stat().st_size for path in views.glob("*.png") if not path.name.startswith("."))
+            return digest, destination
+        kept = sum(
+            path.stat().st_size
+            for path in views.iterdir()
+            if path.suffix in {".png", ".txt"} and not path.name.startswith(".")
+        )
         if kept + pending.stat().st_size > MAX_RUN_PAGE_VIEW_BYTES:
             pending.unlink()
             limit = MAX_RUN_PAGE_VIEW_BYTES // (1024 * 1024)
             raise StateError(f"page views for this run reached the {limit} MiB limit; reuse an earlier view")
         pending.replace(destination)
-        return {**view, "digest": digest, "path": str(destination)}
-
-    def _page_text(self, attempt, task, bundle, files, location, request):
-        pdf = self.armarius._verify_retrieval_file(bundle.workspace, files, "manuscript.pdf")
-        content = page_text(pdf, location["page"])
-        offset = request["offset"]
-        response = page_text_fragment(
-            location, content, offset, attempt.id, request["number"], request["document"], request["text_digest"]
-        )
-        self._record_access(
-            task.run_id,
-            attempt.id,
-            "page_text",
-            {
-                **location,
-                "text_digest": response["text_digest"],
-                "start_offset": offset,
-                "end_offset": offset + len(response["text"]),
-            },
-        )
-        return response
+        return digest, destination
 
     def export_task(self, attempt_id: str, directory: str | Path):
         with self._retrieval_operation(attempt_id, "task export"):
             return self._export_task(attempt_id, directory)
 
     def _export_task(self, attempt_id: str, directory: str | Path):
-        attempt, task, bundle, files = self._readable_task(attempt_id)
+        attempt, task, run, metadata, bundle, files = self._task_bundle(attempt_id, active=False)
         root = export_root(directory)
         names = self._export_names(bundle, files)
-        listing = [{"path": name, "digest": files[name]["digest"]} for name in names]
-        response = bound_export(attempt.id, str(root), listing, sum(files[name]["size"] for name in names))
+        collisions = [name for name in names if name.split("/")[0] == TASK_INPUT_DIRECTORY]
+        if collisions:
+            raise StateError(f"frozen bundle path collides with the exported task inputs: {collisions[0]}")
+        inputs = self._task_inputs(run, attempt, metadata)
+        listing = sorted(
+            [
+                *({"path": name, "digest": files[name]["digest"]} for name in names),
+                *({"path": name, "digest": digest} for name, (_, digest) in inputs.items()),
+            ],
+            key=lambda item: item["path"],
+        )
+
+        def read(name: str) -> bytes:
+            return inputs[name][0] if name in inputs else self._frozen_bytes(bundle, files, name)
 
         def record() -> None:
             payload = {"directory": str(root), "bundle_digest": attempt.bundle_digest, "files": listing}
             self._record_access(task.run_id, attempt.id, "export", payload)
 
-        export_files(root, names, lambda name: self._frozen_bytes(bundle, files, name), record)
-        return response
+        export_files(root, [item["path"] for item in listing], read, record)
+        return {
+            "attempt_id": attempt.id,
+            "directory": str(root),
+            "file_count": len(listing),
+            "total_bytes": sum(files[name]["size"] for name in names) + sum(len(data) for data, _ in inputs.values()),
+            "files_digest": digest_json(listing),
+            "task_inputs": [{"path": name, "digest": digest} for name, (_, digest) in inputs.items()],
+        }
+
+    def _task_inputs(self, run: Run, attempt: Attempt, metadata: dict[str, Any]) -> dict[str, tuple[bytes, str]]:
+        """Return this attempt's frozen task inputs by export path, each checked against its recorded digest."""
+        schema = self.armarius._load_schema_artifact(run, metadata["schema_kind"], attempt.schema_digest)
+        inputs = {
+            f"{TASK_INPUT_DIRECTORY}/prompt.md": (
+                self.armarius._load_prompt_artifact(attempt.prompt_digest).encode("utf-8"),
+                attempt.prompt_digest,
+            ),
+            f"{TASK_INPUT_DIRECTORY}/schema.json": (canonical_json(schema).encode("utf-8"), attempt.schema_digest),
+        }
+        brief = self.armarius.review_brief(run)
+        if brief is not None:
+            inputs[f"{TASK_INPUT_DIRECTORY}/brief.json"] = (brief["text"].encode("utf-8"), brief["digest"])
+        example = self.armarius.frozen_output_example(metadata)
+        if example is not None:
+            inputs[f"{TASK_INPUT_DIRECTORY}/example.json"] = (example.encode("utf-8"), metadata["example_digest"])
+        for name, (data, digest) in inputs.items():
+            if ArtifactStore.digest_bytes(data) != digest:
+                raise InfrastructureError(f"frozen task input does not match its recorded digest: {name}")
+        return inputs
 
     @staticmethod
     def _export_names(bundle, files) -> list[str]:
@@ -1120,13 +908,12 @@ class ScriptoriumService:
             self._storage(self.database.update_run, run.id, RunStatus.COMPLETED)
         return applied
 
-    def read_report(self, run_id: str, part: str, offset: int = 0, report_digest: str | None = None):
+    def read_report(self, run_id: str, part: str):
         if part not in REPORT_PARTS:
             raise ConfigurationError(f"unknown report part: {part}")
         run = self._storage(self.database.get_run, run_id)
         with self._run_operation(run.id, "run report"):
-            report = self.render_report(run_id, "json")
-            return report_fragment(run_id, report, part, offset, report_digest)
+            return self.render_report(run_id, "json")[part]
 
     def render_report(self, run_id: str, format: str) -> str | dict[str, Any]:
         if format not in {"markdown", "json"}:
@@ -1631,189 +1418,23 @@ class ScriptoriumService:
 
 
 _BUNDLE_METADATA = ("manifest.json", "navigation.json", "source-map.json")
-_CONTEXT_CHARS = 200
+TASK_INPUT_DIRECTORY = "task"
 MAX_RUN_PAGE_VIEW_BYTES = 512 * 1024 * 1024
-
-
-def _unknown_text_path(path: str, anchor_map) -> ConfigurationError:
-    text_paths = [item.read_path for item in anchor_map.sources if item.text_anchorable]
-    candidates = sorted(
-        [*text_paths, *_BUNDLE_METADATA],
-        key=lambda candidate: (-difflib.SequenceMatcher(None, path, candidate).ratio(), candidate),
-    )[:3]
-    message = f"path is not a text source in the frozen bundle: {path[:200]}"
-    if any(item.source_path == path or item.read_path == path for item in anchor_map.sources):
-        message += "; it is a frozen non-text source, so inspect the rendered pages with task page"
-    return ConfigurationError(f"{message}; closest text read paths: {', '.join(candidates)}")
-
-
-NAVIGATION_GROUPS = {
-    "heading": ("part", "chapter", "section", "subsection", "subsubsection", "paragraph", "subparagraph"),
-    "reference": REFERENCE_COMMANDS,
-    "citation": ("cite", "citep", "citet", "autocite", "parencite", "textcite"),
-    "label": ("label",),
-    "caption": ("caption",),
-    "graphics": ("includegraphics",),
-}
-# Indexes written before table, equation, and quantity entries carry no command list and hold only these.
-_LEGACY_NAVIGATION_COMMANDS = frozenset(name for names in NAVIGATION_GROUPS.values() for name in names)
-NAVIGATION_GROUPS.update(
-    table=TABLE_ENVIRONMENTS,
-    figure=FIGURE_ENVIRONMENTS,
-    equation=EQUATION_ENVIRONMENTS,
-    quantity=("quantity", *QUANTITY_COMMANDS),
+PAGE_TEXT_NOTE = (
+    "The PDF text layer is a reading aid and never evidence: extraction can reorder or drop text. "
+    "Quote manuscript text from the frozen sources and cite pages of manuscript.pdf."
 )
-_NAVIGATION_VALUE_CHARS = 500
-_NAVIGATION_CANDIDATES = 10
 
 
-def _navigation_commands(commands: list[str]) -> set[str] | None:
-    if not commands:
-        return None
-    known = {name for names in NAVIGATION_GROUPS.values() for name in names}
-    selected: set[str] = set()
-    for command in commands:
-        if command in NAVIGATION_GROUPS:
-            selected.update(NAVIGATION_GROUPS[command])
-        elif command in known:
-            selected.add(command)
-        else:
-            choices = ", ".join([*NAVIGATION_GROUPS, *sorted(known - set(NAVIGATION_GROUPS))])
-            raise ConfigurationError(f"unknown navigation command {command[:50]!r}; use one of: {choices}")
-    return selected
-
-
-def _navigation_entry(entry: dict[str, Any]) -> dict[str, Any]:
-    # Cut long literals and long candidate lists; the response bound trims candidates further by encoded size.
-    trimmed = dict(entry)
-    if len(entry["value"]) > _NAVIGATION_VALUE_CHARS:
-        trimmed.update(value=entry["value"][:_NAVIGATION_VALUE_CHARS], value_truncated=True)
-    candidates = entry.get("candidate_paths") or []
-    if len(candidates) > _NAVIGATION_CANDIDATES:
-        trimmed.update(
-            candidate_paths=candidates[:_NAVIGATION_CANDIDATES],
-            candidate_count=len(candidates),
-            candidate_paths_truncated=True,
-        )
-    return trimmed
-
-
-def _validate_page_view(scale, crop, text: bool, offset: int, text_digest: str | None) -> None:
+def _validate_page_view(scale, crop, text: bool) -> None:
     if text and (scale is not None or crop is not None):
         raise ConfigurationError("--text cannot be combined with --scale or --crop")
-    if (offset or text_digest is not None) and not text:
-        raise ConfigurationError("--offset and --text-digest require --text")
-    if offset < 0:
-        raise ConfigurationError("offset must not be negative")
     if scale is not None and not 0.5 <= scale <= 4.0:
         raise ConfigurationError("scale must be between 0.5 and 4.0")
     if crop is not None:
         x0, y0, x1, y1 = crop
         if not (0 <= x0 < x1 <= 1 and 0 <= y0 < y1 <= 1):
             raise ConfigurationError("crop must be x0,y0,x1,y1 fractions with 0 <= x0 < x1 <= 1 and 0 <= y0 < y1 <= 1")
-
-
-def _scan_matches(path: Path, query: str, skip: int, take: int, context: int):
-    """Yield one item per match: a match record while inside the requested page, otherwise None."""
-    folded_query = query.casefold()
-    before: deque[dict[str, Any]] = deque(maxlen=context)
-    awaiting: list[dict[str, Any]] = []
-    with path.open(encoding="utf-8") as source_file:
-        for number, line in enumerate(source_file, 1):
-            line = line.removesuffix("\n")
-            if context:
-                awaiting = _attach_following(awaiting, number, line, context)
-            folded = line.casefold()
-            source_offsets = (
-                [index for index, character in enumerate(line) for _ in character.casefold()]
-                if len(folded) != len(line)
-                else None
-            )
-            pending = []
-            position = folded.find(folded_query)
-            while position >= 0:
-                if skip <= 0 < take:
-                    source_position = source_offsets[position] if source_offsets is not None else position
-                    excerpt_start = max(0, source_position - 100)
-                    match = {"line": number, "column": source_position + 1}
-                    match["excerpt"] = line[excerpt_start : excerpt_start + 300]
-                    if context:
-                        match.update(before=list(before), after=[])
-                    pending.append(match)
-                    take -= 1
-                else:
-                    yield None
-                skip -= 1
-                position = folded.find(folded_query, position + max(1, len(folded_query)))
-            awaiting.extend(pending)
-            if context:
-                before.append({"line": number, "text": line[:_CONTEXT_CHARS]})
-            yield from pending
-
-
-def _attach_following(awaiting: list[dict[str, Any]], number: int, line: str, context: int):
-    for match in awaiting:
-        match["after"].append({"line": number, "text": line[:_CONTEXT_CHARS]})
-    return [match for match in awaiting if len(match["after"]) < context]
-
-
-def _search_access(match: dict[str, Any]) -> dict[str, Any]:
-    access = {"path": match["path"], "line": match["line"], "source_digest": match["source_digest"]}
-    if "before" in match:
-        numbers = [match["line"], *(item["line"] for item in (*match["before"], *match["after"]))]
-        access["context"] = {"start_line": min(numbers), "end_line": max(numbers)}
-    return access
-
-
-def _read_text_window(path: Path, start_line: int, max_lines: int, offset: int, max_chars: int):
-    pieces = []
-    remaining = max_chars
-    next_line = next_offset = None
-    with path.open(encoding="utf-8") as source:
-        current_line = 1
-        while current_line < start_line:
-            fragment = source.readline(8192)
-            if not fragment:
-                raise ConfigurationError("start line is beyond the source")
-            if fragment.endswith("\n"):
-                current_line += 1
-
-        for number in range(start_line, start_line + max_lines):
-            if number == start_line:
-                start = source.tell()
-                if not source.read(1):
-                    raise ConfigurationError("start line is beyond the source")
-                source.seek(start)
-            position = offset if number == start_line else 0
-            skipped = 0
-            while skipped < position:
-                fragment = source.readline(min(8192, position - skipped))
-                if not fragment or fragment.endswith("\n"):
-                    raise ConfigurationError("offset is beyond the line")
-                skipped += len(fragment)
-
-            fragment = source.readline(remaining + 1)
-            if not fragment:
-                if number == start_line and position == 0:
-                    raise ConfigurationError("start line is beyond the source")
-                if number == start_line:
-                    pieces.append({"line": number, "offset": position, "text": ""})
-                break
-            ended = fragment.endswith("\n")
-            content = fragment[:-1] if ended else fragment
-            if len(content) > remaining:
-                pieces.append({"line": number, "offset": position, "text": content[:remaining]})
-                next_line, next_offset = number, position + remaining
-                break
-            pieces.append({"line": number, "offset": position, "text": content})
-            remaining -= len(content)
-            if not ended:
-                break
-            if remaining == 0 or number == start_line + max_lines - 1:
-                if source.read(1):
-                    next_line, next_offset = number + 1, 0
-                break
-    return pieces, next_line, next_offset
 
 
 def _plain(value: Any) -> Any:

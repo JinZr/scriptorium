@@ -28,11 +28,9 @@ class _ArgumentParser(argparse.ArgumentParser):
 _BRIEF_LIMIT_BYTES = 256_000
 _TASK_DESCRIPTION = """Use a frozen task from the current host model session.
 
-Typical order: claim, show (overview), show --part prompt|schema|source-map|brief|example, nav, search, read, page,
-then submit. Successful JSON responses for claim, show, read, search, nav, page, and export stay within
-7,000 UTF-8 bytes. Follow each next_command unchanged until it is null to finish a traversal. For long
-sources, export writes the frozen bundle files to a directory (a recorded side effect on disk) for reading
-convenience; evidence anchors still come from frozen paths, digests, and lines."""
+Typical order: claim, export (frozen sources, navigation, source map, PDF, and this attempt's prompt, schema,
+brief, and example under task/), page for rendered pages, then submit --check and submit. Read the exported
+files with the host's own tools; evidence anchors cite frozen source paths, digests, and lines."""
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -64,7 +62,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--brief", help="review brief JSON file agreed with the authors, frozen into every review prompt"
     )
 
-    status_parser = run_commands.add_parser("status", help="show a bounded run overview and next actions")
+    status_parser = run_commands.add_parser("status", help="show a compact run overview and next actions")
     status_parser.add_argument("run_id", help="run ID")
 
     list_parser = run_commands.add_parser("list", help="list this project's runs, newest first")
@@ -84,15 +82,11 @@ def build_parser() -> argparse.ArgumentParser:
     cancel_parser.add_argument("run_id", help="run ID")
     cancel_parser.add_argument("--reason", required=True, type=_nonempty, help="non-empty cancellation reason")
 
-    report_parser = run_commands.add_parser("report", help="render a run report or read one bounded section")
+    report_parser = run_commands.add_parser("report", help="render a run report or one report section")
     report_parser.add_argument("run_id", help="run ID")
     report_mode = report_parser.add_mutually_exclusive_group()
-    report_mode.add_argument("--format", choices=("markdown", "json"), help="unbounded full export (default: markdown)")
-    report_mode.add_argument(
-        "--part", choices=REPORT_PARTS, help="read a report section as bounded JSON text fragments"
-    )
-    report_parser.add_argument("--offset", type=int, default=0, help="character offset from the previous fragment")
-    report_parser.add_argument("--report-digest", help="report digest returned by the previous fragment")
+    report_mode.add_argument("--format", choices=("markdown", "json"), help="full report (default: markdown)")
+    report_mode.add_argument("--part", choices=REPORT_PARTS, help="print one whole report section as JSON")
 
     gate_parser = run_commands.add_parser("gate", help="evaluate the release gate")
     gate_parser.add_argument("run_id", help="run ID")
@@ -104,7 +98,7 @@ def build_parser() -> argparse.ArgumentParser:
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     task_commands = task_parser.add_subparsers(dest="task_command", required=True)
-    list_parser = task_commands.add_parser("list", help="list tasks and attempts in detail (unbounded)")
+    list_parser = task_commands.add_parser("list", help="list tasks and attempts in detail")
     list_parser.add_argument("run_id", help="run ID")
     claim_parser = task_commands.add_parser("claim", help="claim a pending task for this host session")
     claim_parser.add_argument("task_id", help="pending task ID from run status next_actions")
@@ -120,14 +114,8 @@ def build_parser() -> argparse.ArgumentParser:
         required=True,
         help="host if the ID came from the host's own state, otherwise declared",
     )
-    show_parser = task_commands.add_parser("show", help="show an attempt overview or one frozen input")
+    show_parser = task_commands.add_parser("show", help="show a compact attempt overview")
     show_parser.add_argument("attempt_id", help="attempt ID from claim")
-    show_parser.add_argument(
-        "--part",
-        choices=("prompt", "schema", "source-map", "brief", "example"),
-        help="read a frozen input, the run's review brief, or an output example as text fragments",
-    )
-    show_parser.add_argument("--offset", type=int, default=0, help="character offset from the previous fragment")
     submit_parser = task_commands.add_parser("submit", help="submit one complete JSON output for validation")
     submit_parser.add_argument("attempt_id", help="active attempt ID")
     submit_parser.add_argument("--input-digest", required=True, help="input_digest returned by claim or show")
@@ -136,60 +124,6 @@ def build_parser() -> argparse.ArgumentParser:
         "--check",
         action="store_true",
         help="validate exactly as submit would, without recording the output or ending the attempt",
-    )
-    read_parser = task_commands.add_parser("read", help="read bounded lines of a frozen text source or metadata")
-    read_parser.add_argument("attempt_id", help="active attempt ID")
-    read_parser.add_argument(
-        "--path", required=True, help="read_path or source_path from source-map.json, or a metadata file name"
-    )
-    read_parser.add_argument("--start-line", type=int, default=1, help="first 1-based line (default: 1)")
-    read_parser.add_argument(
-        "--max-lines", type=int, default=40, help="ceiling of lines per response, 1-100 (default: 40)"
-    )
-    read_parser.add_argument(
-        "--offset", type=int, default=0, help="character offset within the start line from next_offset"
-    )
-    read_parser.add_argument(
-        "--max-chars", type=int, default=6000, help="ceiling of characters per response, 1-8000 (default: 6000)"
-    )
-    read_parser.add_argument(
-        "--end-line", type=int, help="last inclusive line; continuations stop after it instead of at end of file"
-    )
-    read_parser.add_argument(
-        "--anchor",
-        action="store_true",
-        help="also return an evidence anchor covering the completely returned lines of a text source",
-    )
-    search_parser = task_commands.add_parser("search", help="case-insensitive literal search of frozen sources")
-    search_parser.add_argument("attempt_id", help="active attempt ID")
-    search_parser.add_argument("--query", required=True, help="literal text, 1-200 characters")
-    search_parser.add_argument("--path", help="search only this source, read path, or metadata file")
-    search_parser.add_argument("--cursor", type=int, default=0, help="match index from next_cursor")
-    search_parser.add_argument(
-        "--limit", type=int, default=20, help="at most 50 matches; the byte bound may return fewer"
-    )
-    search_parser.add_argument(
-        "--context", type=int, default=0, help="also return up to N (0-3) neighbouring lines before and after a match"
-    )
-    search_parser.add_argument(
-        "--include-metadata",
-        action="store_true",
-        help="without --path, also search manifest.json, navigation.json, and source-map.json",
-    )
-    nav_parser = task_commands.add_parser("nav", help="list frozen navigation entries with filters")
-    nav_parser.add_argument("attempt_id", help="active attempt ID")
-    nav_parser.add_argument(
-        "--command",
-        action="append",
-        dest="commands",
-        help="repeatable: heading, reference, citation, label, caption, graphics, table, figure, equation, quantity, "
-        "or an exact LaTeX command or environment",
-    )
-    nav_parser.add_argument("--query", help="case-insensitive substring of the entry value")
-    nav_parser.add_argument("--path", help="frozen source path or read path that contains the entries")
-    nav_parser.add_argument("--cursor", type=int, default=0, help="entry index from next_cursor")
-    nav_parser.add_argument(
-        "--limit", type=int, default=50, help="at most 100 entries; the byte bound may return fewer"
     )
     page_parser = task_commands.add_parser("page", help="return a rendered page image path and digest")
     page_parser.add_argument("attempt_id", help="active attempt ID")
@@ -204,26 +138,25 @@ def build_parser() -> argparse.ArgumentParser:
         "--crop", type=_crop, help="render only x0,y0,x1,y1 as fractions of the page width and height"
     )
     page_parser.add_argument(
-        "--text", action="store_true", help="return the page's PDF text layer as a reading aid, not evidence"
-    )
-    page_parser.add_argument("--offset", type=int, default=0, help="character offset in the text layer with --text")
-    page_parser.add_argument(
-        "--text-digest", help="text_digest from the previous --text fragment; required with --offset"
+        "--text",
+        action="store_true",
+        help="write the page's PDF text layer to a file as a reading aid, never evidence",
     )
 
     export_parser = task_commands.add_parser(
-        "export", help="write the frozen bundle files (no page images) to a new or empty directory"
+        "export",
+        help="write the frozen bundle and this attempt's task inputs (no page images) to a new or empty directory",
     )
-    export_parser.add_argument("attempt_id", help="active attempt ID")
+    export_parser.add_argument("attempt_id", help="attempt ID, active or finished")
     export_parser.add_argument("--dir", required=True, help="directory that must not exist or must be empty")
 
     finding_parser = commands.add_parser("finding", help="inspect and decide findings")
     finding_commands = finding_parser.add_subparsers(dest="finding_command", required=True)
 
-    finding_list_parser = finding_commands.add_parser("list", help="list findings (unbounded)")
+    finding_list_parser = finding_commands.add_parser("list", help="list findings")
     finding_list_parser.add_argument("run_id", help="run ID")
 
-    finding_show_parser = finding_commands.add_parser("show", help="show a finding (unbounded)")
+    finding_show_parser = finding_commands.add_parser("show", help="show a finding")
     finding_show_parser.add_argument("finding_id", help="finding ID")
 
     finding_decide_parser = finding_commands.add_parser("decide", help="record a human finding decision")
@@ -245,7 +178,7 @@ def build_parser() -> argparse.ArgumentParser:
     patch_parser = commands.add_parser("patch", help="inspect, decide, and apply patches")
     patch_commands = patch_parser.add_subparsers(dest="patch_command", required=True)
 
-    patch_show_parser = patch_commands.add_parser("show", help="show a patch (unbounded)")
+    patch_show_parser = patch_commands.add_parser("show", help="show a patch")
     patch_show_parser.add_argument("patch_id", help="patch ID")
 
     patch_decide_parser = patch_commands.add_parser("decide", help="record a human patch decision")
@@ -350,13 +283,7 @@ def _dispatch_run(service: Any, arguments: argparse.Namespace) -> tuple[Any, int
         return run_overview(service.cancel_run(arguments.run_id, arguments.reason)), 0, None
     if arguments.run_command == "report":
         if arguments.part is not None:
-            return (
-                service.read_report(arguments.run_id, arguments.part, arguments.offset, arguments.report_digest),
-                0,
-                None,
-            )
-        if arguments.offset != 0 or arguments.report_digest is not None:
-            raise ConfigurationError("--offset and --report-digest require --part")
+            return service.read_report(arguments.run_id, arguments.part), 0, "json"
         report_format = arguments.format or "markdown"
         result = service.render_report(arguments.run_id, report_format)
         return result, 0, report_format
@@ -386,7 +313,7 @@ def _dispatch_task(service: Any, arguments: argparse.Namespace) -> tuple[Any, in
             None,
         )
     if arguments.task_command == "show":
-        return service.task_view(service.show_task(arguments.attempt_id), arguments.part, arguments.offset), 0, None
+        return service.task_view(service.show_task(arguments.attempt_id)), 0, None
     if arguments.task_command == "submit":
         if arguments.file == "-":
             raw = sys.stdin.buffer.read(2_000_001)
@@ -402,48 +329,6 @@ def _dispatch_task(service: Any, arguments: argparse.Namespace) -> tuple[Any, in
         if arguments.check:
             return service.check_submission(arguments.attempt_id, arguments.input_digest, contents), 0, None
         return _run_async(service.submit_task(arguments.attempt_id, arguments.input_digest, contents)), 0, None
-    if arguments.task_command == "read":
-        return (
-            service.read_task(
-                arguments.attempt_id,
-                arguments.path,
-                arguments.start_line,
-                arguments.max_lines,
-                arguments.offset,
-                arguments.max_chars,
-                arguments.end_line,
-                arguments.anchor,
-            ),
-            0,
-            None,
-        )
-    if arguments.task_command == "search":
-        return (
-            service.search_task(
-                arguments.attempt_id,
-                arguments.query,
-                arguments.path,
-                arguments.cursor,
-                arguments.limit,
-                arguments.context,
-                arguments.include_metadata,
-            ),
-            0,
-            None,
-        )
-    if arguments.task_command == "nav":
-        return (
-            service.nav_task(
-                arguments.attempt_id,
-                arguments.commands,
-                arguments.query,
-                arguments.path,
-                arguments.cursor,
-                arguments.limit,
-            ),
-            0,
-            None,
-        )
     if arguments.task_command == "export":
         return service.export_task(arguments.attempt_id, arguments.dir), 0, None
     if arguments.task_command == "page":
@@ -455,8 +340,6 @@ def _dispatch_task(service: Any, arguments: argparse.Namespace) -> tuple[Any, in
                 arguments.scale,
                 arguments.crop,
                 arguments.text,
-                arguments.offset,
-                arguments.text_digest,
             ),
             0,
             None,
@@ -549,8 +432,6 @@ def _emit_success(payload: Any, json_output: bool, output_format: str | None) ->
     if output_format == "markdown" and isinstance(payload, str):
         print(payload)
         return
-    if output_format is None and isinstance(value, dict) and value.get("next_command"):
-        value["next_command"] = value["next_command"].replace("scriptorium --json ", "scriptorium ", 1)
     if output_format == "json" or isinstance(value, (dict, list)):
         print(pretty_json(value))
         return

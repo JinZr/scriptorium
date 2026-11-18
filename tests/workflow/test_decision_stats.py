@@ -1,12 +1,10 @@
 import asyncio
 import dataclasses
 import json
-import shlex
 
 from scriptorium import cli
-from scriptorium.domain import AgentRole, FindingStatus, canonical_json
+from scriptorium.domain import AgentRole, FindingStatus
 from scriptorium.service import ScriptoriumService
-from scriptorium.tool_output import MAX_TOOL_RESPONSE_BYTES
 
 from ._support import PdfBuildingManuscriptManager, claim, make_repository, review_finding, submit
 
@@ -148,7 +146,7 @@ def test_a_run_without_decisions_reports_every_finding_pending(tmp_path):
         assert stats["reasons"] == []
 
 
-def test_a_long_decision_stats_part_is_bounded_and_traversable(tmp_path, monkeypatch, capsys):
+def test_a_long_decision_stats_part_is_returned_whole(tmp_path, monkeypatch, capsys):
     repo = make_repository(tmp_path, roles=("substantive_review",))
     with _service(repo) as service:
         run = asyncio.run(service.start_run("HEAD", "quick"))["run"]
@@ -158,25 +156,11 @@ def test_a_long_decision_stats_part_is_bounded_and_traversable(tmp_path, monkeyp
         for index, finding in enumerate(service.list_findings(run.id)):
             service.decide_finding(finding.id, "reject", f"Reason {index}: " + "é" * 300)
         full = service.render_report(run.id, "json")
-        content = canonical_json(full["decision_stats"])
-        assert len(content.encode()) > 2 * MAX_TOOL_RESPONSE_BYTES
         assert len(full["decision_stats"]["reasons"]) == 30
         monkeypatch.chdir(repo)
         monkeypatch.setattr(cli, "_build_service", lambda _: service)
-        arguments = ["--json", "run", "report", run.id, "--part", "decision_stats"]
-        text, fragments = "", 0
-        while arguments:
-            assert cli.main(arguments) == 0
-            raw = capsys.readouterr().out
-            assert len(raw.encode()) <= MAX_TOOL_RESPONSE_BYTES
-            fragment = json.loads(raw)["data"]
-            assert fragment["offset"] == len(text)
-            text += fragment["text"]
-            fragments += 1
-            arguments = shlex.split(fragment["next_command"])[1:] if fragment["next_command"] else None
-        assert fragments > 2
-        assert text == content
-        assert json.loads(text) == full["decision_stats"]
+        assert cli.main(["--json", "run", "report", run.id, "--part", "decision_stats"]) == 0
+        assert json.loads(capsys.readouterr().out)["data"] == full["decision_stats"]
 
 
 def test_exports_agree_when_findings_were_read_before_a_decision(tmp_path, monkeypatch):

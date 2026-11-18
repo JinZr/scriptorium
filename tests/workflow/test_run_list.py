@@ -6,7 +6,6 @@ import pytest
 from scriptorium import cli
 from scriptorium.errors import ConfigurationError
 from scriptorium.service import ScriptoriumService
-from scriptorium.tool_output import MAX_TOOL_RESPONSE_BYTES
 
 from ._support import PdfBuildingManuscriptManager, make_repository
 
@@ -18,7 +17,7 @@ def _start(service, brief=None):
     return asyncio.run(service.start_run("HEAD", "quick", allow_duplicate=True, brief=text))["run"]
 
 
-def test_run_list_reports_bounded_rows_with_brief_fields_and_truncation(tmp_path) -> None:
+def test_run_list_reports_rows_with_brief_fields_and_truncation(tmp_path) -> None:
     repo = make_repository(tmp_path, roles=("copyedit",))
     with ScriptoriumService(repo, manuscript_manager=PdfBuildingManuscriptManager(repo)) as service:
         plain = _start(service)
@@ -49,7 +48,7 @@ def test_run_list_reports_bounded_rows_with_brief_fields_and_truncation(tmp_path
         assert (capped["total"], capped["returned"], capped["truncated"]) == (2, 1, True)
 
 
-def test_run_list_output_stays_within_the_response_bound(tmp_path, monkeypatch, capsys) -> None:
+def test_run_list_is_limited_only_by_its_limit(tmp_path, monkeypatch, capsys) -> None:
     repo = make_repository(tmp_path, roles=("copyedit",))
     brief = {**_BRIEF, "venue": "V" * 200}
     with ScriptoriumService(repo, manuscript_manager=PdfBuildingManuscriptManager(repo)) as service:
@@ -58,12 +57,12 @@ def test_run_list_output_stays_within_the_response_bound(tmp_path, monkeypatch, 
         monkeypatch.chdir(repo)
         monkeypatch.setattr(cli, "_build_service", lambda _: service)
         for options in (["--json"], []):
-            assert cli.main([*options, "run", "list", "--limit", "100"]) == 0
-            raw = capsys.readouterr().out
-            assert len(raw.encode()) <= MAX_TOOL_RESPONSE_BYTES
-            data = json.loads(raw)["data"] if options else json.loads(raw)
-            assert data["total"] == 30 and data["truncated"] and 0 < data["returned"] < 30
-            assert data["returned"] == len(data["runs"])
+            for limit, returned in (("100", 30), ("5", 5)):
+                assert cli.main([*options, "run", "list", "--limit", limit]) == 0
+                raw = capsys.readouterr().out
+                data = json.loads(raw)["data"] if options else json.loads(raw)
+                assert (data["total"], data["returned"], data["truncated"]) == (30, returned, returned < 30)
+                assert data["returned"] == len(data["runs"])
 
 
 @pytest.mark.parametrize("arguments", [["--status", "done"], ["--limit", "0"], ["--limit", "101"]])

@@ -44,7 +44,7 @@ bash /path/to/scriptorium/utils/preflight.sh
 模型按两份 skill 操作 CLI：
 
 - [skills/scriptorium/SKILL.md](../skills/scriptorium/SKILL.md)：操作者，负责开始运行、和你商定审稿 brief、读报告、按你的指示记录决定；
-- [skills/scriptorium-review/SKILL.md](../skills/scriptorium-review/SKILL.md)：审稿者，负责 claim 任务、检索证据、提交结果。
+- [skills/scriptorium-review/SKILL.md](../skills/scriptorium-review/SKILL.md)：审稿者，负责 claim 任务、把冻结的任务导出到目录并阅读、引用证据、提交结果。
 
 把 `skills/scriptorium/` 和 `skills/scriptorium-review/` 两个目录都复制或软链接到客户端的 skills 目录：
 
@@ -81,7 +81,8 @@ scriptorium --json run status RUN_ID
 ```
 
 然后打开你的模型客户端，在稿件仓库目录里开一个新对话，告诉它 run ID，让它按 skill
-执行 `run status` 给出的 `next_actions`。模型会 claim 任务、读取冻结材料、提交结构化结果。
+执行 `run status` 给出的 `next_actions`。模型会 claim 任务，用 `task export` 把冻结的稿件和任务说明导出到一个目录，
+用自己的工具阅读，再提交结构化结果。
 你只需要在它停下时回到终端：
 
 - `finding decide` 确认、拒绝或豁免发现（可一次列出同一次运行的多个发现 ID，共用同一决定与理由）；
