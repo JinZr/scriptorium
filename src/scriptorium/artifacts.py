@@ -148,24 +148,25 @@ class ArtifactStore:
 
     def record(self, artifact: Artifact) -> Artifact:
         """Keep the first metadata record published for a digest and return the record that is kept."""
-        existing = self.read_record(artifact.digest)
-        if existing is not None:
-            return existing
         target = self.record_path(artifact.digest)
-        target.parent.mkdir(parents=True, exist_ok=True)
-        temporary_path = self._temporary_path(target.parent)
-        try:
-            with temporary_path.open("wb") as destination:
-                destination.write(canonical_json(asdict(artifact)).encode("utf-8"))
-                destination.flush()
-                os.fsync(destination.fileno())
+        if self.read_record(artifact.digest) is None:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            temporary_path = self._temporary_path(target.parent)
             try:
-                # A hard link never replaces: the first complete record wins, and a reader never sees a partial one.
-                os.link(temporary_path, target)
-            except FileExistsError:
-                pass
-        finally:
-            temporary_path.unlink(missing_ok=True)
+                with temporary_path.open("wb") as destination:
+                    destination.write(canonical_json(asdict(artifact)).encode("utf-8"))
+                    destination.flush()
+                    os.fsync(destination.fileno())
+                try:
+                    # A hard link never replaces: the first complete record wins and no reader sees a partial one.
+                    os.link(temporary_path, target)
+                except FileExistsError:
+                    pass
+            finally:
+                temporary_path.unlink(missing_ok=True)
+        # Callers commit run state that names this record only after its directory entry, and the content published
+        # beside it, are durable, even when another process created the entry.
+        self._sync_directory(target.parent)
         return self.read_record(artifact.digest)
 
     def read_record(self, digest: str) -> Artifact | None:
@@ -189,6 +190,14 @@ class ArtifactStore:
             size=size,
             media_type=media_type,
         )
+
+    @staticmethod
+    def _sync_directory(directory: Path) -> None:
+        descriptor = os.open(directory, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
 
     @staticmethod
     def _temporary_path(directory: Path) -> Path:

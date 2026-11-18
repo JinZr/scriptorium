@@ -65,3 +65,15 @@ def test_the_first_metadata_record_of_a_digest_is_kept(tmp_path) -> None:
     store.record_path(artifact.digest).write_text("{}", encoding="utf-8")
     with pytest.raises(ArtifactCorruptionError, match="artifact record is corrupt"):
         store.read_record(artifact.digest)
+
+
+def test_a_metadata_record_is_durable_before_it_is_returned(tmp_path, monkeypatch) -> None:
+    store = ArtifactStore(tmp_path / "artifacts")
+    artifact = store.put_text("evidence", "text/plain")
+    synced = []
+    monkeypatch.setattr(ArtifactStore, "_sync_directory", staticmethod(synced.append))
+
+    store.record(artifact)
+    store.record(artifact)
+
+    assert synced == [store.record_path(artifact.digest).parent] * 2
