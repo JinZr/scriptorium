@@ -112,7 +112,7 @@ def review_summary(report):
         "accepted_findings": len(report["findings"]),
         "image_views_verified": None,
         "scientific_correctness": "not_evaluated",
-        "cost_usd": report["run"]["estimated_cost_usd"],
+        "cost_usd": None,
     }
 
 
@@ -139,15 +139,13 @@ def collect(
         raise ValueError(f"Host computation must be one of {', '.join(HOST_COMPUTATION)}")
     host_conditions = {"computation": host_computation}
     project = project.resolve()
-    if not (project / ".scriptorium/state.sqlite3").is_file():
+    if not any((project / ".scriptorium/runs").glob("*/state.json")):
         raise ValueError("Project must have an existing Scriptorium run")
     if output.resolve().is_relative_to((project / ".scriptorium").resolve()):
         raise ValueError("Evaluation output must be outside Scriptorium state")
     records = []
     with publication(output, [path for path in (baseline, labels) if path is not None]) as stage:
         report = run_report(project, run_id, records)
-        if report["run"]["frozen_config"].get("execution") != "external":
-            raise ValueError("This example requires an external-harness run")
         if not report["gate"]["conditions"]["review_artifacts_valid"]:
             raise ValueError("Accepted review artifacts failed core validation")
         bundle = copy_bundle(project, report, stage)
@@ -188,7 +186,6 @@ def collect(
                     "bundle_digest",
                     "output_artifact_digest",
                     "validation_report_artifact_digest",
-                    "trace_artifact_digest",
                 ):
                     digest = attempt[field]
                     if digest is not None:

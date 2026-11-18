@@ -171,7 +171,6 @@ class Armarius:
 
     async def resume_run(self, run_id: str) -> Run:
         run = self.database.get_run(run_id)
-        self.require_external_run(run)
         if run.status in {RunStatus.COMPLETED, RunStatus.CANCELLED}:
             return run
         self.require_evidence_anchor_contract(run.id)
@@ -206,7 +205,6 @@ class Armarius:
         self, run_id: str, task_id: str, abandon_attempt_id: str | None = None, reason: str | None = None
     ) -> Run:
         run = self.database.get_run(run_id)
-        self.require_external_run(run)
         task = self.database.get_task(task_id)
         if task.run_id != run_id:
             raise StateError(f"task {task_id} does not belong to run {run_id}")
@@ -297,11 +295,6 @@ class Armarius:
                 )
             else:
                 self.database.update_task_status(task.id, TaskStatus.CANCELLED)
-
-    @staticmethod
-    def require_external_run(run: Run) -> None:
-        if run.frozen_config.get("execution") != "external":
-            raise StateError(f"run {run.id} was not prepared for external hosts; start a new run")
 
     def require_evidence_anchor_contract(self, run_id: str) -> EvidenceAnchorContract:
         run = self.database.get_run(run_id)
@@ -1108,7 +1101,7 @@ class Armarius:
         bundle_digest = digest_json(files)
         self._record_text(canonical_json(files), "application/vnd.scriptorium.bundle-index+json")
         input_digest = task_input_digest(run, prompt_artifact.digest, schema_artifact.digest, bundle_digest)
-        task = self.database.find_task(run.id, stage, role, "", input_digest)
+        task = self.database.find_task(run.id, stage, role, input_digest)
         if task is None:
             task = self.database.create_task(Task(run_id=run.id, stage=stage, role=role, input_digest=input_digest))
         example_digest = None
@@ -1172,7 +1165,6 @@ class Armarius:
     ) -> Attempt:
         task = self.database.get_task(task_id)
         run = self.database.get_run(task.run_id)
-        self.require_external_run(run)
         self.require_evidence_anchor_contract(run.id)
         expected_status = {
             "review": RunStatus.REVIEWING,
@@ -1374,7 +1366,6 @@ class Armarius:
         attempt = self.database.get_attempt(attempt_id)
         task = self.database.get_task(attempt.task_id)
         run = self.database.get_run(task.run_id)
-        self.require_external_run(run)
         if input_digest != task_input_digest(run, attempt.prompt_digest, attempt.schema_digest, attempt.bundle_digest):
             raise StateError("submitted input digest does not match frozen attempt")
         self._load_prompt_artifact(attempt.prompt_digest)
@@ -1945,7 +1936,6 @@ class Armarius:
             schema = output_schema(kind, anchor_contract)
             schemas[kind] = {"digest": digest_json(schema), "content": schema}
         return {
-            "execution": "external",
             "project": project.frozen_dict(),
             "config_files": {
                 "scriptorium.toml": {

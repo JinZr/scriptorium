@@ -12,7 +12,6 @@ from pathlib import Path
 import re
 import shutil
 import socket
-import sqlite3
 import stat
 import subprocess
 import tempfile
@@ -33,7 +32,6 @@ from .domain import (
     PatchStatus,
     Run,
     RunStatus,
-    Task,
     TaskStatus,
     VerificationResult,
     canonical_json,
@@ -72,9 +70,9 @@ class ScriptoriumService:
         self.repo = find_repo(repo)
         self.state_dir = self.repo / ".scriptorium"
         try:
-            self.database = Database(self.state_dir / "state.sqlite3")
+            self.database = Database(self.state_dir)
             self.artifacts = ArtifactStore(self.state_dir / "artifacts")
-        except (sqlite3.Error, StorageError, OSError) as exc:
+        except (StorageError, OSError) as exc:
             raise InfrastructureError(f"cannot initialize local state: {exc}") from exc
         self.manuscript = manuscript_manager or ManuscriptManager(self.repo)
         self.armarius = Armarius(
@@ -297,7 +295,7 @@ class ScriptoriumService:
                 check("review_profile", False, str(exc), "configuration")
             else:
                 check("review_profile", True, f"profile {selected_profile}")
-        check("sqlite", True, str(self.state_dir / "state.sqlite3"))
+        check("run_state", True, str(self.database.runs_dir))
 
         failed = [item for item in checks if not item["ok"]]
         exit_code = 3 if infrastructure_failed else 2 if configuration_failed or failed else 0
@@ -376,7 +374,6 @@ class ScriptoriumService:
 
     def run_status(self, run_id: str) -> dict[str, Any]:
         run = self._storage(self.database.get_run, run_id)
-        self.armarius.require_external_run(run)
         with self._run_operation(run.id, "run status"):
             view = self.get_run(run_id)
             return run_overview(self._with_brief(view), self.list_tasks(run_id)["next_actions"])
@@ -401,7 +398,6 @@ class ScriptoriumService:
 
     async def resume_run(self, run_id: str) -> dict[str, Any]:
         run = self._storage(self.database.get_run, run_id)
-        self.armarius.require_external_run(run)
         with self._run_operation(run.id, "run resume"):
             self._storage(self.armarius.invalidate_stale_tasks, run.id)
             await self.armarius.resume_run(run.id)
@@ -411,21 +407,18 @@ class ScriptoriumService:
         self, run_id: str, task_id: str, abandon_attempt_id: str | None = None, reason: str | None = None
     ) -> dict[str, Any]:
         run = self._storage(self.database.get_run, run_id)
-        self.armarius.require_external_run(run)
         with self._run_operation(run.id, "run retry"):
             await self.armarius.retry_task(run.id, task_id, abandon_attempt_id, reason)
             return self.get_run(run.id)
 
     def cancel_run(self, run_id: str, reason: str) -> dict[str, Any]:
         run = self._storage(self.database.get_run, run_id)
-        self.armarius.require_external_run(run)
         with self._run_operation(run.id, "run cancel", wait=True):
             self._storage(self.armarius.cancel_run, run.id, reason, new_id("cancel"))
             return self.get_run(run.id)
 
     def list_tasks(self, run_id: str) -> dict[str, Any]:
         view = self.get_run(run_id)
-        self.armarius.require_external_run(view["run"])
         next_actions = []
         active_stage = {
             RunStatus.REVIEWING: "review",
@@ -507,7 +500,6 @@ class ScriptoriumService:
         attempt = self._storage(self.database.get_attempt, attempt_id)
         task = self._storage(self.database.get_task, attempt.task_id)
         run = self._storage(self.database.get_run, task.run_id)
-        self.armarius.require_external_run(run)
         metadata = self._storage(self.database.get_external_task, task.id)
         if attempt.schema_digest != metadata["schema_digest"]:
             raise InfrastructureError("attempt is not bound to its frozen task")
@@ -600,7 +592,6 @@ class ScriptoriumService:
         attempt = self._storage(self.database.get_attempt, attempt_id)
         task = self._storage(self.database.get_task, attempt.task_id)
         run = self._storage(self.database.get_run, task.run_id)
-        self.armarius.require_external_run(run)
         if active and (attempt.status != AttemptStatus.RUNNING or task.status != TaskStatus.RUNNING):
             raise StateError("rendering pages requires an active attempt")
         metadata = self._storage(self.database.get_external_task, task.id)
@@ -828,7 +819,6 @@ class ScriptoriumService:
         with self._run_operation(initial[0].run_id, "finding decide"):
             before = [self._storage(self.database.get_finding, finding_id) for finding_id in finding_ids]
             run = self._storage(self.database.get_run, initial[0].run_id)
-            self.armarius.require_external_run(run)
             if run.status in {RunStatus.COMPLETED, RunStatus.FAILED, RunStatus.CANCELLED}:
                 raise StateError(f"findings cannot be decided while run is {run.status.value}")
             if run.status != RunStatus.AWAITING_DECISION and decision != "waive":
@@ -869,7 +859,6 @@ class ScriptoriumService:
         with self._run_operation(initial.run_id, "patch decide"):
             patch = self._storage(self.database.get_patch, patch_id)
             run = self._storage(self.database.get_run, patch.run_id)
-            self.armarius.require_external_run(run)
             if run.status != RunStatus.AWAITING_PATCH_APPROVAL:
                 raise StateError(f"patches cannot be decided while run is {run.status.value}")
             patches = self._storage(self.database.list_patches, run.id)
@@ -884,7 +873,6 @@ class ScriptoriumService:
         with self._run_operation(initial.run_id, "patch apply"):
             patch = self._storage(self.database.get_patch, patch_id)
             run = self._storage(self.database.get_run, patch.run_id)
-            self.armarius.require_external_run(run)
             if run.status != RunStatus.READY_TO_APPLY:
                 raise StateError(f"patch cannot be applied while run is {run.status.value}")
             if patch.status == PatchStatus.APPLIED:
@@ -918,7 +906,6 @@ class ScriptoriumService:
     def render_report(self, run_id: str, format: str) -> str | dict[str, Any]:
         if format not in {"markdown", "json"}:
             raise ConfigurationError("report format must be markdown or json")
-        self.armarius.require_external_run(self._storage(self.database.get_run, run_id))
         run_view = self.get_run(run_id)
         findings = self._storage(self.database.list_findings, run_id)
         patches = self._storage(self.database.list_patches, run_id)
@@ -1028,7 +1015,6 @@ class ScriptoriumService:
 
     def evaluate_gate(self, run_id: str) -> dict[str, Any]:
         run = self._storage(self.database.get_run, run_id)
-        self.armarius.require_external_run(run)
         tasks = self._storage(self.database.list_tasks, run_id)
         findings = self._storage(self.database.list_findings, run_id)
         patches = self._storage(self.database.list_patches, run_id)
@@ -1182,7 +1168,7 @@ class ScriptoriumService:
             raise NotFoundError(str(exc)) from exc
         except ConflictError as exc:
             raise StateError(str(exc)) from exc
-        except (StorageError, sqlite3.Error) as exc:
+        except StorageError as exc:
             raise InfrastructureError(str(exc)) from exc
         except ValueError as exc:
             raise StateError(str(exc)) from exc
@@ -1361,7 +1347,6 @@ class ScriptoriumService:
     def _markdown_report(payload: dict[str, Any]) -> str:
         plain = _plain(payload)
         run = plain["run"]
-        cost = "unknown" if run["estimated_cost_usd"] is None else f"${run['estimated_cost_usd']:.6f}"
         lines = [
             f"# Scriptorium run {run['id']}",
             "",
@@ -1369,7 +1354,6 @@ class ScriptoriumService:
             f"- Commit: `{run['commit_sha']}`",
             f"- Profile: `{run['profile']}`",
             *ScriptoriumService._markdown_brief(run.get("review_brief")),
-            f"- Estimated cost: {cost}",
             f"- Gate: `{'pass' if plain['gate']['passed'] else 'not passed'}`",
             "",
             "## Tasks",
@@ -1440,19 +1424,6 @@ def _validate_page_view(scale, crop, text: bool) -> None:
 def _plain(value: Any) -> Any:
     if isinstance(value, Enum):
         return value.value
-    if isinstance(value, Run) and value.frozen_config.get("execution") == "external":
-        return {**{key: _plain(item) for key, item in asdict(value).items()}, "estimated_cost_usd": None}
-    if isinstance(value, Attempt) and value.external_client is not None:
-        return {
-            **{key: _plain(item) for key, item in asdict(value).items()},
-            "input_tokens": None,
-            "cached_input_tokens": None,
-            "output_tokens": None,
-            "reasoning_tokens": None,
-            "estimated_cost_usd": None,
-        }
-    if isinstance(value, Task) and value.route == "":
-        return {key: _plain(item) for key, item in asdict(value).items() if key != "route"}
     if is_dataclass(value) and not isinstance(value, type):
         return {key: _plain(item) for key, item in asdict(value).items()}
     if isinstance(value, dict):

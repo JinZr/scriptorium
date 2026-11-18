@@ -233,17 +233,16 @@ def test_doctor_rebuilds_without_persisting_workflow_state(
         before_artifacts = sorted(path.relative_to(service.state_dir) for path in service.artifacts.root.rglob("*"))
         first = service.doctor(profile="quick")
         second = service.doctor(profile="quick")
-        counts = {
-            table: service.database.connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
-            for table in ("runs", "tasks", "attempts", "events", "artifacts")
-        }
+        runs = service.database.list_runs()
+        run_entries = list(service.database.runs_dir.iterdir())
         after_artifacts = sorted(path.relative_to(service.state_dir) for path in service.artifacts.root.rglob("*"))
 
     assert first["ok"] is True
     assert second["ok"] is True
     assert len(manager.build_workspaces) == 2
     assert all(not workspace.exists() for workspace in manager.build_workspaces)
-    assert counts == {"runs": 0, "tasks": 0, "attempts": 0, "events": 0, "artifacts": 0}
+    assert runs == []
+    assert run_entries == []
     assert after_artifacts == before_artifacts
 
 

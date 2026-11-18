@@ -327,7 +327,7 @@ def validate_paper_project(project: Path) -> None:
         path = project / relative
         if path.is_symlink() or not path.is_file() or path.read_text(encoding="utf-8") != content:
             raise BenchmarkError(f"Generated paper project changed: {path}")
-    for path in (state_dir / "state.sqlite3", state_dir / "artifacts", state_dir / "runs"):
+    for path in (state_dir / "artifacts", state_dir / "runs"):
         if path.is_symlink():
             raise BenchmarkError(f"Generated paper state path is unsafe: {path}")
 
@@ -475,15 +475,6 @@ def summarize_scriptorium_run(service: ScriptoriumService, run_id: str) -> dict[
             if attempt_data.get("validation_report_artifact_digest") is None:
                 attempt_data.pop("validation_report_artifact_digest", None)
             attempts.append(attempt_data)
-            if attempt.external_client is not None:
-                for key in (
-                    "input_tokens",
-                    "cached_input_tokens",
-                    "output_tokens",
-                    "reasoning_tokens",
-                    "estimated_cost_usd",
-                ):
-                    attempt_data[key] = None
         task_summaries.append(
             {
                 "id": task.id,
@@ -767,8 +758,8 @@ def _validate_completed_bundle(service: ScriptoriumService, core_run: Any, paper
         file_digest(source_map_path),
         json_digest(run_manifest),
     }
-    artifact_rows = service.database.connection.execute("SELECT digest FROM artifacts ORDER BY digest").fetchall()
-    artifact_digests = [str(row["digest"]) for row in artifact_rows]
+    # Each recorded artifact keeps its metadata beside its content as sha256/<2 hex>/<62 hex>.json.
+    artifact_digests = sorted(path.parent.name + path.stem for path in service.artifacts.sha256_root.glob("*/*.json"))
     actual_digests = set(artifact_digests)
     for digest in artifact_digests:
         if not service.artifacts.verify(digest):
@@ -799,7 +790,6 @@ def validate_completed_scriptorium_state(
             for field in (
                 "prompt_digest",
                 "schema_digest",
-                "trace_artifact_digest",
                 "output_artifact_digest",
                 "validation_report_artifact_digest",
             ):

@@ -99,7 +99,7 @@ scriptorium --json run status RUN_ID
 ## 预期与注意事项
 
 - 时间和费用：以 `quick` profile 审一篇 10 页左右的稿件为参考，填入试点实测数据后更新本节。
-- 运行记录在仓库的 `.scriptorium/` 下，已被 `.gitignore` 忽略，只存在于你的机器上。
+- 运行记录在仓库的 `.scriptorium/` 下（每个运行一个状态文件 `runs/RUN_ID/state.json`），已被 `.gitignore` 忽略，只存在于你的机器上。
   需要和导师或合作者分享时，导出 Markdown 报告放到约定位置。
 - 不要手动编辑 `.scriptorium/` 里的任何文件。出错时修好外部原因，再用 `run retry`
   或 `run resume` 继续。

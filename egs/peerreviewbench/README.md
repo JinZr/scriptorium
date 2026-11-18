@@ -76,7 +76,7 @@ python egs/peerreviewbench/run.py --paper-id 7 --paper-id 12
 python egs/peerreviewbench/run.py --all
 ```
 
-Each paper receives an isolated generated project, SQLite database, artifact store, and Scriptorium run. The adapter
+Each paper receives an isolated generated project, run state, artifact store, and Scriptorium run. The adapter
 recursively exposes the Markdown, figures, code, and supplementary files as normal bundle sources. It also produces a
 neutral PDF rendering of `preprint.md` and the images listed by the dataset so the existing PDF/page bundle contract
 and figure-review role remain active.

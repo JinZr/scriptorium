@@ -19,12 +19,13 @@ and `docs/operations.md` for lifecycle, recovery, or CLI work.
 
 - Git commits and tree digests are the authority for manuscript content and
   frozen run inputs. Uncommitted manuscript changes must not enter a run.
-- SQLite owns durable workflow state and append-only decisions/events. The
-  content-addressed artifact store owns immutable prompts, bundles, outputs,
-  traces, and build evidence.
-- Never repair a run by editing `.scriptorium/`, SQLite, artifacts, snapshots,
-  bundles, or generated patches manually. Repair the external prerequisite and
-  resume or retry through the CLI.
+- One state file per run, `.scriptorium/runs/RUN_ID/state.json`, owns durable
+  workflow state and append-only decisions/events; each mutation replaces it
+  atomically under the run's lock. The content-addressed artifact store owns
+  immutable prompts, bundles, outputs, traces, and build evidence.
+- Never repair a run by editing `.scriptorium/`, run state files, artifacts,
+  snapshots, bundles, or generated patches manually. Repair the external
+  prerequisite and resume or retry through the CLI.
 - External host models review through the same JSON CLI. Scriptorium does not
   select, launch, or silently substitute a model. Its task tools read only the
   frozen bundle; do not claim they isolate all tools available to the host.
@@ -48,9 +49,10 @@ Preserve the dependency direction and existing ownership:
 - `domain.py`: entities, enums, invariants, and state transitions.
 - `workflow.py`: deterministic task preparation, output validation, recovery, and
   approval/release gates.
-- `storage.py`: the SQLite schema, transactions, and persistence queries. The
-  schema is defined once in `storage.py`; the project is in internal alpha with
-  no migration or compatibility path, so a schema change edits that definition
+- `storage.py`: per-run state files, their locking and atomic replacement, the
+  rules a relational schema would enforce, and persistence queries. The state
+  layout is defined once in `storage.py`; the project is in internal alpha with
+  no migration or compatibility path, so a layout change edits that definition
   and existing `.scriptorium/` state is not carried over.
 - `artifacts.py`: atomic, SHA-256-addressed artifact publication.
 - `manuscript.py`: Git snapshots, LaTeX dependency scanning/building, bundles,
@@ -103,7 +105,7 @@ version fields to the research dataset.
   reduce a score; statement counts are advisory.
 - Update documentation when a public CLI, configuration, lifecycle, safety, or
   recovery contract changes.
-- Never place credentials in tracked files, manuscript bundles, SQLite, or
+- Never place credentials in tracked files, manuscript bundles, run state, or
   artifacts. Live external-host checks require explicit opt-in and host authentication.
 
 ## Validation

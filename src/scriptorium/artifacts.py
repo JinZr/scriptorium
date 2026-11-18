@@ -1,13 +1,15 @@
 from __future__ import annotations
 
+from dataclasses import asdict
 import hashlib
+import json
 import os
 from pathlib import Path
 import shutil
 import tempfile
 from typing import BinaryIO
 
-from scriptorium.domain import Artifact
+from scriptorium.domain import Artifact, canonical_json
 
 
 class ArtifactError(RuntimeError):
@@ -140,6 +142,47 @@ class ArtifactStore:
             temporary_path.unlink(missing_ok=True)
         return destination_path
 
+    def record_path(self, digest: str) -> Path:
+        target = self.path_for(digest)
+        return target.with_name(f"{target.name}.json")
+
+    def record(self, artifact: Artifact) -> Artifact:
+        """Keep the first metadata record published for a digest and return the record that is kept."""
+        target = self.record_path(artifact.digest)
+        if self.read_record(artifact.digest) is None:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            temporary_path = self._temporary_path(target.parent)
+            try:
+                with temporary_path.open("wb") as destination:
+                    destination.write(canonical_json(asdict(artifact)).encode("utf-8"))
+                    destination.flush()
+                    os.fsync(destination.fileno())
+                try:
+                    # A hard link never replaces: the first complete record wins and no reader sees a partial one.
+                    os.link(temporary_path, target)
+                except FileExistsError:
+                    pass
+            finally:
+                temporary_path.unlink(missing_ok=True)
+        # Callers commit run state that names this record only after its directory entry, and the content published
+        # beside it, are durable, even when another process created the entry.
+        self._sync_directory(target.parent)
+        return self.read_record(artifact.digest)
+
+    def read_record(self, digest: str) -> Artifact | None:
+        path = self.record_path(digest)
+        try:
+            data = path.read_bytes()
+        except FileNotFoundError:
+            return None
+        try:
+            artifact = Artifact(**json.loads(data))
+            if artifact.digest != digest:
+                raise ValueError("digest mismatch")
+        except (TypeError, ValueError) as exc:
+            raise ArtifactCorruptionError(f"artifact record is corrupt: {path}") from exc
+        return artifact
+
     def _artifact(self, path: Path, digest: str, size: int, media_type: str) -> Artifact:
         return Artifact(
             digest=digest,
@@ -147,6 +190,14 @@ class ArtifactStore:
             size=size,
             media_type=media_type,
         )
+
+    @staticmethod
+    def _sync_directory(directory: Path) -> None:
+        descriptor = os.open(directory, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
 
     @staticmethod
     def _temporary_path(directory: Path) -> Path:

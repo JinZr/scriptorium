@@ -1,15 +1,13 @@
-import sqlite3
-
 import pytest
 
 from scriptorium.domain import AgentRole, Artifact, AttemptStatus, RunStatus, Task, TaskStatus
-from scriptorium.storage import ConflictError, Database
+from scriptorium.storage import ConflictError, Database, StorageError
 
 from ._factories import create_completed_attempt, make_run
 
 
 def test_run_task_attempt_lifecycle_persists(tmp_path) -> None:
-    path = tmp_path / "state.sqlite3"
+    path = tmp_path
     with Database(path) as database:
         run = database.create_run(make_run())
         database.update_run(run.id, RunStatus.REVIEWING)
@@ -18,7 +16,6 @@ def test_run_task_attempt_lifecycle_persists(tmp_path) -> None:
         assert attempt.status == AttemptStatus.COMPLETED
         assert attempt.thread_id == "thread-1"
         assert database.get_task(task.id).status == TaskStatus.COMPLETED
-        assert database.get_run(run.id).estimated_cost_usd == pytest.approx(0.25)
         assert [event.event_type for event in database.list_events(run.id)] == [
             "run.created",
             "run.status_changed",
@@ -36,14 +33,13 @@ def test_run_task_attempt_lifecycle_persists(tmp_path) -> None:
 
 
 def test_attempt_retry_is_append_only(tmp_path) -> None:
-    with Database(tmp_path / "state.sqlite3") as database:
+    with Database(tmp_path) as database:
         run = database.create_run(make_run())
         task = database.create_task(
             Task(
                 run_id=run.id,
                 stage="review",
                 role=AgentRole.CONSISTENCY,
-                route="primary",
                 input_digest="d" * 64,
             )
         )
@@ -65,19 +61,20 @@ def test_attempt_retry_is_append_only(tmp_path) -> None:
             AttemptStatus.INTERRUPTED,
             AttemptStatus.RUNNING,
         ]
-        with pytest.raises(sqlite3.IntegrityError, match="append-only"):
-            database.connection.execute("DELETE FROM attempts WHERE id = ?", (first.id,))
+        with pytest.raises(ConflictError, match="already terminal"):
+            database.finish_attempt(first.id, AttemptStatus.COMPLETED)
+    with Database(tmp_path) as reopened:
+        assert [attempt.id for attempt in reopened.list_attempts(task.id)] == [first.id, second.id]
 
 
 def test_attempt_session_is_recorded_once_while_running(tmp_path) -> None:
-    with Database(tmp_path / "state.sqlite3") as database:
+    with Database(tmp_path) as database:
         run = database.create_run(make_run())
         task = database.create_task(
             Task(
                 run_id=run.id,
                 stage="review",
                 role=AgentRole.CONSISTENCY,
-                route="primary",
                 input_digest="d" * 64,
             )
         )
@@ -102,14 +99,13 @@ def test_attempt_session_is_recorded_once_while_running(tmp_path) -> None:
 
 
 def test_finish_attempt_rejects_a_different_recorded_session(tmp_path) -> None:
-    with Database(tmp_path / "state.sqlite3") as database:
+    with Database(tmp_path) as database:
         run = database.create_run(make_run())
         task = database.create_task(
             Task(
                 run_id=run.id,
                 stage="review",
                 role=AgentRole.CONSISTENCY,
-                route="primary",
                 input_digest="d" * 64,
             )
         )
@@ -126,7 +122,7 @@ def test_finish_attempt_rejects_a_different_recorded_session(tmp_path) -> None:
 
 
 def test_validation_report_pointer_is_atomic_and_persists(tmp_path) -> None:
-    path = tmp_path / "state.sqlite3"
+    path = tmp_path
     digest = "f" * 64
     with Database(path) as database:
         run = database.create_run(make_run())
@@ -135,23 +131,20 @@ def test_validation_report_pointer_is_atomic_and_persists(tmp_path) -> None:
                 run_id=run.id,
                 stage="review",
                 role=AgentRole.CONSISTENCY,
-                route="primary",
                 input_digest="d" * 64,
             )
         )
         attempt = database.begin_attempt(task.id)
         events_before = database.list_events(run.id)
 
-        with pytest.raises(sqlite3.IntegrityError, match="FOREIGN KEY"):
+        with pytest.raises(StorageError, match="artifact is not recorded"):
             database.finish_attempt(
                 attempt.id,
                 AttemptStatus.FAILED,
                 validation_report_artifact_digest=digest,
-                estimated_cost_usd=0.25,
             )
 
         assert database.get_attempt(attempt.id).status == AttemptStatus.RUNNING
-        assert database.get_run(run.id).estimated_cost_usd == 0
         assert database.list_events(run.id) == events_before
 
         database.record_artifact(
@@ -171,15 +164,13 @@ def test_validation_report_pointer_is_atomic_and_persists(tmp_path) -> None:
 
     with Database(path) as reopened:
         assert reopened.get_attempt(attempt.id).validation_report_artifact_digest == digest
-        with pytest.raises(sqlite3.IntegrityError, match="terminal attempts are immutable"):
-            reopened.connection.execute(
-                "UPDATE attempts SET validation_report_artifact_digest = NULL WHERE id = ?",
-                (attempt.id,),
-            )
+        with pytest.raises(ConflictError, match="already terminal"):
+            reopened.finish_attempt(attempt.id, AttemptStatus.COMPLETED)
+        assert reopened.get_attempt(attempt.id).validation_report_artifact_digest == digest
 
 
 def test_cancel_incomplete_tasks_preserves_completed_history(tmp_path) -> None:
-    with Database(tmp_path / "state.sqlite3") as database:
+    with Database(tmp_path) as database:
         run = database.create_run(make_run())
         completed, _ = create_completed_attempt(database, run)
         pending = database.create_task(
@@ -187,7 +178,6 @@ def test_cancel_incomplete_tasks_preserves_completed_history(tmp_path) -> None:
                 run_id=run.id,
                 stage="review",
                 role=AgentRole.CONSISTENCY,
-                route="primary",
                 input_digest="e" * 64,
             )
         )
@@ -198,7 +188,7 @@ def test_cancel_incomplete_tasks_preserves_completed_history(tmp_path) -> None:
 
 
 def test_durable_cancel_is_atomic_and_idempotent_by_terminal_state(tmp_path) -> None:
-    with Database(tmp_path / "state.sqlite3") as database:
+    with Database(tmp_path) as database:
         run = database.create_run(make_run())
         database.update_run(run.id, RunStatus.REVIEWING)
         task = database.create_task(
@@ -206,7 +196,6 @@ def test_durable_cancel_is_atomic_and_idempotent_by_terminal_state(tmp_path) -> 
                 run_id=run.id,
                 stage="review",
                 role=AgentRole.CONSISTENCY,
-                route="primary",
                 input_digest="d" * 64,
             )
         )

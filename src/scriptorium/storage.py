@@ -1,12 +1,17 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
+from dataclasses import replace
+import fcntl
 import json
+import os
 from pathlib import Path
-import sqlite3
-import threading
-from typing import Any, Iterator, Mapping, Sequence
+import re
+import stat
+import tempfile
+from typing import Any, Callable, Iterator, Mapping, Sequence
 
+from scriptorium.artifacts import ArtifactError, ArtifactStore
 from scriptorium.domain import (
     AgentRole,
     Artifact,
@@ -31,208 +36,36 @@ from scriptorium.domain import (
     validate_task_transition,
 )
 
-_SCHEMA = """
-BEGIN IMMEDIATE;
-
-CREATE TABLE IF NOT EXISTS runs (
-    id TEXT PRIMARY KEY,
-    repository TEXT NOT NULL,
-    commit_sha TEXT NOT NULL,
-    tree_sha TEXT NOT NULL,
-    profile TEXT NOT NULL,
-    status TEXT NOT NULL,
-    config_digest TEXT NOT NULL,
-    frozen_config_json TEXT NOT NULL,
-    budget_usd REAL,
-    estimated_cost_usd REAL NOT NULL DEFAULT 0,
-    created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL,
-    error TEXT,
-    brief_digest TEXT REFERENCES artifacts(digest) ON DELETE RESTRICT
-);
-
-CREATE TABLE IF NOT EXISTS tasks (
-    id TEXT PRIMARY KEY,
-    run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE RESTRICT,
-    stage TEXT NOT NULL,
-    role TEXT NOT NULL,
-    route TEXT NOT NULL,
-    input_digest TEXT NOT NULL,
-    status TEXT NOT NULL,
-    created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL,
-    UNIQUE (run_id, stage, role, route, input_digest)
-);
-
-CREATE TABLE IF NOT EXISTS artifacts (
-    digest TEXT PRIMARY KEY,
-    relative_path TEXT NOT NULL,
-    size INTEGER NOT NULL,
-    media_type TEXT NOT NULL,
-    created_at TEXT NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS attempts (
-    id TEXT PRIMARY KEY,
-    task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE RESTRICT,
-    ordinal INTEGER NOT NULL,
-    status TEXT NOT NULL,
-    thread_id TEXT,
-    runtime_name TEXT,
-    runtime_version TEXT,
-    model TEXT,
-    model_provider TEXT,
-    prompt_digest TEXT,
-    schema_digest TEXT,
-    bundle_digest TEXT,
-    input_tokens INTEGER NOT NULL DEFAULT 0,
-    cached_input_tokens INTEGER NOT NULL DEFAULT 0,
-    output_tokens INTEGER NOT NULL DEFAULT 0,
-    reasoning_tokens INTEGER NOT NULL DEFAULT 0,
-    estimated_cost_usd REAL NOT NULL DEFAULT 0,
-    trace_artifact_digest TEXT REFERENCES artifacts(digest) ON DELETE RESTRICT,
-    output_artifact_digest TEXT REFERENCES artifacts(digest) ON DELETE RESTRICT,
-    duration_ms INTEGER,
-    error TEXT,
-    created_at TEXT NOT NULL,
-    completed_at TEXT,
-    validation_report_artifact_digest TEXT REFERENCES artifacts(digest) ON DELETE RESTRICT,
-    external_client TEXT,
-    effort TEXT,
-    session_source TEXT,
-    UNIQUE (task_id, ordinal)
-);
-
-CREATE TABLE IF NOT EXISTS findings (
-    id TEXT PRIMARY KEY,
-    run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE RESTRICT,
-    task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE RESTRICT,
-    attempt_id TEXT NOT NULL REFERENCES attempts(id) ON DELETE RESTRICT,
-    fingerprint TEXT NOT NULL,
-    role TEXT NOT NULL,
-    category TEXT NOT NULL,
-    severity TEXT NOT NULL,
-    title TEXT NOT NULL,
-    claim TEXT NOT NULL,
-    evidence_json TEXT NOT NULL,
-    explanation TEXT NOT NULL,
-    suggested_action TEXT NOT NULL,
-    confidence REAL NOT NULL,
-    status TEXT NOT NULL,
-    created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL,
-    consequence TEXT,
-    affected_claim TEXT,
-    UNIQUE (run_id, fingerprint)
-);
-
-CREATE TABLE IF NOT EXISTS decisions (
-    id TEXT PRIMARY KEY,
-    target_type TEXT NOT NULL,
-    target_id TEXT NOT NULL,
-    decision TEXT NOT NULL,
-    reason TEXT NOT NULL,
-    actor TEXT NOT NULL,
-    created_at TEXT NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS patches (
-    id TEXT PRIMARY KEY,
-    run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE RESTRICT,
-    base_commit TEXT NOT NULL,
-    diff_digest TEXT NOT NULL REFERENCES artifacts(digest) ON DELETE RESTRICT,
-    summary TEXT NOT NULL,
-    edits_json TEXT NOT NULL,
-    status TEXT NOT NULL,
-    build_succeeded INTEGER NOT NULL DEFAULT 0,
-    created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL,
-    applied_at TEXT,
-    attempt_id TEXT REFERENCES attempts(id) ON DELETE RESTRICT,
-    UNIQUE (run_id, base_commit, diff_digest)
-);
-
-CREATE TABLE IF NOT EXISTS verifications (
-    id TEXT PRIMARY KEY,
-    patch_id TEXT NOT NULL REFERENCES patches(id) ON DELETE RESTRICT,
-    attempt_id TEXT REFERENCES attempts(id) ON DELETE RESTRICT,
-    result TEXT NOT NULL,
-    summary TEXT NOT NULL,
-    artifact_digest TEXT REFERENCES artifacts(digest) ON DELETE RESTRICT,
-    created_at TEXT NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS events (
-    id TEXT PRIMARY KEY,
-    run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE RESTRICT,
-    event_type TEXT NOT NULL,
-    entity_type TEXT NOT NULL,
-    entity_id TEXT NOT NULL,
-    payload_json TEXT NOT NULL,
-    created_at TEXT NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS external_tasks (
-    task_id TEXT PRIMARY KEY REFERENCES tasks(id) ON DELETE RESTRICT,
-    prompt_digest TEXT NOT NULL REFERENCES artifacts(digest) ON DELETE RESTRICT,
-    schema_digest TEXT NOT NULL REFERENCES artifacts(digest) ON DELETE RESTRICT,
-    bundle_digest TEXT NOT NULL,
-    bundle_path TEXT NOT NULL,
-    schema_kind TEXT NOT NULL,
-    example_digest TEXT REFERENCES artifacts(digest) ON DELETE RESTRICT
-);
-
-CREATE TRIGGER IF NOT EXISTS artifacts_no_update
-BEFORE UPDATE ON artifacts
-BEGIN
-    SELECT RAISE(ABORT, 'artifacts are immutable');
-END;
-
-CREATE TRIGGER IF NOT EXISTS artifacts_no_delete
-BEFORE DELETE ON artifacts
-BEGIN
-    SELECT RAISE(ABORT, 'artifacts are immutable');
-END;
-
-CREATE TRIGGER IF NOT EXISTS attempts_no_delete
-BEFORE DELETE ON attempts
-BEGIN
-    SELECT RAISE(ABORT, 'attempts are append-only');
-END;
-
-CREATE TRIGGER IF NOT EXISTS attempts_no_terminal_update
-BEFORE UPDATE ON attempts
-WHEN OLD.status <> 'running'
-BEGIN
-    SELECT RAISE(ABORT, 'terminal attempts are immutable');
-END;
-
-CREATE TRIGGER IF NOT EXISTS decisions_no_update
-BEFORE UPDATE ON decisions
-BEGIN
-    SELECT RAISE(ABORT, 'decisions are append-only');
-END;
-
-CREATE TRIGGER IF NOT EXISTS decisions_no_delete
-BEFORE DELETE ON decisions
-BEGIN
-    SELECT RAISE(ABORT, 'decisions are append-only');
-END;
-
-CREATE TRIGGER IF NOT EXISTS events_no_update
-BEFORE UPDATE ON events
-BEGIN
-    SELECT RAISE(ABORT, 'events are append-only');
-END;
-
-CREATE TRIGGER IF NOT EXISTS events_no_delete
-BEFORE DELETE ON events
-BEGIN
-    SELECT RAISE(ABORT, 'events are append-only');
-END;
-
-COMMIT;
-"""
+STATE_FILE = "state.json"
+LOCK_FILE = "state.lock"
+_SAFE_RUN_ID = re.compile(r"[A-Za-z0-9_-]+")
+_SEVERITY_ORDER = {"blocker": 0, "major": 1, "moderate": 2, "minor": 3}
+_FINDING_DECISIONS = {
+    "confirm": FindingStatus.CONFIRMED,
+    "reject": FindingStatus.REJECTED,
+    "waive": FindingStatus.WAIVED,
+}
+_PATCH_DECISIONS = {"approve": PatchStatus.APPROVED, "reject": PatchStatus.REJECTED}
+_DECIDABLE_PATCHES = {PatchStatus.PROPOSED, PatchStatus.APPROVED, PatchStatus.REJECTED}
+_PATCH_TRANSITIONS = {
+    PatchStatus.PROPOSED: {PatchStatus.APPROVED, PatchStatus.REJECTED},
+    PatchStatus.APPROVED: {PatchStatus.REJECTED, PatchStatus.VERIFIED, PatchStatus.STALE},
+    PatchStatus.REJECTED: set(),
+    PatchStatus.VERIFIED: {PatchStatus.APPLIED, PatchStatus.STALE},
+    PatchStatus.APPLIED: set(),
+    PatchStatus.STALE: set(),
+}
+_INCOMPLETE_TASKS = {TaskStatus.PENDING, TaskStatus.FAILED, TaskStatus.INTERRUPTED}
+_EXTERNAL_TASK_KEYS = (
+    "task_id",
+    "prompt_digest",
+    "schema_digest",
+    "bundle_digest",
+    "bundle_path",
+    "schema_kind",
+    "example_digest",
+)
+_ORPHANED_ATTEMPT_ERROR = "process exited before attempt completion"
 
 
 class StorageError(RuntimeError):
@@ -247,37 +80,176 @@ class ConflictError(StorageError):
     pass
 
 
-class Database:
-    def __init__(self, path: str | Path) -> None:
-        self.path = str(path)
-        if self.path != ":memory:":
-            Path(self.path).parent.mkdir(parents=True, exist_ok=True)
-        self._lock = threading.RLock()
-        self.connection = sqlite3.connect(self.path, isolation_level=None, check_same_thread=False)
-        self.connection.row_factory = sqlite3.Row
-        self.connection.execute("PRAGMA foreign_keys = ON")
-        self.connection.execute("PRAGMA busy_timeout = 5000")
-        # One write transaction makes a concurrent first open wait, then find every object already created. It runs
-        # before the WAL switch, which needs an exclusive lock that a racing first open could otherwise refuse.
-        self.connection.executescript(_SCHEMA)
-        self.connection.execute("PRAGMA journal_mode = WAL")
-        self.connection.execute("PRAGMA synchronous = NORMAL")
+class _RunState:
+    """One run's complete durable record, read from and replaced as a single state file."""
 
-    @contextmanager
-    def transaction(self) -> Iterator[sqlite3.Connection]:
-        with self._lock:
-            self.connection.execute("BEGIN IMMEDIATE")
-            try:
-                yield self.connection
-            except BaseException:
-                self.connection.rollback()
-                raise
-            else:
-                self.connection.commit()
+    KEYS = ("run", "tasks", "external_tasks", "attempts", "findings", "decisions", "patches", "verifications", "events")
+
+    def __init__(self, run: Run) -> None:
+        self.run = run
+        self.tasks: dict[str, Task] = {}
+        self.external_tasks: dict[str, dict[str, Any]] = {}
+        self.attempts: dict[str, Attempt] = {}
+        self.findings: dict[str, Finding] = {}
+        self.decisions: list[Decision] = []
+        self.patches: dict[str, Patch] = {}
+        self.verifications: dict[str, Verification] = {}
+        self.events: list[Event] = []
+        self.dirty = False
+
+    @classmethod
+    def parse(cls, path: Path, data: bytes) -> _RunState:
+        try:
+            raw = json.loads(data)
+            if not isinstance(raw, dict) or set(raw) != set(cls.KEYS):
+                raise ValueError("unexpected top-level keys")
+            state = cls(_run_from(raw["run"]))
+            state.tasks = {item.id: item for item in map(_task_from, raw["tasks"])}
+            state.external_tasks = {item["task_id"]: _external_task_from(item) for item in raw["external_tasks"]}
+            state.attempts = {item.id: item for item in map(_attempt_from, raw["attempts"])}
+            state.findings = {item.id: item for item in map(_finding_from, raw["findings"])}
+            state.decisions = [Decision(**item) for item in raw["decisions"]]
+            state.patches = {item.id: item for item in map(_patch_from, raw["patches"])}
+            state.verifications = {item.id: item for item in map(_verification_from, raw["verifications"])}
+            state.events = [Event(**item) for item in raw["events"]]
+            if state.run.id != path.parent.name:
+                raise ValueError(f"run {state.run.id} does not match its directory")
+        except (KeyError, TypeError, ValueError) as exc:
+            raise StorageError(f"run state is unreadable: {path}: {exc}") from exc
+        return state
+
+    def serialize(self) -> bytes:
+        document = {
+            "run": vars(self.run),
+            "tasks": [vars(item) for item in self.tasks.values()],
+            "external_tasks": list(self.external_tasks.values()),
+            "attempts": [vars(item) for item in self.attempts.values()],
+            "findings": [vars(item) for item in self.findings.values()],
+            "decisions": [vars(item) for item in self.decisions],
+            "patches": [vars(item) for item in self.patches.values()],
+            "verifications": [vars(item) for item in self.verifications.values()],
+            "events": [vars(item) for item in self.events],
+        }
+        return canonical_json(document).encode("utf-8")
+
+    def add_event(self, event: Event) -> None:
+        if any(item.id == event.id for item in self.events):
+            raise ConflictError(f"event already exists: {event.id}")
+        self.events.append(event)
+        self.dirty = True
+
+    def add_decision(self, decision: Decision) -> None:
+        if any(item.id == decision.id for item in self.decisions):
+            raise ConflictError(f"decision already exists: {decision.id}")
+        self.decisions.append(decision)
+        self.dirty = True
+
+    def set_run(self, run: Run) -> None:
+        self.run = run
+        self.dirty = True
+
+    def set_task(self, task: Task) -> None:
+        self.tasks[task.id] = task
+        self.dirty = True
+
+    def set_attempt(self, attempt: Attempt) -> None:
+        current = self.attempts.get(attempt.id)
+        if current is not None and current.status != AttemptStatus.RUNNING:
+            raise ConflictError(f"terminal attempts are immutable: {attempt.id}")
+        self.attempts[attempt.id] = attempt
+        self.dirty = True
+
+    def set_finding(self, finding: Finding) -> None:
+        self.findings[finding.id] = finding
+        self.dirty = True
+
+    def set_patch(self, patch: Patch) -> None:
+        self.patches[patch.id] = patch
+        self.dirty = True
+
+    def task_status_event(self, task: Task, status: TaskStatus) -> Event:
+        return Event(
+            run_id=self.run.id,
+            event_type="task.status_changed",
+            entity_type="task",
+            entity_id=task.id,
+            payload={"from": task.status.value, "to": status.value},
+        )
+
+    def interrupt_running_attempts(self, at: str) -> int:
+        running = sorted(
+            (item for item in self.attempts.values() if item.status == AttemptStatus.RUNNING),
+            key=lambda item: (item.created_at, item.id),
+        )
+        for attempt in running:
+            self.set_attempt(
+                replace(attempt, status=AttemptStatus.INTERRUPTED, completed_at=at, error=_ORPHANED_ATTEMPT_ERROR)
+            )
+            self.set_task(replace(self.tasks[attempt.task_id], status=TaskStatus.INTERRUPTED, updated_at=at))
+            self.add_event(
+                Event(
+                    run_id=self.run.id,
+                    event_type="attempt.interrupted",
+                    entity_type="attempt",
+                    entity_id=attempt.id,
+                    payload={"task_id": attempt.task_id, "ordinal": attempt.ordinal},
+                )
+            )
+        return len(running)
+
+    def cancel_incomplete_tasks(self, at: str) -> int:
+        incomplete = sorted(
+            (item for item in self.tasks.values() if item.status in _INCOMPLETE_TASKS),
+            key=lambda item: (item.created_at, item.id),
+        )
+        for task in incomplete:
+            validate_task_transition(task.status, TaskStatus.CANCELLED)
+            self.set_task(replace(task, status=TaskStatus.CANCELLED, updated_at=at))
+            self.add_event(self.task_status_event(task, TaskStatus.CANCELLED))
+        return len(incomplete)
+
+    def record_finding_decision(self, decision: Decision) -> None:
+        finding = self.findings[decision.target_id]
+        status = _FINDING_DECISIONS[decision.decision]
+        self.set_finding(replace(finding, status=status, updated_at=decision.created_at))
+        self.add_decision(decision)
+        self.add_event(self._decision_event("finding", decision))
+
+    def record_patch_decision(self, decision: Decision) -> None:
+        patch = self.patches[decision.target_id]
+        if patch.status not in _DECIDABLE_PATCHES:
+            raise ConflictError(f"patch cannot be decided in status {patch.status.value}")
+        status = _PATCH_DECISIONS[decision.decision]
+        self.set_patch(replace(patch, status=status, updated_at=decision.created_at))
+        self.add_decision(decision)
+        self.add_event(self._decision_event("patch", decision))
+
+    def _decision_event(self, kind: str, decision: Decision) -> Event:
+        return Event(
+            run_id=self.run.id,
+            event_type=f"{kind}.decided",
+            entity_type=kind,
+            entity_id=decision.target_id,
+            payload={"decision": decision.decision, "reason": decision.reason, "actor": decision.actor},
+        )
+
+
+class Database:
+    """Durable workflow state: one JSON state file per run, replaced atomically under a per-run file lock.
+
+    ``path`` is the state directory. Run ``RUN_ID`` exists exactly when ``runs/RUN_ID/state.json`` exists. Every
+    mutation takes the run's exclusive ``state.lock``, loads the state, changes it in memory, and replaces the file
+    with a complete, fsynced copy, so a reader or a crash sees the old state or the new one, never a mixture.
+    """
+
+    def __init__(self, path: str | Path) -> None:
+        self.root = Path(path)
+        self.runs_dir = self.root / "runs"
+        self.runs_dir.mkdir(parents=True, exist_ok=True)
+        self._artifacts = ArtifactStore(self.root / "artifacts")
 
     def close(self) -> None:
-        with self._lock:
-            self.connection.close()
+        pass
 
     def __enter__(self) -> Database:
         return self
@@ -285,183 +257,167 @@ class Database:
     def __exit__(self, exc_type: object, exc_value: object, traceback: object) -> None:
         self.close()
 
+    # Runs
+
     def create_run(self, run: Run) -> Run:
-        with self.transaction() as connection:
-            connection.execute(
-                """
-                INSERT INTO runs (
-                    id, repository, commit_sha, tree_sha, profile, status, config_digest, frozen_config_json,
-                    budget_usd, estimated_cost_usd, created_at, updated_at, error, brief_digest
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    run.id,
-                    run.repository,
-                    run.commit_sha,
-                    run.tree_sha,
-                    run.profile,
-                    run.status.value,
-                    run.config_digest,
-                    canonical_json(run.frozen_config),
-                    run.budget_usd,
-                    run.estimated_cost_usd,
-                    run.created_at,
-                    run.updated_at,
-                    run.error,
-                    run.brief_digest,
-                ),
-            )
-            self._append_event_row(
-                connection,
+        if not _SAFE_RUN_ID.fullmatch(run.id):
+            raise StorageError(f"unsafe run id: {run.id!r}")
+        if run.brief_digest is not None:
+            self._require_artifact(run.brief_digest)
+        path = self._state_path(run.id)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with self._run_lock(run.id):
+            if path.exists():
+                raise ConflictError(f"run already exists: {run.id}")
+            state = _RunState(run)
+            state.add_event(
                 Event(
                     run_id=run.id,
                     event_type="run.created",
                     entity_type="run",
                     entity_id=run.id,
                     payload={"status": run.status.value},
-                ),
+                )
             )
+            self._write(path, state)
         return run
 
     def get_run(self, run_id: str) -> Run:
-        row = self.connection.execute("SELECT * FROM runs WHERE id = ?", (run_id,)).fetchone()
-        if row is None:
-            raise NotFoundError(f"run not found: {run_id}")
-        return self._run_from_row(row)
+        return self._load(run_id).run
 
     def list_runs(self) -> list[Run]:
-        rows = self.connection.execute("SELECT * FROM runs ORDER BY created_at, id").fetchall()
-        return [self._run_from_row(row) for row in rows]
+        return sorted((state.run for state in self._states()), key=lambda run: (run.created_at, run.id))
 
     def list_run_summaries(self, status: RunStatus | None, limit: int) -> tuple[int, list[tuple[Run, dict[str, int]]]]:
         """Return the matching run count and the newest ``limit`` runs with their task counts by status."""
-        clause, parameters = ("WHERE status = ?", (status.value,)) if status is not None else ("", ())
-        # One statement keeps total and rows in a single snapshot; limit >= 1, so no rows means no matches.
-        rows = self.connection.execute(
-            f"SELECT *, (SELECT COUNT(*) FROM runs {clause}) AS match_total FROM runs {clause} "
-            "ORDER BY created_at DESC, id DESC LIMIT ?",
-            (*parameters, *parameters, limit),
-        ).fetchall()
-        total = rows[0]["match_total"] if rows else 0
-        runs = [self._run_from_row(row) for row in rows]
-        counts: dict[str, dict[str, int]] = {run.id: {} for run in runs}
-        marks = ",".join("?" for _ in runs)
-        for run_id, task_status, count in self.connection.execute(
-            f"SELECT run_id, status, COUNT(*) FROM tasks WHERE run_id IN ({marks}) GROUP BY run_id, status",
-            [run.id for run in runs],
-        ):
-            counts[run_id][task_status] = count
-        return total, [(run, counts[run.id]) for run in runs]
+        states = sorted(
+            (state for state in self._states() if status is None or state.run.status == status),
+            key=lambda state: (state.run.created_at, state.run.id),
+            reverse=True,
+        )
+        rows = []
+        for state in states[:limit]:
+            counts: dict[str, int] = {}
+            for task in state.tasks.values():
+                counts[task.status.value] = counts.get(task.status.value, 0) + 1
+            rows.append((state.run, dict(sorted(counts.items()))))
+        return len(states), rows
 
     def list_active_runs(self, commit_sha: str) -> list[Run]:
         # A failed run can still be resumed, so only completed and cancelled runs are inactive.
-        inactive = (RunStatus.COMPLETED.value, RunStatus.CANCELLED.value)
-        rows = self.connection.execute(
-            "SELECT * FROM runs WHERE commit_sha = ? AND status NOT IN (?, ?) ORDER BY created_at, id",
-            (commit_sha, *inactive),
-        ).fetchall()
-        return [self._run_from_row(row) for row in rows]
+        inactive = {RunStatus.COMPLETED, RunStatus.CANCELLED}
+        return [run for run in self.list_runs() if run.commit_sha == commit_sha and run.status not in inactive]
 
     def update_run_status(self, run_id: str, status: RunStatus, error: str | None = None) -> Run:
-        with self.transaction() as connection:
-            row = connection.execute("SELECT * FROM runs WHERE id = ?", (run_id,)).fetchone()
-            if row is None:
-                raise NotFoundError(f"run not found: {run_id}")
-            current = RunStatus(row["status"])
+        with self._mutation(run_id) as state:
+            current = state.run.status
             validate_run_transition(current, status)
-            if current == status and row["error"] == error:
-                return self._run_from_row(row)
-            updated_at = utc_now()
-            connection.execute(
-                "UPDATE runs SET status = ?, error = ?, updated_at = ? WHERE id = ?",
-                (status.value, error, updated_at, run_id),
-            )
-            self._append_event_row(
-                connection,
+            if current == status and state.run.error == error:
+                return state.run
+            state.set_run(replace(state.run, status=status, error=error, updated_at=utc_now()))
+            state.add_event(
                 Event(
                     run_id=run_id,
                     event_type="run.status_changed",
                     entity_type="run",
                     entity_id=run_id,
                     payload={"from": current.value, "to": status.value, "error": error},
-                ),
+                )
             )
-            row = connection.execute("SELECT * FROM runs WHERE id = ?", (run_id,)).fetchone()
-        return self._run_from_row(row)
+            return state.run
 
     def update_run(self, run_id: str, status: RunStatus, error: str | None = None) -> Run:
         return self.update_run_status(run_id, status, error)
 
-    def add_run_cost(self, run_id: str, amount_usd: float) -> Run:
-        if amount_usd < 0:
-            raise ValueError("amount_usd must be non-negative")
-        with self.transaction() as connection:
-            result = connection.execute(
-                "UPDATE runs SET estimated_cost_usd = estimated_cost_usd + ?, updated_at = ? WHERE id = ?",
-                (amount_usd, utc_now(), run_id),
+    def cancel_run(self, run_id: str, reason: str, request_id: str) -> Run:
+        with self._mutation(run_id) as state:
+            current = state.run.status
+            if current == RunStatus.CANCELLED:
+                return state.run
+            if current in {RunStatus.COMPLETED, RunStatus.FAILED}:
+                raise ConflictError(f"run cannot be cancelled while {current.value}")
+            updated_at = utc_now()
+            state.interrupt_running_attempts(updated_at)
+            state.cancel_incomplete_tasks(updated_at)
+            validate_run_transition(current, RunStatus.CANCELLED)
+            state.set_run(replace(state.run, status=RunStatus.CANCELLED, error=None, updated_at=updated_at))
+            state.add_event(
+                Event(
+                    run_id=run_id,
+                    event_type="run.status_changed",
+                    entity_type="run",
+                    entity_id=run_id,
+                    payload={"from": current.value, "to": RunStatus.CANCELLED.value, "error": None},
+                )
             )
-            if result.rowcount != 1:
-                raise NotFoundError(f"run not found: {run_id}")
-            row = connection.execute("SELECT * FROM runs WHERE id = ?", (run_id,)).fetchone()
-        return self._run_from_row(row)
+            state.add_event(
+                Event(
+                    run_id=run_id,
+                    event_type="run.cancelled",
+                    entity_type="run",
+                    entity_id=run_id,
+                    payload={"reason": reason, "request_id": request_id},
+                )
+            )
+            return state.run
+
+    def cancel_incomplete_tasks(self, run_id: str) -> int:
+        if not self._exists(run_id):
+            return 0
+        with self._mutation(run_id) as state:
+            return state.cancel_incomplete_tasks(utc_now())
+
+    def recover_orphaned_attempts(self, run_id: str) -> int:
+        # Callers must already own the run's exclusive flock; the state file alone cannot prove an owner is dead.
+        if not self._exists(run_id):
+            return 0
+        with self._mutation(run_id) as state:
+            return state.interrupt_running_attempts(utc_now())
+
+    # Tasks
 
     def create_task(self, task: Task) -> Task:
-        with self.transaction() as connection:
-            try:
-                connection.execute(
-                    """
-                    INSERT INTO tasks (
-                        id, run_id, stage, role, route, input_digest, status, created_at, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        task.id,
-                        task.run_id,
-                        task.stage,
-                        task.role.value,
-                        task.route,
-                        task.input_digest,
-                        task.status.value,
-                        task.created_at,
-                        task.updated_at,
-                    ),
-                )
-            except sqlite3.IntegrityError as exc:
-                raise ConflictError("task already exists for run, stage, role, route, and input digest") from exc
-            self._append_event_row(
-                connection,
+        with self._mutation(task.run_id) as state:
+            if task.id in state.tasks:
+                raise ConflictError(f"task already exists: {task.id}")
+            key = (task.stage, task.role, task.input_digest)
+            if any((item.stage, item.role, item.input_digest) == key for item in state.tasks.values()):
+                raise ConflictError("task already exists for run, stage, role, and input digest")
+            state.set_task(task)
+            state.add_event(
                 Event(
                     run_id=task.run_id,
                     event_type="task.created",
                     entity_type="task",
                     entity_id=task.id,
-                    payload={"stage": task.stage, "role": task.role.value, "route": task.route},
-                ),
+                    payload={"stage": task.stage, "role": task.role.value},
+                )
             )
         return task
 
     def get_task(self, task_id: str) -> Task:
-        row = self.connection.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
-        if row is None:
-            raise NotFoundError(f"task not found: {task_id}")
-        return self._task_from_row(row)
+        return self._owner(task_id, "task", _tasks).tasks[task_id]
 
-    def find_task(
-        self,
-        run_id: str,
-        stage: str,
-        role: AgentRole,
-        route: str,
-        input_digest: str,
-    ) -> Task | None:
-        row = self.connection.execute(
-            """
-            SELECT * FROM tasks
-            WHERE run_id = ? AND stage = ? AND role = ? AND route = ? AND input_digest = ?
-            """,
-            (run_id, stage, role.value, route, input_digest),
-        ).fetchone()
-        return self._task_from_row(row) if row is not None else None
+    def find_task(self, run_id: str, stage: str, role: AgentRole, input_digest: str) -> Task | None:
+        state = self._load_if_present(run_id)
+        if state is None:
+            return None
+        key = (stage, role, input_digest)
+        return next((item for item in state.tasks.values() if (item.stage, item.role, item.input_digest) == key), None)
+
+    def list_tasks(self, run_id: str) -> list[Task]:
+        state = self._load_if_present(run_id)
+        return [] if state is None else sorted(state.tasks.values(), key=lambda item: (item.created_at, item.id))
+
+    def update_task_status(self, task_id: str, status: TaskStatus) -> Task:
+        with self._mutation(self._owner(task_id, "task", _tasks).run.id) as state:
+            task = state.tasks[task_id]
+            validate_task_transition(task.status, status)
+            if task.status == status:
+                return task
+            state.set_task(replace(task, status=status, updated_at=utc_now()))
+            state.add_event(state.task_status_event(task, status))
+            return state.tasks[task_id]
 
     def record_external_task(
         self,
@@ -474,162 +430,65 @@ class Database:
         example_digest: str | None = None,
     ) -> None:
         # The example digest is written only with the first record; it is not part of the frozen-input identity.
-        with self.transaction() as connection:
-            connection.execute(
-                """INSERT OR IGNORE INTO external_tasks
-                (task_id, prompt_digest, schema_digest, bundle_digest, bundle_path, schema_kind, example_digest)
-                VALUES (?, ?, ?, ?, ?, ?, ?)""",
+        record = dict(
+            zip(
+                _EXTERNAL_TASK_KEYS,
                 (task_id, prompt_digest, schema_digest, bundle_digest, bundle_path, schema_kind, example_digest),
             )
-            row = connection.execute("SELECT * FROM external_tasks WHERE task_id = ?", (task_id,)).fetchone()
-            expected = (prompt_digest, schema_digest, bundle_digest, bundle_path, schema_kind)
-            if (
-                tuple(
-                    row[key]
-                    for key in ("prompt_digest", "schema_digest", "bundle_digest", "bundle_path", "schema_kind")
-                )
-                != expected
-            ):
+        )
+        with self._mutation(self._owner(task_id, "task", _tasks).run.id) as state:
+            existing = state.external_tasks.get(task_id)
+            if existing is None:
+                for digest in (prompt_digest, schema_digest, example_digest):
+                    if digest is not None:
+                        self._require_artifact(digest)
+                state.external_tasks[task_id] = existing = record
+                state.dirty = True
+            if any(existing[key] != record[key] for key in _EXTERNAL_TASK_KEYS[1:6]):
                 raise ConflictError(f"external task material changed: {task_id}")
 
     def has_external_task(self, task_id: str) -> bool:
-        return (
-            self.connection.execute("SELECT 1 FROM external_tasks WHERE task_id = ?", (task_id,)).fetchone() is not None
-        )
+        return self._find(task_id, _external_tasks) is not None
 
     def get_external_task(self, task_id: str) -> dict[str, str]:
-        row = self.connection.execute("SELECT * FROM external_tasks WHERE task_id = ?", (task_id,)).fetchone()
-        if row is None:
-            raise NotFoundError(f"external task not found: {task_id}")
-        return dict(row)
+        return dict(self._owner(task_id, "external task", _external_tasks).external_tasks[task_id])
 
-    def list_tasks(self, run_id: str) -> list[Task]:
-        rows = self.connection.execute(
-            "SELECT * FROM tasks WHERE run_id = ? ORDER BY created_at, id",
-            (run_id,),
-        ).fetchall()
-        return [self._task_from_row(row) for row in rows]
-
-    def update_task_status(self, task_id: str, status: TaskStatus) -> Task:
-        with self.transaction() as connection:
-            row = connection.execute(
-                """
-                SELECT tasks.*, runs.id AS event_run_id
-                FROM tasks JOIN runs ON runs.id = tasks.run_id
-                WHERE tasks.id = ?
-                """,
-                (task_id,),
-            ).fetchone()
-            if row is None:
-                raise NotFoundError(f"task not found: {task_id}")
-            current = TaskStatus(row["status"])
-            validate_task_transition(current, status)
-            if current == status:
-                return self._task_from_row(row)
-            updated_at = utc_now()
-            connection.execute(
-                "UPDATE tasks SET status = ?, updated_at = ? WHERE id = ?",
-                (status.value, updated_at, task_id),
-            )
-            self._append_event_row(
-                connection,
-                Event(
-                    run_id=row["event_run_id"],
-                    event_type="task.status_changed",
-                    entity_type="task",
-                    entity_id=task_id,
-                    payload={"from": current.value, "to": status.value},
-                ),
-            )
-            row = connection.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
-        return self._task_from_row(row)
+    # Attempts
 
     def create_attempt(self, attempt: Attempt) -> Attempt:
         if attempt.status != AttemptStatus.RUNNING:
             raise ValueError("new attempts must have running status")
-        with self.transaction() as connection:
-            task_row = connection.execute("SELECT * FROM tasks WHERE id = ?", (attempt.task_id,)).fetchone()
-            if task_row is None:
-                raise NotFoundError(f"task not found: {attempt.task_id}")
-            task_status = TaskStatus(task_row["status"])
-            if task_status == TaskStatus.RUNNING:
-                raise ConflictError(f"task already has a running attempt: {attempt.task_id}")
-            validate_task_transition(task_status, TaskStatus.RUNNING)
-            expected_ordinal = connection.execute(
-                "SELECT COALESCE(MAX(ordinal), 0) + 1 AS ordinal FROM attempts WHERE task_id = ?",
-                (attempt.task_id,),
-            ).fetchone()["ordinal"]
-            if attempt.ordinal != expected_ordinal:
-                raise ConflictError(
-                    f"attempt ordinal must be {expected_ordinal} for task {attempt.task_id}, got {attempt.ordinal}"
-                )
-            connection.execute(
-                """
-                INSERT INTO attempts (
-                    id, task_id, ordinal, status, thread_id, runtime_name, runtime_version, model,
-                    model_provider, external_client, effort, session_source,
-                    prompt_digest, schema_digest, bundle_digest, input_tokens,
-                    cached_input_tokens, output_tokens, reasoning_tokens, estimated_cost_usd,
-                    trace_artifact_digest, output_artifact_digest, validation_report_artifact_digest,
-                    duration_ms, error, created_at, completed_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                self._attempt_values(attempt),
-            )
-            connection.execute(
-                "UPDATE tasks SET status = ?, updated_at = ? WHERE id = ?",
-                (TaskStatus.RUNNING.value, utc_now(), attempt.task_id),
-            )
-            self._append_event_row(
-                connection,
-                Event(
-                    run_id=task_row["run_id"],
-                    event_type="attempt.started",
-                    entity_type="attempt",
-                    entity_id=attempt.id,
-                    payload={"task_id": attempt.task_id, "ordinal": attempt.ordinal},
-                ),
-            )
+        with self._mutation(self._owner(attempt.task_id, "task", _tasks).run.id) as state:
+            self._add_attempt(state, attempt)
         return attempt
 
     def begin_attempt(self, task_id: str, **values: Any) -> Attempt:
-        row = self.connection.execute(
-            "SELECT COALESCE(MAX(ordinal), 0) + 1 AS ordinal FROM attempts WHERE task_id = ?",
-            (task_id,),
-        ).fetchone()
-        attempt = Attempt(task_id=task_id, ordinal=int(row["ordinal"]), **values)
-        return self.create_attempt(attempt)
+        with self._mutation(self._owner(task_id, "task", _tasks).run.id) as state:
+            attempt = Attempt(task_id=task_id, ordinal=_next_ordinal(state, task_id), **values)
+            if attempt.status != AttemptStatus.RUNNING:
+                raise ValueError("new attempts must have running status")
+            self._add_attempt(state, attempt)
+        return attempt
 
     def get_attempt(self, attempt_id: str) -> Attempt:
-        row = self.connection.execute("SELECT * FROM attempts WHERE id = ?", (attempt_id,)).fetchone()
-        if row is None:
-            raise NotFoundError(f"attempt not found: {attempt_id}")
-        return self._attempt_from_row(row)
+        return self._owner(attempt_id, "attempt", _attempts).attempts[attempt_id]
 
     def list_attempts(self, task_id: str) -> list[Attempt]:
-        rows = self.connection.execute(
-            "SELECT * FROM attempts WHERE task_id = ? ORDER BY ordinal",
-            (task_id,),
-        ).fetchall()
-        return [self._attempt_from_row(row) for row in rows]
+        state = self._find(task_id, _tasks)
+        if state is None:
+            return []
+        return sorted((item for item in state.attempts.values() if item.task_id == task_id), key=_ordinal)
 
     def record_attempt_session(self, attempt_id: str, thread_id: str) -> Attempt:
-        with self.transaction() as connection:
-            row = connection.execute("SELECT * FROM attempts WHERE id = ?", (attempt_id,)).fetchone()
-            if row is None:
-                raise NotFoundError(f"attempt not found: {attempt_id}")
-            if AttemptStatus(row["status"]) != AttemptStatus.RUNNING:
+        with self._mutation(self._owner(attempt_id, "attempt", _attempts).run.id) as state:
+            attempt = state.attempts[attempt_id]
+            if attempt.status != AttemptStatus.RUNNING:
                 raise ConflictError(f"attempt is already terminal: {attempt_id}")
-            current = row["thread_id"]
-            if current is not None and current != thread_id:
+            if attempt.thread_id is not None and attempt.thread_id != thread_id:
                 raise ConflictError(f"attempt already records a different session: {attempt_id}")
-            if current is None:
-                connection.execute(
-                    "UPDATE attempts SET thread_id = ? WHERE id = ?",
-                    (thread_id, attempt_id),
-                )
-                row = connection.execute("SELECT * FROM attempts WHERE id = ?", (attempt_id,)).fetchone()
-        return self._attempt_from_row(row)
+            if attempt.thread_id is None:
+                state.set_attempt(replace(attempt, thread_id=thread_id))
+            return state.attempts[attempt_id]
 
     def finish_attempt(
         self,
@@ -637,601 +496,177 @@ class Database:
         status: AttemptStatus,
         *,
         thread_id: str | None = None,
-        runtime_name: str | None = None,
-        runtime_version: str | None = None,
         model: str | None = None,
-        model_provider: str | None = None,
-        input_tokens: int = 0,
-        cached_input_tokens: int = 0,
-        output_tokens: int = 0,
-        reasoning_tokens: int = 0,
-        estimated_cost_usd: float = 0.0,
-        trace_artifact_digest: str | None = None,
         output_artifact_digest: str | None = None,
         validation_report_artifact_digest: str | None = None,
-        duration_ms: int | None = None,
         error: str | None = None,
     ) -> Attempt:
         if status == AttemptStatus.RUNNING:
             raise ValueError("finish status must be terminal")
-        with self.transaction() as connection:
-            row = connection.execute(
-                """
-                SELECT attempts.*, tasks.run_id
-                FROM attempts JOIN tasks ON tasks.id = attempts.task_id
-                WHERE attempts.id = ?
-                """,
-                (attempt_id,),
-            ).fetchone()
-            if row is None:
-                raise NotFoundError(f"attempt not found: {attempt_id}")
-            if AttemptStatus(row["status"]) != AttemptStatus.RUNNING:
+        with self._mutation(self._owner(attempt_id, "attempt", _attempts).run.id) as state:
+            attempt = state.attempts[attempt_id]
+            if attempt.status != AttemptStatus.RUNNING:
                 raise ConflictError(f"attempt is already terminal: {attempt_id}")
-            if row["thread_id"] is not None and thread_id is not None and row["thread_id"] != thread_id:
+            if attempt.thread_id is not None and thread_id is not None and attempt.thread_id != thread_id:
                 raise ConflictError(f"attempt already records a different session: {attempt_id}")
+            for digest in (output_artifact_digest, validation_report_artifact_digest):
+                if digest is not None:
+                    self._require_artifact(digest)
             completed_at = utc_now()
-            connection.execute(
-                """
-                UPDATE attempts SET
-                    status = ?, thread_id = COALESCE(?, thread_id),
-                    runtime_name = COALESCE(?, runtime_name),
-                    runtime_version = COALESCE(?, runtime_version),
-                    model = COALESCE(?, model),
-                    model_provider = COALESCE(?, model_provider),
-                    input_tokens = ?, cached_input_tokens = ?, output_tokens = ?,
-                    reasoning_tokens = ?, estimated_cost_usd = ?, trace_artifact_digest = ?,
-                    output_artifact_digest = ?, validation_report_artifact_digest = ?,
-                    duration_ms = ?, error = ?, completed_at = ?
-                WHERE id = ?
-                """,
-                (
-                    status.value,
-                    thread_id,
-                    runtime_name,
-                    runtime_version,
-                    model,
-                    model_provider,
-                    input_tokens,
-                    cached_input_tokens,
-                    output_tokens,
-                    reasoning_tokens,
-                    estimated_cost_usd,
-                    trace_artifact_digest,
-                    output_artifact_digest,
-                    validation_report_artifact_digest,
-                    duration_ms,
-                    error,
-                    completed_at,
-                    attempt_id,
-                ),
+            finished = replace(
+                attempt,
+                status=status,
+                thread_id=attempt.thread_id if thread_id is None else thread_id,
+                model=attempt.model if model is None else model,
+                output_artifact_digest=output_artifact_digest,
+                validation_report_artifact_digest=validation_report_artifact_digest,
+                error=error,
+                completed_at=completed_at,
             )
-            task_status = TaskStatus(status.value)
-            connection.execute(
-                "UPDATE tasks SET status = ?, updated_at = ? WHERE id = ?",
-                (task_status.value, completed_at, row["task_id"]),
+            state.set_attempt(finished)
+            state.set_task(
+                replace(state.tasks[attempt.task_id], status=TaskStatus(status.value), updated_at=completed_at)
             )
-            connection.execute(
-                "UPDATE runs SET estimated_cost_usd = estimated_cost_usd + ?, updated_at = ? WHERE id = ?",
-                (estimated_cost_usd, completed_at, row["run_id"]),
-            )
-            self._append_event_row(
-                connection,
+            state.add_event(
                 Event(
-                    run_id=row["run_id"],
+                    run_id=state.run.id,
                     event_type="attempt.finished",
                     entity_type="attempt",
                     entity_id=attempt_id,
-                    payload={"status": status.value, "task_id": row["task_id"], "ordinal": row["ordinal"]},
-                ),
+                    payload={"status": status.value, "task_id": attempt.task_id, "ordinal": attempt.ordinal},
+                )
             )
-            row = connection.execute("SELECT * FROM attempts WHERE id = ?", (attempt_id,)).fetchone()
-        return self._attempt_from_row(row)
+        return finished
 
-    def update_attempt(
-        self,
-        attempt_id: str,
-        status: AttemptStatus,
-        **result: Any,
-    ) -> Attempt:
+    def update_attempt(self, attempt_id: str, status: AttemptStatus, **result: Any) -> Attempt:
         return self.finish_attempt(attempt_id, status, **result)
 
-    def recover_orphaned_attempts(self, run_id: str) -> int:
-        # Callers must already own the run's exclusive flock; SQLite alone cannot prove an owner is dead.
-        with self.transaction() as connection:
-            rows = connection.execute(
-                """
-                SELECT attempts.id, attempts.task_id, attempts.ordinal
-                FROM attempts
-                JOIN tasks ON tasks.id = attempts.task_id
-                WHERE tasks.run_id = ? AND attempts.status = ?
-                ORDER BY attempts.created_at, attempts.id
-                """,
-                (run_id, AttemptStatus.RUNNING.value),
-            ).fetchall()
-            completed_at = utc_now()
-            for row in rows:
-                connection.execute(
-                    "UPDATE attempts SET status = ?, completed_at = ?, error = ? WHERE id = ?",
-                    (
-                        AttemptStatus.INTERRUPTED.value,
-                        completed_at,
-                        "process exited before attempt completion",
-                        row["id"],
-                    ),
-                )
-                connection.execute(
-                    "UPDATE tasks SET status = ?, updated_at = ? WHERE id = ?",
-                    (TaskStatus.INTERRUPTED.value, completed_at, row["task_id"]),
-                )
-                self._append_event_row(
-                    connection,
-                    Event(
-                        run_id=run_id,
-                        event_type="attempt.interrupted",
-                        entity_type="attempt",
-                        entity_id=row["id"],
-                        payload={"task_id": row["task_id"], "ordinal": row["ordinal"]},
-                    ),
-                )
-        return len(rows)
-
-    def cancel_run(self, run_id: str, reason: str, request_id: str) -> Run:
-        with self.transaction() as connection:
-            run_row = connection.execute("SELECT * FROM runs WHERE id = ?", (run_id,)).fetchone()
-            if run_row is None:
-                raise NotFoundError(f"run not found: {run_id}")
-            current_run_status = RunStatus(run_row["status"])
-            if current_run_status == RunStatus.CANCELLED:
-                return self._run_from_row(run_row)
-            if current_run_status in {RunStatus.COMPLETED, RunStatus.FAILED}:
-                raise ConflictError(f"run cannot be cancelled while {current_run_status.value}")
-
-            attempt_rows = connection.execute(
-                """
-                SELECT attempts.id, attempts.task_id, attempts.ordinal
-                FROM attempts
-                JOIN tasks ON tasks.id = attempts.task_id
-                WHERE tasks.run_id = ? AND attempts.status = ?
-                ORDER BY attempts.created_at, attempts.id
-                """,
-                (run_id, AttemptStatus.RUNNING.value),
-            ).fetchall()
-            updated_at = utc_now()
-            for row in attempt_rows:
-                connection.execute(
-                    "UPDATE attempts SET status = ?, completed_at = ?, error = ? WHERE id = ?",
-                    (
-                        AttemptStatus.INTERRUPTED.value,
-                        updated_at,
-                        "process exited before attempt completion",
-                        row["id"],
-                    ),
-                )
-                connection.execute(
-                    "UPDATE tasks SET status = ?, updated_at = ? WHERE id = ?",
-                    (TaskStatus.INTERRUPTED.value, updated_at, row["task_id"]),
-                )
-                self._append_event_row(
-                    connection,
-                    Event(
-                        run_id=run_id,
-                        event_type="attempt.interrupted",
-                        entity_type="attempt",
-                        entity_id=row["id"],
-                        payload={"task_id": row["task_id"], "ordinal": row["ordinal"]},
-                    ),
-                )
-
-            task_rows = connection.execute(
-                """
-                SELECT * FROM tasks
-                WHERE run_id = ? AND status IN (?, ?, ?)
-                ORDER BY created_at, id
-                """,
-                (
-                    run_id,
-                    TaskStatus.PENDING.value,
-                    TaskStatus.FAILED.value,
-                    TaskStatus.INTERRUPTED.value,
-                ),
-            ).fetchall()
-            for row in task_rows:
-                current = TaskStatus(row["status"])
-                validate_task_transition(current, TaskStatus.CANCELLED)
-                connection.execute(
-                    "UPDATE tasks SET status = ?, updated_at = ? WHERE id = ?",
-                    (TaskStatus.CANCELLED.value, updated_at, row["id"]),
-                )
-                self._append_event_row(
-                    connection,
-                    Event(
-                        run_id=run_id,
-                        event_type="task.status_changed",
-                        entity_type="task",
-                        entity_id=row["id"],
-                        payload={"from": current.value, "to": TaskStatus.CANCELLED.value},
-                    ),
-                )
-
-            validate_run_transition(current_run_status, RunStatus.CANCELLED)
-            connection.execute(
-                "UPDATE runs SET status = ?, error = NULL, updated_at = ? WHERE id = ?",
-                (RunStatus.CANCELLED.value, updated_at, run_id),
-            )
-            self._append_event_row(
-                connection,
-                Event(
-                    run_id=run_id,
-                    event_type="run.status_changed",
-                    entity_type="run",
-                    entity_id=run_id,
-                    payload={
-                        "from": current_run_status.value,
-                        "to": RunStatus.CANCELLED.value,
-                        "error": None,
-                    },
-                ),
-            )
-            self._append_event_row(
-                connection,
-                Event(
-                    run_id=run_id,
-                    event_type="run.cancelled",
-                    entity_type="run",
-                    entity_id=run_id,
-                    payload={"reason": reason, "request_id": request_id},
-                ),
-            )
-            row = connection.execute("SELECT * FROM runs WHERE id = ?", (run_id,)).fetchone()
-        return self._run_from_row(row)
-
-    def cancel_incomplete_tasks(self, run_id: str) -> int:
-        with self.transaction() as connection:
-            rows = connection.execute(
-                """
-                SELECT * FROM tasks
-                WHERE run_id = ? AND status IN (?, ?, ?)
-                ORDER BY created_at, id
-                """,
-                (
-                    run_id,
-                    TaskStatus.PENDING.value,
-                    TaskStatus.FAILED.value,
-                    TaskStatus.INTERRUPTED.value,
-                ),
-            ).fetchall()
-            updated_at = utc_now()
-            for row in rows:
-                current = TaskStatus(row["status"])
-                validate_task_transition(current, TaskStatus.CANCELLED)
-                connection.execute(
-                    "UPDATE tasks SET status = ?, updated_at = ? WHERE id = ?",
-                    (TaskStatus.CANCELLED.value, updated_at, row["id"]),
-                )
-                self._append_event_row(
-                    connection,
-                    Event(
-                        run_id=run_id,
-                        event_type="task.status_changed",
-                        entity_type="task",
-                        entity_id=row["id"],
-                        payload={"from": current.value, "to": TaskStatus.CANCELLED.value},
-                    ),
-                )
-        return len(rows)
+    # Artifacts
 
     def record_artifact(self, artifact: Artifact) -> Artifact:
-        with self.transaction() as connection:
-            connection.execute(
-                """
-                INSERT OR IGNORE INTO artifacts (digest, relative_path, size, media_type, created_at)
-                VALUES (?, ?, ?, ?, ?)
-                """,
-                (
-                    artifact.digest,
-                    artifact.relative_path,
-                    artifact.size,
-                    artifact.media_type,
-                    artifact.created_at,
-                ),
-            )
-            row = connection.execute("SELECT * FROM artifacts WHERE digest = ?", (artifact.digest,)).fetchone()
-            existing = self._artifact_from_row(row)
-            if existing.relative_path != artifact.relative_path or existing.size != artifact.size:
-                raise ConflictError(f"artifact metadata conflicts for digest {artifact.digest}")
+        try:
+            existing = self._artifacts.record(artifact)
+        except (ArtifactError, OSError, ValueError) as exc:
+            raise StorageError(f"cannot record artifact {artifact.digest}: {exc}") from exc
+        if existing.relative_path != artifact.relative_path or existing.size != artifact.size:
+            raise ConflictError(f"artifact metadata conflicts for digest {artifact.digest}")
         return existing
 
     def add_artifact(self, artifact: Artifact) -> Artifact:
         return self.record_artifact(artifact)
 
     def get_artifact(self, digest: str) -> Artifact:
-        row = self.connection.execute("SELECT * FROM artifacts WHERE digest = ?", (digest,)).fetchone()
-        if row is None:
+        try:
+            artifact = self._artifacts.read_record(digest)
+        except ValueError:
+            artifact = None
+        except (ArtifactError, OSError) as exc:
+            raise StorageError(str(exc)) from exc
+        if artifact is None:
             raise NotFoundError(f"artifact not found: {digest}")
-        return self._artifact_from_row(row)
+        return artifact
+
+    # Findings and decisions
 
     def create_finding(self, finding: Finding) -> Finding:
-        with self.transaction() as connection:
-            try:
-                connection.execute(
-                    """
-                    INSERT INTO findings (
-                        id, run_id, task_id, attempt_id, fingerprint, role, category, severity, title,
-                        claim, evidence_json, explanation, suggested_action, confidence, consequence,
-                        affected_claim, status, created_at, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        finding.id,
-                        finding.run_id,
-                        finding.task_id,
-                        finding.attempt_id,
-                        finding.fingerprint,
-                        finding.role.value,
-                        finding.category,
-                        finding.severity.value,
-                        finding.title,
-                        finding.claim,
-                        canonical_json(finding.evidence),
-                        finding.explanation,
-                        finding.suggested_action,
-                        finding.confidence,
-                        finding.consequence,
-                        finding.affected_claim,
-                        finding.status.value,
-                        finding.created_at,
-                        finding.updated_at,
-                    ),
-                )
-            except sqlite3.IntegrityError as exc:
-                raise ConflictError(f"finding already exists for fingerprint {finding.fingerprint}") from exc
-            self._append_event_row(
-                connection,
-                Event(
-                    run_id=finding.run_id,
-                    event_type="finding.created",
-                    entity_type="finding",
-                    entity_id=finding.id,
-                    payload={"severity": finding.severity.value, "role": finding.role.value},
-                ),
-            )
+        with self._mutation(finding.run_id) as state:
+            _add_finding(state, finding)
         return finding
 
     def get_or_create_finding(self, finding: Finding) -> Finding:
-        row = self.connection.execute(
-            "SELECT * FROM findings WHERE run_id = ? AND fingerprint = ?",
-            (finding.run_id, finding.fingerprint),
-        ).fetchone()
-        if row is not None:
-            return self._finding_from_row(row)
-        try:
-            return self.create_finding(finding)
-        except ConflictError:
-            row = self.connection.execute(
-                "SELECT * FROM findings WHERE run_id = ? AND fingerprint = ?",
-                (finding.run_id, finding.fingerprint),
-            ).fetchone()
-            return self._finding_from_row(row)
+        with self._mutation(finding.run_id) as state:
+            existing = next((item for item in state.findings.values() if item.fingerprint == finding.fingerprint), None)
+            if existing is not None:
+                return existing
+            _add_finding(state, finding)
+        return finding
 
     def fill_finding_affected_claim(self, finding_id: str, affected_claim: str) -> Finding:
         """Set a finding's affected claim only while it is still null; the first non-null value is kept."""
-        with self.transaction() as connection:
-            connection.execute(
-                "UPDATE findings SET affected_claim = ? WHERE id = ? AND affected_claim IS NULL",
-                (affected_claim, finding_id),
-            )
-        return self.get_finding(finding_id)
+        with self._mutation(self._owner(finding_id, "finding", _findings).run.id) as state:
+            finding = state.findings[finding_id]
+            if finding.affected_claim is None:
+                state.set_finding(replace(finding, affected_claim=affected_claim))
+            return state.findings[finding_id]
 
     def get_finding(self, finding_id: str) -> Finding:
-        row = self.connection.execute("SELECT * FROM findings WHERE id = ?", (finding_id,)).fetchone()
-        if row is None:
-            raise NotFoundError(f"finding not found: {finding_id}")
-        return self._finding_from_row(row)
+        return self._owner(finding_id, "finding", _findings).findings[finding_id]
 
-    def list_findings(
-        self,
-        run_id: str,
-        statuses: Sequence[FindingStatus] | None = None,
-    ) -> list[Finding]:
-        parameters: list[Any] = [run_id]
-        query = "SELECT * FROM findings WHERE run_id = ?"
-        if statuses:
-            placeholders = ",".join("?" for _ in statuses)
-            query += f" AND status IN ({placeholders})"
-            parameters.extend(status.value for status in statuses)
-        query += """
-            ORDER BY CASE severity
-                WHEN 'blocker' THEN 0
-                WHEN 'major' THEN 1
-                WHEN 'moderate' THEN 2
-                WHEN 'minor' THEN 3
-                ELSE 4
-            END, created_at, id
-        """
-        rows = self.connection.execute(query, parameters).fetchall()
-        return [self._finding_from_row(row) for row in rows]
+    def list_findings(self, run_id: str, statuses: Sequence[FindingStatus] | None = None) -> list[Finding]:
+        state = self._load_if_present(run_id)
+        if state is None:
+            return []
+        selected = [item for item in state.findings.values() if not statuses or item.status in statuses]
+        return sorted(
+            selected, key=lambda item: (_SEVERITY_ORDER.get(item.severity.value, 4), item.created_at, item.id)
+        )
 
-    def decide_finding(
-        self,
-        finding_id: str,
-        decision: str,
-        reason: str,
-        actor: str = "user",
-    ) -> Decision:
+    def decide_finding(self, finding_id: str, decision: str, reason: str, actor: str = "user") -> Decision:
         return self.decide_findings([finding_id], decision, reason, actor)[0]
 
     def decide_findings(
-        self,
-        finding_ids: list[str],
-        decision: str,
-        reason: str,
-        actor: str = "user",
+        self, finding_ids: list[str], decision: str, reason: str, actor: str = "user"
     ) -> list[Decision]:
-        status_by_decision = {
-            "confirm": FindingStatus.CONFIRMED,
-            "reject": FindingStatus.REJECTED,
-            "waive": FindingStatus.WAIVED,
-        }
-        if decision not in status_by_decision:
+        if decision not in _FINDING_DECISIONS:
             raise ValueError(f"invalid finding decision: {decision}")
         if not reason.strip():
             raise ValueError("decision reason is required")
+        if not finding_ids:
+            return []
         records = []
-        with self.transaction() as connection:
+        with self._mutation(self._owner(finding_ids[0], "finding", _findings).run.id) as state:
             for finding_id in finding_ids:
+                if finding_id not in state.findings:
+                    owner = self._find(finding_id, _findings)
+                    if owner is None:
+                        raise NotFoundError(f"finding not found: {finding_id}")
+                    raise ValueError("findings must all belong to the same run")
                 record = Decision(
-                    target_type="finding",
-                    target_id=finding_id,
-                    decision=decision,
-                    reason=reason,
-                    actor=actor,
+                    target_type="finding", target_id=finding_id, decision=decision, reason=reason, actor=actor
                 )
-                row = connection.execute("SELECT * FROM findings WHERE id = ?", (finding_id,)).fetchone()
-                if row is None:
-                    raise NotFoundError(f"finding not found: {finding_id}")
-                connection.execute(
-                    "UPDATE findings SET status = ?, updated_at = ? WHERE id = ?",
-                    (status_by_decision[decision].value, record.created_at, finding_id),
-                )
-                self._append_decision_row(connection, record)
-                self._append_event_row(
-                    connection,
-                    Event(
-                        run_id=row["run_id"],
-                        event_type="finding.decided",
-                        entity_type="finding",
-                        entity_id=finding_id,
-                        payload={"decision": decision, "reason": reason, "actor": actor},
-                    ),
-                )
+                state.record_finding_decision(record)
                 records.append(record)
         return records
 
     def list_decisions(self, target_type: str, target_id: str) -> list[Decision]:
-        rows = self.connection.execute(
-            """
-            SELECT * FROM decisions
-            WHERE target_type = ? AND target_id = ?
-            ORDER BY created_at, id
-            """,
-            (target_type, target_id),
-        ).fetchall()
-        return [self._decision_from_row(row) for row in rows]
+        state = self._find(target_id, _decision_targets)
+        if state is None:
+            return []
+        selected = [item for item in state.decisions if (item.target_type, item.target_id) == (target_type, target_id)]
+        return sorted(selected, key=lambda item: (item.created_at, item.id))
 
     def append_decision(self, decision: Decision) -> Decision:
         if not decision.reason.strip():
             raise ValueError("decision reason is required")
         if decision.target_type == "finding":
-            status_by_decision = {
-                "confirm": FindingStatus.CONFIRMED,
-                "reject": FindingStatus.REJECTED,
-                "waive": FindingStatus.WAIVED,
-            }
-            try:
-                status = status_by_decision[decision.decision]
-            except KeyError as exc:
-                raise ValueError(f"invalid finding decision: {decision.decision}") from exc
-            with self.transaction() as connection:
-                row = connection.execute(
-                    "SELECT run_id FROM findings WHERE id = ?",
-                    (decision.target_id,),
-                ).fetchone()
-                if row is None:
-                    raise NotFoundError(f"finding not found: {decision.target_id}")
-                connection.execute(
-                    "UPDATE findings SET status = ?, updated_at = ? WHERE id = ?",
-                    (status.value, decision.created_at, decision.target_id),
-                )
-                self._append_decision_row(connection, decision)
-                self._append_event_row(
-                    connection,
-                    Event(
-                        run_id=row["run_id"],
-                        event_type="finding.decided",
-                        entity_type="finding",
-                        entity_id=decision.target_id,
-                        payload={
-                            "decision": decision.decision,
-                            "reason": decision.reason,
-                            "actor": decision.actor,
-                        },
-                    ),
-                )
+            if decision.decision not in _FINDING_DECISIONS:
+                raise ValueError(f"invalid finding decision: {decision.decision}")
+            with self._mutation(self._owner(decision.target_id, "finding", _findings).run.id) as state:
+                state.record_finding_decision(decision)
             return decision
         if decision.target_type == "patch":
-            status_by_decision = {"approve": PatchStatus.APPROVED, "reject": PatchStatus.REJECTED}
-            try:
-                status = status_by_decision[decision.decision]
-            except KeyError as exc:
-                raise ValueError(f"invalid patch decision: {decision.decision}") from exc
-            with self.transaction() as connection:
-                row = connection.execute(
-                    "SELECT run_id, status FROM patches WHERE id = ?",
-                    (decision.target_id,),
-                ).fetchone()
-                if row is None:
-                    raise NotFoundError(f"patch not found: {decision.target_id}")
-                if PatchStatus(row["status"]) not in {
-                    PatchStatus.PROPOSED,
-                    PatchStatus.APPROVED,
-                    PatchStatus.REJECTED,
-                }:
-                    raise ConflictError(f"patch cannot be decided in status {row['status']}")
-                connection.execute(
-                    "UPDATE patches SET status = ?, updated_at = ? WHERE id = ?",
-                    (status.value, decision.created_at, decision.target_id),
-                )
-                self._append_decision_row(connection, decision)
-                self._append_event_row(
-                    connection,
-                    Event(
-                        run_id=row["run_id"],
-                        event_type="patch.decided",
-                        entity_type="patch",
-                        entity_id=decision.target_id,
-                        payload={
-                            "decision": decision.decision,
-                            "reason": decision.reason,
-                            "actor": decision.actor,
-                        },
-                    ),
-                )
+            if decision.decision not in _PATCH_DECISIONS:
+                raise ValueError(f"invalid patch decision: {decision.decision}")
+            with self._mutation(self._owner(decision.target_id, "patch", _patches).run.id) as state:
+                state.record_patch_decision(decision)
             return decision
-        with self.transaction() as connection:
-            self._append_decision_row(connection, decision)
-        return decision
+        raise ValueError(f"decisions target a finding or a patch, not {decision.target_type}")
+
+    # Patches and verifications
 
     def create_patch(self, patch: Patch) -> Patch:
         if patch.attempt_id is None:
             raise ValueError("new patches require a generating attempt_id")
-        with self.transaction() as connection:
-            try:
-                connection.execute(
-                    """
-                    INSERT INTO patches (
-                        id, run_id, base_commit, diff_digest, summary, edits_json, attempt_id,
-                        status, build_succeeded, created_at, updated_at, applied_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        patch.id,
-                        patch.run_id,
-                        patch.base_commit,
-                        patch.diff_digest,
-                        patch.summary,
-                        canonical_json(patch.edits),
-                        patch.attempt_id,
-                        patch.status.value,
-                        int(patch.build_succeeded),
-                        patch.created_at,
-                        patch.updated_at,
-                        patch.applied_at,
-                    ),
-                )
-            except sqlite3.IntegrityError as exc:
-                raise ConflictError("patch already exists for run, base commit, and diff digest") from exc
-            self._append_event_row(
-                connection,
+        with self._mutation(patch.run_id) as state:
+            if patch.id in state.patches:
+                raise ConflictError(f"patch already exists: {patch.id}")
+            key = (patch.base_commit, patch.diff_digest)
+            if any((item.base_commit, item.diff_digest) == key for item in state.patches.values()):
+                raise ConflictError("patch already exists for run, base commit, and diff digest")
+            _require_attempt_in(state, patch.attempt_id)
+            self._require_artifact(patch.diff_digest)
+            state.set_patch(patch)
+            state.add_event(
                 Event(
                     run_id=patch.run_id,
                     event_type="patch.created",
@@ -1242,22 +677,16 @@ class Database:
                         "diff_digest": patch.diff_digest,
                         "attempt_id": patch.attempt_id,
                     },
-                ),
+                )
             )
         return patch
 
     def get_patch(self, patch_id: str) -> Patch:
-        row = self.connection.execute("SELECT * FROM patches WHERE id = ?", (patch_id,)).fetchone()
-        if row is None:
-            raise NotFoundError(f"patch not found: {patch_id}")
-        return self._patch_from_row(row)
+        return self._owner(patch_id, "patch", _patches).patches[patch_id]
 
     def list_patches(self, run_id: str) -> list[Patch]:
-        rows = self.connection.execute(
-            "SELECT * FROM patches WHERE run_id = ? ORDER BY updated_at, id",
-            (run_id,),
-        ).fetchall()
-        return [self._patch_from_row(row) for row in rows]
+        state = self._load_if_present(run_id)
+        return [] if state is None else sorted(state.patches.values(), key=lambda item: (item.updated_at, item.id))
 
     def repropose_patch(
         self,
@@ -1268,419 +697,370 @@ class Database:
         edits: Sequence[Mapping[str, Any]],
         build_succeeded: bool,
     ) -> Patch:
-        with self.transaction() as connection:
-            row = connection.execute("SELECT * FROM patches WHERE id = ?", (patch_id,)).fetchone()
-            if row is None:
-                raise NotFoundError(f"patch not found: {patch_id}")
-            current = PatchStatus(row["status"])
-            if current != PatchStatus.REJECTED:
-                raise ConflictError(f"patch cannot be reproposed in status {current.value}")
-            updated_at = utc_now()
-            connection.execute(
-                """
-                UPDATE patches
-                SET summary = ?, edits_json = ?, attempt_id = ?, status = ?,
-                    build_succeeded = ?, updated_at = ?
-                WHERE id = ?
-                """,
-                (
-                    summary,
-                    canonical_json(edits),
-                    attempt_id,
-                    PatchStatus.PROPOSED.value,
-                    int(build_succeeded),
-                    updated_at,
-                    patch_id,
-                ),
+        with self._mutation(self._owner(patch_id, "patch", _patches).run.id) as state:
+            patch = state.patches[patch_id]
+            if patch.status != PatchStatus.REJECTED:
+                raise ConflictError(f"patch cannot be reproposed in status {patch.status.value}")
+            _require_attempt_in(state, attempt_id)
+            state.set_patch(
+                replace(
+                    patch,
+                    summary=summary,
+                    # Stored edits are plain JSON; return them as a later read would.
+                    edits=tuple(json.loads(canonical_json(list(edits)))),
+                    attempt_id=attempt_id,
+                    status=PatchStatus.PROPOSED,
+                    build_succeeded=bool(build_succeeded),
+                    updated_at=utc_now(),
+                )
             )
-            self._append_event_row(
-                connection,
+            state.add_event(
                 Event(
-                    run_id=row["run_id"],
+                    run_id=state.run.id,
                     event_type="patch.reproposed",
                     entity_type="patch",
                     entity_id=patch_id,
                     payload={
-                        "from": current.value,
+                        "from": patch.status.value,
                         "to": PatchStatus.PROPOSED.value,
-                        "previous_attempt_id": row["attempt_id"],
+                        "previous_attempt_id": patch.attempt_id,
                         "attempt_id": attempt_id,
-                        "diff_digest": row["diff_digest"],
+                        "diff_digest": patch.diff_digest,
                     },
-                ),
+                )
             )
-            row = connection.execute("SELECT * FROM patches WHERE id = ?", (patch_id,)).fetchone()
-        return self._patch_from_row(row)
+            return state.patches[patch_id]
 
     def decide_patch(self, patch_id: str, decision: str, reason: str, actor: str = "user") -> Decision:
-        status_by_decision = {"approve": PatchStatus.APPROVED, "reject": PatchStatus.REJECTED}
-        if decision not in status_by_decision:
+        if decision not in _PATCH_DECISIONS:
             raise ValueError(f"invalid patch decision: {decision}")
         if not reason.strip():
             raise ValueError("decision reason is required")
-        record = Decision(
-            target_type="patch",
-            target_id=patch_id,
-            decision=decision,
-            reason=reason,
-            actor=actor,
-        )
-        with self.transaction() as connection:
-            row = connection.execute("SELECT * FROM patches WHERE id = ?", (patch_id,)).fetchone()
-            if row is None:
-                raise NotFoundError(f"patch not found: {patch_id}")
-            current = PatchStatus(row["status"])
-            if current not in {PatchStatus.PROPOSED, PatchStatus.APPROVED, PatchStatus.REJECTED}:
-                raise ConflictError(f"patch cannot be decided in status {current.value}")
-            connection.execute(
-                "UPDATE patches SET status = ?, updated_at = ? WHERE id = ?",
-                (status_by_decision[decision].value, record.created_at, patch_id),
-            )
-            self._append_decision_row(connection, record)
-            self._append_event_row(
-                connection,
-                Event(
-                    run_id=row["run_id"],
-                    event_type="patch.decided",
-                    entity_type="patch",
-                    entity_id=patch_id,
-                    payload={"decision": decision, "reason": reason, "actor": actor},
-                ),
-            )
+        record = Decision(target_type="patch", target_id=patch_id, decision=decision, reason=reason, actor=actor)
+        with self._mutation(self._owner(patch_id, "patch", _patches).run.id) as state:
+            state.record_patch_decision(record)
         return record
 
-    def update_patch_status(
-        self,
-        patch_id: str,
-        status: PatchStatus,
-        *,
-        build_succeeded: bool | None = None,
-    ) -> Patch:
-        with self.transaction() as connection:
-            row = connection.execute("SELECT * FROM patches WHERE id = ?", (patch_id,)).fetchone()
-            if row is None:
-                raise NotFoundError(f"patch not found: {patch_id}")
-            current = PatchStatus(row["status"])
-            allowed = {
-                PatchStatus.PROPOSED: {PatchStatus.APPROVED, PatchStatus.REJECTED},
-                PatchStatus.APPROVED: {PatchStatus.REJECTED, PatchStatus.VERIFIED, PatchStatus.STALE},
-                PatchStatus.REJECTED: set(),
-                PatchStatus.VERIFIED: {PatchStatus.APPLIED, PatchStatus.STALE},
-                PatchStatus.APPLIED: set(),
-                PatchStatus.STALE: set(),
-            }
-            if current != status and status not in allowed[current]:
-                raise ValueError(f"invalid patch status transition: {current.value} -> {status.value}")
+    def update_patch_status(self, patch_id: str, status: PatchStatus, *, build_succeeded: bool | None = None) -> Patch:
+        with self._mutation(self._owner(patch_id, "patch", _patches).run.id) as state:
+            patch = state.patches[patch_id]
+            if patch.status != status and status not in _PATCH_TRANSITIONS[patch.status]:
+                raise ValueError(f"invalid patch status transition: {patch.status.value} -> {status.value}")
             updated_at = utc_now()
-            applied_at = updated_at if status == PatchStatus.APPLIED else row["applied_at"]
-            build_value = row["build_succeeded"] if build_succeeded is None else int(build_succeeded)
-            connection.execute(
-                """
-                UPDATE patches
-                SET status = ?, build_succeeded = ?, updated_at = ?, applied_at = ?
-                WHERE id = ?
-                """,
-                (status.value, build_value, updated_at, applied_at, patch_id),
+            state.set_patch(
+                replace(
+                    patch,
+                    status=status,
+                    build_succeeded=patch.build_succeeded if build_succeeded is None else bool(build_succeeded),
+                    updated_at=updated_at,
+                    applied_at=updated_at if status == PatchStatus.APPLIED else patch.applied_at,
+                )
             )
-            self._append_event_row(
-                connection,
+            state.add_event(
                 Event(
-                    run_id=row["run_id"],
+                    run_id=state.run.id,
                     event_type="patch.status_changed",
                     entity_type="patch",
                     entity_id=patch_id,
-                    payload={"from": current.value, "to": status.value},
-                ),
+                    payload={"from": patch.status.value, "to": status.value},
+                )
             )
-            row = connection.execute("SELECT * FROM patches WHERE id = ?", (patch_id,)).fetchone()
-        return self._patch_from_row(row)
+            return state.patches[patch_id]
 
-    def update_patch(
-        self,
-        patch_id: str,
-        status: PatchStatus,
-        *,
-        build_succeeded: bool | None = None,
-    ) -> Patch:
+    def update_patch(self, patch_id: str, status: PatchStatus, *, build_succeeded: bool | None = None) -> Patch:
         return self.update_patch_status(patch_id, status, build_succeeded=build_succeeded)
 
     def create_verification(self, verification: Verification) -> Verification:
-        with self.transaction() as connection:
-            row = connection.execute(
-                "SELECT patches.* FROM patches WHERE patches.id = ?",
-                (verification.patch_id,),
-            ).fetchone()
-            if row is None:
-                raise NotFoundError(f"patch not found: {verification.patch_id}")
-            connection.execute(
-                """
-                INSERT INTO verifications (
-                    id, patch_id, attempt_id, result, summary, artifact_digest, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    verification.id,
-                    verification.patch_id,
-                    verification.attempt_id,
-                    verification.result.value,
-                    verification.summary,
-                    verification.artifact_digest,
-                    verification.created_at,
-                ),
-            )
-            if verification.result == VerificationResult.PASS and PatchStatus(row["status"]) == PatchStatus.APPROVED:
-                connection.execute(
-                    "UPDATE patches SET status = ?, updated_at = ? WHERE id = ?",
-                    (PatchStatus.VERIFIED.value, verification.created_at, verification.patch_id),
-                )
-            self._append_event_row(
-                connection,
+        with self._mutation(self._owner(verification.patch_id, "patch", _patches).run.id) as state:
+            if verification.id in state.verifications:
+                raise ConflictError(f"verification already exists: {verification.id}")
+            if verification.attempt_id is not None:
+                _require_attempt_in(state, verification.attempt_id)
+            if verification.artifact_digest is not None:
+                self._require_artifact(verification.artifact_digest)
+            state.verifications[verification.id] = verification
+            state.dirty = True
+            patch = state.patches[verification.patch_id]
+            if verification.result == VerificationResult.PASS and patch.status == PatchStatus.APPROVED:
+                state.set_patch(replace(patch, status=PatchStatus.VERIFIED, updated_at=verification.created_at))
+            state.add_event(
                 Event(
-                    run_id=row["run_id"],
+                    run_id=state.run.id,
                     event_type="verification.created",
                     entity_type="verification",
                     entity_id=verification.id,
                     payload={"patch_id": verification.patch_id, "result": verification.result.value},
-                ),
+                )
             )
         return verification
 
     def list_verifications(self, patch_id: str) -> list[Verification]:
-        rows = self.connection.execute(
-            "SELECT * FROM verifications WHERE patch_id = ? ORDER BY created_at, id",
-            (patch_id,),
-        ).fetchall()
-        return [self._verification_from_row(row) for row in rows]
+        state = self._find(patch_id, _patches)
+        if state is None:
+            return []
+        selected = [item for item in state.verifications.values() if item.patch_id == patch_id]
+        return sorted(selected, key=lambda item: (item.created_at, item.id))
+
+    # Events
 
     def append_event(self, event: Event) -> Event:
-        with self.transaction() as connection:
-            self._append_event_row(connection, event)
+        with self._mutation(event.run_id) as state:
+            state.add_event(event)
         return event
 
     def list_events(self, run_id: str) -> list[Event]:
-        rows = self.connection.execute(
-            "SELECT * FROM events WHERE run_id = ? ORDER BY created_at, id",
-            (run_id,),
-        ).fetchall()
-        return [self._event_from_row(row) for row in rows]
+        state = self._load_if_present(run_id)
+        return [] if state is None else sorted(state.events, key=lambda item: (item.created_at, item.id))
+
+    # State files
+
+    def _state_path(self, run_id: str) -> Path:
+        return self.runs_dir / run_id / STATE_FILE
+
+    def _exists(self, run_id: str) -> bool:
+        return bool(_SAFE_RUN_ID.fullmatch(run_id)) and self._state_path(run_id).is_file()
+
+    def _load(self, run_id: str) -> _RunState:
+        state = self._load_if_present(run_id)
+        if state is None:
+            raise NotFoundError(f"run not found: {run_id}")
+        return state
+
+    def _load_if_present(self, run_id: str) -> _RunState | None:
+        if not _SAFE_RUN_ID.fullmatch(run_id):
+            return None
+        path = self._state_path(run_id)
+        data = _read(path)
+        return None if data is None else _RunState.parse(path, data)
+
+    def _state_paths(self) -> list[Path]:
+        try:
+            with os.scandir(self.runs_dir) as entries:
+                names = sorted(entry.name for entry in entries if entry.is_dir(follow_symlinks=False))
+        except FileNotFoundError:
+            return []
+        except OSError as exc:
+            raise StorageError(f"cannot list runs in {self.runs_dir}: {exc}") from exc
+        return [self._state_path(name) for name in names if _SAFE_RUN_ID.fullmatch(name)]
+
+    def _states(self) -> Iterator[_RunState]:
+        # A run directory without a state file holds no run: its creation never completed.
+        for path in self._state_paths():
+            data = _read(path)
+            if data is not None:
+                yield _RunState.parse(path, data)
+
+    def _find(self, entity_id: str, members: Callable[[_RunState], Any]) -> _RunState | None:
+        """Scan the run state files for the run whose ``members`` include ``entity_id``."""
+        needle = json.dumps(entity_id, ensure_ascii=False).encode("utf-8")
+        for path in self._state_paths():
+            data = _read(path)
+            if data is None or needle not in data:
+                continue
+            state = _RunState.parse(path, data)
+            if entity_id in members(state):
+                return state
+        return None
+
+    def _owner(self, entity_id: str, kind: str, members: Callable[[_RunState], Any]) -> _RunState:
+        state = self._find(entity_id, members)
+        if state is None:
+            raise NotFoundError(f"{kind} not found: {entity_id}")
+        return state
+
+    @contextmanager
+    def _mutation(self, run_id: str) -> Iterator[_RunState]:
+        """Load one run under its lock; replace its state file once if the body changed it and returned normally."""
+        if not self._exists(run_id):
+            raise NotFoundError(f"run not found: {run_id}")
+        with self._run_lock(run_id):
+            state = self._load(run_id)
+            yield state
+            if state.dirty:
+                self._write(self._state_path(run_id), state)
+
+    @contextmanager
+    def _run_lock(self, run_id: str) -> Iterator[None]:
+        # The store's lock is innermost: it is never held while waiting for any other lock.
+        path = self.runs_dir / run_id / LOCK_FILE
+        try:
+            descriptor = os.open(path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+        except OSError as exc:
+            raise StorageError(f"cannot open run state lock {path}: {exc}") from exc
+        try:
+            metadata = os.fstat(descriptor)
+            if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
+                raise StorageError(f"unsafe run state lock: {path}")
+            fcntl.flock(descriptor, fcntl.LOCK_EX)
+            yield
+        finally:
+            os.close(descriptor)
 
     @staticmethod
-    def _append_decision_row(connection: sqlite3.Connection, decision: Decision) -> None:
-        connection.execute(
-            """
-            INSERT INTO decisions (id, target_type, target_id, decision, reason, actor, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                decision.id,
-                decision.target_type,
-                decision.target_id,
-                decision.decision,
-                decision.reason,
-                decision.actor,
-                decision.created_at,
-            ),
+    def _write(path: Path, state: _RunState) -> None:
+        data = state.serialize()
+        try:
+            descriptor, name = tempfile.mkstemp(prefix=".state-", suffix=".tmp", dir=path.parent)
+        except OSError as exc:
+            raise StorageError(f"cannot write run state {path}: {exc}") from exc
+        temporary = Path(name)
+        try:
+            with os.fdopen(descriptor, "wb") as handle:
+                handle.write(data)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary, path)
+            directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                os.fsync(directory)
+            finally:
+                os.close(directory)
+        except OSError as exc:
+            raise StorageError(f"cannot write run state {path}: {exc}") from exc
+        finally:
+            temporary.unlink(missing_ok=True)
+
+    def _require_artifact(self, digest: str) -> None:
+        try:
+            recorded = self._artifacts.record_path(digest).is_file()
+        except ValueError:
+            recorded = False
+        if not recorded:
+            raise StorageError(f"artifact is not recorded: {digest}")
+
+    def _add_attempt(self, state: _RunState, attempt: Attempt) -> None:
+        task = state.tasks[attempt.task_id]
+        if task.status == TaskStatus.RUNNING:
+            raise ConflictError(f"task already has a running attempt: {attempt.task_id}")
+        validate_task_transition(task.status, TaskStatus.RUNNING)
+        expected = _next_ordinal(state, attempt.task_id)
+        if attempt.ordinal != expected:
+            raise ConflictError(f"attempt ordinal must be {expected} for task {attempt.task_id}, got {attempt.ordinal}")
+        if attempt.id in state.attempts:
+            raise ConflictError(f"attempt already exists: {attempt.id}")
+        for digest in (attempt.output_artifact_digest, attempt.validation_report_artifact_digest):
+            if digest is not None:
+                self._require_artifact(digest)
+        state.set_attempt(attempt)
+        state.set_task(replace(task, status=TaskStatus.RUNNING, updated_at=utc_now()))
+        state.add_event(
+            Event(
+                run_id=state.run.id,
+                event_type="attempt.started",
+                entity_type="attempt",
+                entity_id=attempt.id,
+                payload={"task_id": attempt.task_id, "ordinal": attempt.ordinal},
+            )
         )
 
-    @staticmethod
-    def _append_event_row(connection: sqlite3.Connection, event: Event) -> None:
-        connection.execute(
-            """
-            INSERT INTO events (
-                id, run_id, event_type, entity_type, entity_id, payload_json, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                event.id,
-                event.run_id,
-                event.event_type,
-                event.entity_type,
-                event.entity_id,
-                canonical_json(event.payload),
-                event.created_at,
-            ),
-        )
 
-    @staticmethod
-    def _run_from_row(row: sqlite3.Row) -> Run:
-        return Run(
-            id=row["id"],
-            repository=row["repository"],
-            commit_sha=row["commit_sha"],
-            tree_sha=row["tree_sha"],
-            profile=row["profile"],
-            status=RunStatus(row["status"]),
-            config_digest=row["config_digest"],
-            frozen_config=json.loads(row["frozen_config_json"]),
-            budget_usd=row["budget_usd"],
-            estimated_cost_usd=row["estimated_cost_usd"],
-            created_at=row["created_at"],
-            updated_at=row["updated_at"],
-            error=row["error"],
-            brief_digest=row["brief_digest"] if "brief_digest" in row.keys() else None,
-        )
+def _read(path: Path) -> bytes | None:
+    try:
+        return path.read_bytes()
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        raise StorageError(f"cannot read run state {path}: {exc}") from exc
 
-    @staticmethod
-    def _task_from_row(row: sqlite3.Row) -> Task:
-        return Task(
-            id=row["id"],
-            run_id=row["run_id"],
-            stage=row["stage"],
-            role=AgentRole(row["role"]),
-            route=row["route"],
-            input_digest=row["input_digest"],
-            status=TaskStatus(row["status"]),
-            created_at=row["created_at"],
-            updated_at=row["updated_at"],
-        )
 
-    @staticmethod
-    def _attempt_values(attempt: Attempt) -> tuple[Any, ...]:
-        return (
-            attempt.id,
-            attempt.task_id,
-            attempt.ordinal,
-            attempt.status.value,
-            attempt.thread_id,
-            attempt.runtime_name,
-            attempt.runtime_version,
-            attempt.model,
-            attempt.model_provider,
-            attempt.external_client,
-            attempt.effort,
-            attempt.session_source,
-            attempt.prompt_digest,
-            attempt.schema_digest,
-            attempt.bundle_digest,
-            attempt.input_tokens,
-            attempt.cached_input_tokens,
-            attempt.output_tokens,
-            attempt.reasoning_tokens,
-            attempt.estimated_cost_usd,
-            attempt.trace_artifact_digest,
-            attempt.output_artifact_digest,
-            attempt.validation_report_artifact_digest,
-            attempt.duration_ms,
-            attempt.error,
-            attempt.created_at,
-            attempt.completed_at,
-        )
+def _tasks(state: _RunState) -> Mapping[str, Task]:
+    return state.tasks
 
-    @staticmethod
-    def _attempt_from_row(row: sqlite3.Row) -> Attempt:
-        return Attempt(
-            id=row["id"],
-            task_id=row["task_id"],
-            ordinal=row["ordinal"],
-            status=AttemptStatus(row["status"]),
-            thread_id=row["thread_id"],
-            runtime_name=row["runtime_name"],
-            runtime_version=row["runtime_version"],
-            model=row["model"],
-            model_provider=row["model_provider"],
-            external_client=row["external_client"] if "external_client" in row.keys() else None,
-            effort=row["effort"] if "effort" in row.keys() else None,
-            session_source=row["session_source"] if "session_source" in row.keys() else None,
-            prompt_digest=row["prompt_digest"],
-            schema_digest=row["schema_digest"],
-            bundle_digest=row["bundle_digest"],
-            input_tokens=row["input_tokens"],
-            cached_input_tokens=row["cached_input_tokens"],
-            output_tokens=row["output_tokens"],
-            reasoning_tokens=row["reasoning_tokens"],
-            estimated_cost_usd=row["estimated_cost_usd"],
-            trace_artifact_digest=row["trace_artifact_digest"],
-            output_artifact_digest=row["output_artifact_digest"],
-            validation_report_artifact_digest=row["validation_report_artifact_digest"],
-            duration_ms=row["duration_ms"],
-            error=row["error"],
-            created_at=row["created_at"],
-            completed_at=row["completed_at"],
-        )
 
-    @staticmethod
-    def _artifact_from_row(row: sqlite3.Row) -> Artifact:
-        return Artifact(
-            digest=row["digest"],
-            relative_path=row["relative_path"],
-            size=row["size"],
-            media_type=row["media_type"],
-            created_at=row["created_at"],
-        )
+def _external_tasks(state: _RunState) -> Mapping[str, dict[str, Any]]:
+    return state.external_tasks
 
-    @staticmethod
-    def _finding_from_row(row: sqlite3.Row) -> Finding:
-        return Finding(
-            id=row["id"],
-            run_id=row["run_id"],
-            task_id=row["task_id"],
-            attempt_id=row["attempt_id"],
-            fingerprint=row["fingerprint"],
-            role=AgentRole(row["role"]),
-            category=row["category"],
-            severity=FindingSeverity(row["severity"]),
-            title=row["title"],
-            claim=row["claim"],
-            evidence=tuple(json.loads(row["evidence_json"])),
-            explanation=row["explanation"],
-            suggested_action=row["suggested_action"],
-            confidence=row["confidence"],
-            consequence=row["consequence"],
-            affected_claim=row["affected_claim"],
-            status=FindingStatus(row["status"]),
-            created_at=row["created_at"],
-            updated_at=row["updated_at"],
-        )
 
-    @staticmethod
-    def _decision_from_row(row: sqlite3.Row) -> Decision:
-        return Decision(
-            id=row["id"],
-            target_type=row["target_type"],
-            target_id=row["target_id"],
-            decision=row["decision"],
-            reason=row["reason"],
-            actor=row["actor"],
-            created_at=row["created_at"],
-        )
+def _attempts(state: _RunState) -> Mapping[str, Attempt]:
+    return state.attempts
 
-    @staticmethod
-    def _patch_from_row(row: sqlite3.Row) -> Patch:
-        return Patch(
-            id=row["id"],
-            run_id=row["run_id"],
-            base_commit=row["base_commit"],
-            diff_digest=row["diff_digest"],
-            summary=row["summary"],
-            edits=tuple(json.loads(row["edits_json"])),
-            attempt_id=row["attempt_id"],
-            status=PatchStatus(row["status"]),
-            build_succeeded=bool(row["build_succeeded"]),
-            created_at=row["created_at"],
-            updated_at=row["updated_at"],
-            applied_at=row["applied_at"],
-        )
 
-    @staticmethod
-    def _verification_from_row(row: sqlite3.Row) -> Verification:
-        return Verification(
-            id=row["id"],
-            patch_id=row["patch_id"],
-            attempt_id=row["attempt_id"],
-            result=VerificationResult(row["result"]),
-            summary=row["summary"],
-            artifact_digest=row["artifact_digest"],
-            created_at=row["created_at"],
-        )
+def _findings(state: _RunState) -> Mapping[str, Finding]:
+    return state.findings
 
-    @staticmethod
-    def _event_from_row(row: sqlite3.Row) -> Event:
-        return Event(
-            id=row["id"],
-            run_id=row["run_id"],
-            event_type=row["event_type"],
-            entity_type=row["entity_type"],
-            entity_id=row["entity_id"],
-            payload=json.loads(row["payload_json"]),
-            created_at=row["created_at"],
+
+def _patches(state: _RunState) -> Mapping[str, Patch]:
+    return state.patches
+
+
+def _decision_targets(state: _RunState) -> set[str]:
+    return {item.target_id for item in state.decisions}
+
+
+def _ordinal(attempt: Attempt) -> int:
+    return attempt.ordinal
+
+
+def _next_ordinal(state: _RunState, task_id: str) -> int:
+    return max((item.ordinal for item in state.attempts.values() if item.task_id == task_id), default=0) + 1
+
+
+def _require_attempt_in(state: _RunState, attempt_id: str) -> None:
+    if attempt_id not in state.attempts:
+        raise StorageError(f"attempt is not recorded for run {state.run.id}: {attempt_id}")
+
+
+def _add_finding(state: _RunState, finding: Finding) -> None:
+    if finding.id in state.findings:
+        raise ConflictError(f"finding already exists: {finding.id}")
+    if any(item.fingerprint == finding.fingerprint for item in state.findings.values()):
+        raise ConflictError(f"finding already exists for fingerprint {finding.fingerprint}")
+    if finding.task_id not in state.tasks:
+        raise StorageError(f"task is not recorded for run {state.run.id}: {finding.task_id}")
+    _require_attempt_in(state, finding.attempt_id)
+    state.set_finding(finding)
+    state.add_event(
+        Event(
+            run_id=finding.run_id,
+            event_type="finding.created",
+            entity_type="finding",
+            entity_id=finding.id,
+            payload={"severity": finding.severity.value, "role": finding.role.value},
         )
+    )
+
+
+def _run_from(record: dict[str, Any]) -> Run:
+    return Run(**{**record, "status": RunStatus(record["status"])})
+
+
+def _task_from(record: dict[str, Any]) -> Task:
+    return Task(**{**record, "role": AgentRole(record["role"]), "status": TaskStatus(record["status"])})
+
+
+def _external_task_from(record: dict[str, Any]) -> dict[str, Any]:
+    if set(record) != set(_EXTERNAL_TASK_KEYS):
+        raise ValueError("unexpected external task keys")
+    return {key: record[key] for key in _EXTERNAL_TASK_KEYS}
+
+
+def _attempt_from(record: dict[str, Any]) -> Attempt:
+    return Attempt(**{**record, "status": AttemptStatus(record["status"])})
+
+
+def _finding_from(record: dict[str, Any]) -> Finding:
+    return Finding(
+        **{
+            **record,
+            "role": AgentRole(record["role"]),
+            "severity": FindingSeverity(record["severity"]),
+            "status": FindingStatus(record["status"]),
+            "evidence": tuple(record["evidence"]),
+            "confidence": float(record["confidence"]),
+        }
+    )
+
+
+def _patch_from(record: dict[str, Any]) -> Patch:
+    return Patch(
+        **{
+            **record,
+            "status": PatchStatus(record["status"]),
+            "edits": tuple(record["edits"]),
+            "build_succeeded": bool(record["build_succeeded"]),
+        }
+    )
+
+
+def _verification_from(record: dict[str, Any]) -> Verification:
+    return Verification(**{**record, "result": VerificationResult(record["result"])})

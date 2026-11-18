@@ -39,7 +39,7 @@ class FakeService:
 
     def _record_run(self, *call: object) -> dict:
         self._record(*call)
-        run = Run("/paper", "abc123", "tree", "quick", "config", {"execution": "external"}, id="run_1")
+        run = Run("/paper", "abc123", "tree", "quick", "config", {}, id="run_1")
         return {"run": run, "tasks": [], "finding_ids": [], "patch_ids": []}
 
     def show_task(self, attempt_id: str) -> dict:

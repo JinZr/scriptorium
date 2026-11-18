@@ -345,7 +345,6 @@ def test_full_profile_service_persists_findings_artifacts_and_cost(tmp_path: Pat
         assert all(attempt.external_client == "codex" for attempt in attempts)
         for attempt in attempts:
             assert service.database.get_artifact(attempt.output_artifact_digest).media_type == "application/json"
-            assert attempt.trace_artifact_digest is None
 
         findings = service.list_findings(run.id)
         assert len(findings) == 4
@@ -375,12 +374,13 @@ def test_full_profile_service_persists_findings_artifacts_and_cost(tmp_path: Pat
         for page in bundle_manifest["pages"]:
             assert service.database.get_artifact(page["digest"]).digest == page["digest"]
 
-        build_log = service.database.connection.execute(
-            "SELECT digest FROM artifacts WHERE media_type = ? ORDER BY digest",
-            ("text/plain; charset=utf-8",),
-        ).fetchone()
-        assert build_log is not None
-        build_log_path = service.artifacts.path_for(str(build_log["digest"]))
+        recorded = sorted(path.parent.name + path.stem for path in service.artifacts.sha256_root.glob("*/*.json"))
+        build_log = next(
+            digest
+            for digest in recorded
+            if service.database.get_artifact(digest).media_type == "text/plain; charset=utf-8"
+        )
+        build_log_path = service.artifacts.path_for(build_log)
         build_log_bytes = build_log_path.read_bytes()
         build_log_path.write_bytes(b"corrupt build evidence")
         with pytest.raises(BenchmarkError, match="artifact failed verification"):

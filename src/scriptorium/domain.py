@@ -219,8 +219,6 @@ class Run:
     frozen_config: Mapping[str, Any] = field(default_factory=dict)
     id: str = field(default_factory=lambda: new_id("run"))
     status: RunStatus = RunStatus.PREPARING
-    budget_usd: float | None = None
-    estimated_cost_usd: float = 0.0
     created_at: str = field(default_factory=utc_now)
     updated_at: str = field(default_factory=utc_now)
     error: str | None = None
@@ -234,7 +232,6 @@ class Task:
     stage: str
     role: AgentRole
     input_digest: str
-    route: str = ""
     id: str = field(default_factory=lambda: new_id("task"))
     status: TaskStatus = TaskStatus.PENDING
     created_at: str = field(default_factory=utc_now)
@@ -248,25 +245,15 @@ class Attempt:
     id: str = field(default_factory=lambda: new_id("attempt"))
     status: AttemptStatus = AttemptStatus.RUNNING
     thread_id: str | None = None
-    runtime_name: str | None = None
-    runtime_version: str | None = None
     model: str | None = None
-    model_provider: str | None = None
     external_client: str | None = None
     effort: str | None = None
     session_source: str | None = None
     prompt_digest: str | None = None
     schema_digest: str | None = None
     bundle_digest: str | None = None
-    input_tokens: int = 0
-    cached_input_tokens: int = 0
-    output_tokens: int = 0
-    reasoning_tokens: int = 0
-    estimated_cost_usd: float = 0.0
-    trace_artifact_digest: str | None = None
     output_artifact_digest: str | None = None
     validation_report_artifact_digest: str | None = None
-    duration_ms: int | None = None
     error: str | None = None
     created_at: str = field(default_factory=utc_now)
     completed_at: str | None = None

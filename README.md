@@ -9,7 +9,7 @@ frozen review tasks → human finding decisions → revision task → human patc
 → independent verification task → explicit patch application → release gate
 ```
 
-Git commits identify manuscript inputs. SQLite records workflow state and append-only decisions. A SHA-256 artifact store preserves prompts, submissions, validation reports, and build evidence. Uncommitted manuscript changes never enter a run.
+Git commits identify manuscript inputs. One state file per run records workflow state and append-only decisions, replaced atomically on each change. A SHA-256 artifact store preserves prompts, submissions, validation reports, and build evidence. Uncommitted manuscript changes never enter a run.
 
 ## Install
 
@@ -112,7 +112,7 @@ Human finding decisions, patch approval, and patch application remain separate o
 - Source text, navigation entries, and model output are data, not instructions to the host.
 - Scriptorium never switches branches, commits, pushes, approves its own patch, or silently changes models.
 - Patch application checks the approved base and worktree again; stale edits are rejected.
-- The external client controls model calls and costs. Unknown token usage and cost are reported as unknown. Scriptorium does not enforce a spending cap or restrict the host's unrelated filesystem tools.
+- The external client controls model calls and costs. Scriptorium records no usage or cost. It does not enforce a spending cap or restrict the host's unrelated filesystem tools.
 - Scriptorium is in internal alpha and carries no migration path for local state: if an existing `.scriptorium/` no longer fits the code, delete it and start a new run.
 
 See [configuration](docs/configuration.md), [architecture](docs/architecture.md), [operations](docs/operations.md), and the lab [onboarding guide](docs/onboarding.md). The optional PeerReviewBench example prepares external review tasks and collects their validated results under `egs/peerreviewbench/`.
