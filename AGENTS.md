@@ -59,9 +59,11 @@ Preserve the dependency direction and existing ownership:
 - `cli.py`: argument parsing and text/JSON presentation, not business rules.
 - `schemas.py` and `prompts/`: structured task I/O contracts and role prompts.
 
-Keep Scriptorium free of provider SDKs. Treat frozen task inputs and historical
-database records as recovery contracts. Bind every submitted output to its
-attempt and frozen input digest.
+Keep Scriptorium free of provider SDKs. A run's frozen inputs bind that run's
+attempts, replay, and recovery. There is no compatibility with state written by
+earlier code: a change to an output schema, prompt slot, or evidence contract
+supports only the new shape, and must not add branches that detect older shapes.
+Bind every submitted output to its attempt and frozen input digest.
 
 Reimplement behavior independently. Do not introduce reference-project names,
 imports, dependencies, schemas, prompts, compatibility layers, filenames, or
