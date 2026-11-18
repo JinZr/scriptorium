@@ -344,7 +344,7 @@ def test_full_profile_service_persists_findings_artifacts_and_cost(tmp_path: Pat
         assert len(attempts) == 4
         assert all(attempt.external_client == "codex" for attempt in attempts)
         for attempt in attempts:
-            assert service.database.get_artifact(attempt.output_artifact_digest).media_type == "application/json"
+            assert service.store.get_artifact(attempt.output_artifact_digest).media_type == "application/json"
 
         findings = service.list_findings(run.id)
         assert len(findings) == 4
@@ -370,15 +370,15 @@ def test_full_profile_service_persists_findings_artifacts_and_cost(tmp_path: Pat
             (project / ".scriptorium" / "runs" / run.id / "bundle" / "manifest.json").read_text(encoding="utf-8")
         )
         for source in bundle_manifest["sources"]:
-            assert service.database.get_artifact(source["digest"]).digest == source["digest"]
+            assert service.store.get_artifact(source["digest"]).digest == source["digest"]
         for page in bundle_manifest["pages"]:
-            assert service.database.get_artifact(page["digest"]).digest == page["digest"]
+            assert service.store.get_artifact(page["digest"]).digest == page["digest"]
 
         recorded = sorted(path.parent.name + path.stem for path in service.artifacts.sha256_root.glob("*/*.json"))
         build_log = next(
             digest
             for digest in recorded
-            if service.database.get_artifact(digest).media_type == "text/plain; charset=utf-8"
+            if service.store.get_artifact(digest).media_type == "text/plain; charset=utf-8"
         )
         build_log_path = service.artifacts.path_for(build_log)
         build_log_bytes = build_log_path.read_bytes()

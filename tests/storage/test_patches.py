@@ -11,16 +11,16 @@ from scriptorium.domain import (
     Verification,
     VerificationResult,
 )
-from scriptorium.storage import ConflictError, Database
+from scriptorium.storage import ConflictError, RunStore
 
 from ._factories import create_completed_attempt, make_run
 
 
 def test_patch_verification_and_artifact_metadata(tmp_path) -> None:
-    with Database(tmp_path) as database:
-        run = database.create_run(make_run())
-        _, attempt = create_completed_attempt(database, run)
-        artifact = database.add_artifact(
+    with RunStore(tmp_path) as store:
+        run = store.create_run(make_run())
+        _, attempt = create_completed_attempt(store, run)
+        artifact = store.add_artifact(
             Artifact(
                 digest="e" * 64,
                 relative_path="sha256/ee/" + "e" * 62,
@@ -28,7 +28,7 @@ def test_patch_verification_and_artifact_metadata(tmp_path) -> None:
                 media_type="text/x-diff",
             )
         )
-        patch = database.create_patch(
+        patch = store.create_patch(
             Patch(
                 run_id=run.id,
                 base_commit=run.commit_sha,
@@ -38,8 +38,8 @@ def test_patch_verification_and_artifact_metadata(tmp_path) -> None:
                 attempt_id=attempt.id,
             )
         )
-        database.decide_patch(patch.id, "approve", "Reviewed locally.")
-        verification = database.create_verification(
+        store.decide_patch(patch.id, "approve", "Reviewed locally.")
+        verification = store.create_verification(
             Verification(
                 patch_id=patch.id,
                 result=VerificationResult.PASS,
@@ -47,19 +47,19 @@ def test_patch_verification_and_artifact_metadata(tmp_path) -> None:
             )
         )
 
-        assert database.get_artifact(artifact.digest) == artifact
-        assert database.get_patch(patch.id).attempt_id == attempt.id
-        assert database.get_patch(patch.id).status == PatchStatus.VERIFIED
-        assert database.list_verifications(patch.id) == [verification]
-        applied = database.update_patch(patch.id, PatchStatus.APPLIED)
+        assert store.get_artifact(artifact.digest) == artifact
+        assert store.get_patch(patch.id).attempt_id == attempt.id
+        assert store.get_patch(patch.id).status == PatchStatus.VERIFIED
+        assert store.list_verifications(patch.id) == [verification]
+        applied = store.update_patch(patch.id, PatchStatus.APPLIED)
         assert applied.applied_at is not None
 
 
 def test_patch_records_the_generating_attempt(tmp_path) -> None:
-    with Database(tmp_path) as database:
-        run = database.create_run(make_run())
-        _, attempt = create_completed_attempt(database, run)
-        artifact = database.add_artifact(
+    with RunStore(tmp_path) as store:
+        run = store.create_run(make_run())
+        _, attempt = create_completed_attempt(store, run)
+        artifact = store.add_artifact(
             Artifact(
                 digest="f" * 64,
                 relative_path="sha256/ff/" + "f" * 62,
@@ -68,7 +68,7 @@ def test_patch_records_the_generating_attempt(tmp_path) -> None:
             )
         )
 
-        patch = database.create_patch(
+        patch = store.create_patch(
             Patch(
                 run_id=run.id,
                 base_commit=run.commit_sha,
@@ -79,13 +79,13 @@ def test_patch_records_the_generating_attempt(tmp_path) -> None:
             )
         )
 
-        assert database.get_patch(patch.id).attempt_id == attempt.id
+        assert store.get_patch(patch.id).attempt_id == attempt.id
 
 
 def test_new_patch_requires_a_generating_attempt(tmp_path) -> None:
-    with Database(tmp_path) as database:
+    with RunStore(tmp_path) as store:
         with pytest.raises(ValueError, match="generating attempt_id"):
-            database.create_patch(
+            store.create_patch(
                 Patch(
                     run_id="run_missing",
                     base_commit="a" * 40,
@@ -97,10 +97,10 @@ def test_new_patch_requires_a_generating_attempt(tmp_path) -> None:
 
 
 def test_repropose_rejected_patch_updates_lineage_and_preserves_decision(tmp_path) -> None:
-    with Database(tmp_path) as database:
-        run = database.create_run(make_run())
-        _, first_attempt = create_completed_attempt(database, run)
-        artifact = database.add_artifact(
+    with RunStore(tmp_path) as store:
+        run = store.create_run(make_run())
+        _, first_attempt = create_completed_attempt(store, run)
+        artifact = store.add_artifact(
             Artifact(
                 digest="1" * 64,
                 relative_path="sha256/11/" + "1" * 62,
@@ -108,7 +108,7 @@ def test_repropose_rejected_patch_updates_lineage_and_preserves_decision(tmp_pat
                 media_type="text/x-diff",
             )
         )
-        patch = database.create_patch(
+        patch = store.create_patch(
             Patch(
                 run_id=run.id,
                 base_commit=run.commit_sha,
@@ -118,8 +118,8 @@ def test_repropose_rejected_patch_updates_lineage_and_preserves_decision(tmp_pat
                 attempt_id=first_attempt.id,
             )
         )
-        decision = database.decide_patch(patch.id, "reject", "Use more precise wording.")
-        second_artifact = database.add_artifact(
+        decision = store.decide_patch(patch.id, "reject", "Use more precise wording.")
+        second_artifact = store.add_artifact(
             Artifact(
                 digest="2" * 64,
                 relative_path="sha256/22/" + "2" * 62,
@@ -127,7 +127,7 @@ def test_repropose_rejected_patch_updates_lineage_and_preserves_decision(tmp_pat
                 media_type="text/x-diff",
             )
         )
-        second_patch = database.create_patch(
+        second_patch = store.create_patch(
             Patch(
                 run_id=run.id,
                 base_commit=run.commit_sha,
@@ -137,8 +137,8 @@ def test_repropose_rejected_patch_updates_lineage_and_preserves_decision(tmp_pat
                 attempt_id=first_attempt.id,
             )
         )
-        database.decide_patch(second_patch.id, "reject", "Return to the earlier wording.")
-        task = database.create_task(
+        store.decide_patch(second_patch.id, "reject", "Return to the earlier wording.")
+        task = store.create_task(
             Task(
                 run_id=run.id,
                 stage="revision",
@@ -146,10 +146,10 @@ def test_repropose_rejected_patch_updates_lineage_and_preserves_decision(tmp_pat
                 input_digest="2" * 64,
             )
         )
-        second_attempt = database.create_attempt(Attempt(task_id=task.id, ordinal=1))
-        second_attempt = database.finish_attempt(second_attempt.id, AttemptStatus.COMPLETED)
+        second_attempt = store.create_attempt(Attempt(task_id=task.id, ordinal=1))
+        second_attempt = store.finish_attempt(second_attempt.id, AttemptStatus.COMPLETED)
 
-        reproposed = database.repropose_patch(
+        reproposed = store.repropose_patch(
             patch.id,
             attempt_id=second_attempt.id,
             summary="Revised wording.",
@@ -162,9 +162,9 @@ def test_repropose_rejected_patch_updates_lineage_and_preserves_decision(tmp_pat
         assert reproposed.attempt_id == second_attempt.id
         assert reproposed.summary == "Revised wording."
         assert reproposed.edits == ({"path": "main.tex", "after": "second"},)
-        assert database.list_decisions("patch", patch.id) == [decision]
-        assert database.list_patches(run.id)[-1].id == patch.id
-        event = next(event for event in database.list_events(run.id) if event.event_type == "patch.reproposed")
+        assert store.list_decisions("patch", patch.id) == [decision]
+        assert store.list_patches(run.id)[-1].id == patch.id
+        event = next(event for event in store.list_events(run.id) if event.event_type == "patch.reproposed")
         assert event.payload == {
             "from": "rejected",
             "to": "proposed",
@@ -174,7 +174,7 @@ def test_repropose_rejected_patch_updates_lineage_and_preserves_decision(tmp_pat
         }
 
         with pytest.raises(ConflictError, match="cannot be reproposed in status proposed"):
-            database.repropose_patch(
+            store.repropose_patch(
                 patch.id,
                 attempt_id=second_attempt.id,
                 summary="Third wording.",

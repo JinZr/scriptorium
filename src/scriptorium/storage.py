@@ -234,7 +234,7 @@ class _RunState:
         )
 
 
-class Database:
+class RunStore:
     """Durable workflow state: one JSON state file per run, replaced atomically under a per-run file lock.
 
     ``path`` is the state directory. Run ``RUN_ID`` exists exactly when ``runs/RUN_ID/state.json`` exists. Every
@@ -251,7 +251,7 @@ class Database:
     def close(self) -> None:
         pass
 
-    def __enter__(self) -> Database:
+    def __enter__(self) -> RunStore:
         return self
 
     def __exit__(self, exc_type: object, exc_value: object, traceback: object) -> None:

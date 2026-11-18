@@ -52,7 +52,7 @@ def test_scaled_crop_is_rendered_from_the_frozen_pdf(pages):
         ]
         == view["view"]
     )
-    events = [e.payload for e in service.database.list_events(run.id) if e.event_type == "tool.page"]
+    events = [e.payload for e in service.store.list_events(run.id) if e.event_type == "tool.page"]
     assert "view" not in events[0] and events[1]["view"] == {k: v for k, v in view["view"].items() if k != "path"}
 
 
@@ -109,7 +109,7 @@ def test_text_layer_is_written_to_a_file_and_is_never_evidence(pages):
     assert (response["source_path"], response["page"]) == ("manuscript.pdf", 1)
     assert "text" not in response and "next_command" not in response
     assert command(["--json", "task", "page", attempt_id, "--number", "1", "--text"]) == response
-    events = [event for event in service.database.list_events(run.id) if event.event_type.startswith("tool.")]
+    events = [event for event in service.store.list_events(run.id) if event.event_type.startswith("tool.")]
     assert [event.event_type for event in events] == ["tool.page", "tool.page"]
     assert events[0].payload["text"] == {"digest": response["digest"], "path": response["path"]}
 
@@ -166,10 +166,10 @@ def test_views_keep_their_bytes_and_a_run_keeps_a_bounded_amount(pages, monkeypa
 )
 def test_invalid_page_options_are_rejected_before_access(pages, options, message):
     service, run, context, _ = pages
-    before = service.database.list_events(run.id)
+    before = service.store.list_events(run.id)
     with pytest.raises(ConfigurationError, match=message):
         service.page_task(context["attempt"].id, 1, **options)
-    assert service.database.list_events(run.id) == before
+    assert service.store.list_events(run.id) == before
 
 
 def test_cli_rejects_malformed_crop(pages, capsys):

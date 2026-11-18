@@ -427,7 +427,7 @@ def test_collect_exports_reads_duplicate_events_for_canonical_attribution(tmp_pa
     )
     event_calls = []
 
-    class FakeDatabase:
+    class FakeRunStore:
         def list_events(self, run_id):
             event_calls.append(run_id)
             return [duplicate_event]
@@ -436,7 +436,7 @@ def test_collect_exports_reads_duplicate_events_for_canonical_attribution(tmp_pa
         def __init__(self, project, manuscript_manager):
             assert project == tmp_path / "project"
             assert manuscript_manager == "manager"
-            self.database = FakeDatabase()
+            self.store = FakeRunStore()
 
         def __enter__(self):
             return self

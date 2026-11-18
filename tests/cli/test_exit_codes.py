@@ -99,12 +99,12 @@ def test_known_and_unexpected_errors_map_to_exit_codes(monkeypatch, capsys) -> N
         "error": {"code": "configuration_error", "message": "bad profile"},
     }
 
-    service.error = RuntimeError("database unavailable")
+    service.error = RuntimeError("store unavailable")
     assert cli.main(["--json", "run", "status", "run_1"]) == 3
     unexpected = json.loads(capsys.readouterr().out)
     assert unexpected == {
         "ok": False,
-        "error": {"code": "infrastructure_error", "message": "database unavailable"},
+        "error": {"code": "infrastructure_error", "message": "store unavailable"},
     }
 
 

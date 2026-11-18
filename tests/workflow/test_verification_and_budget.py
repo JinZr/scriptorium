@@ -30,6 +30,6 @@ def test_failed_verification_returns_to_human_gate_without_revision_loop(tmp_pat
         )
         assert receipt["run_status"] == RunStatus.AWAITING_PATCH_APPROVAL
         assert service.get_patch(patch.id)["verifications"][0].result.value == "fail"
-        assert len([task for task in service.database.list_tasks(run.id) if task.role == AgentRole.REVISION]) == 1
+        assert len([task for task in service.store.list_tasks(run.id) if task.role == AgentRole.REVISION]) == 1
         assert (repo / "main.tex").read_text() == MANUSCRIPT
         assert not service.evaluate_gate(run.id)["passed"]

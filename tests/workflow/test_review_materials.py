@@ -108,7 +108,7 @@ def test_supplement_retrieval_survives_processes_and_records_unambiguous_pages(t
             },
         )
         assert result["run_status"] == RunStatus.AWAITING_DECISION
-        events = [item.payload for item in service.database.list_events(run.id) if item.event_type == "tool.page"]
+        events = [item.payload for item in service.store.list_events(run.id) if item.event_type == "tool.page"]
         assert events[-1]["page"] == 2 and events[-1]["document"] == "supplement.tex"
         assert events[-1]["document_page"] == 1
         assert len(service.list_findings(run.id)) == 1
@@ -125,7 +125,7 @@ def test_invalid_document_page_has_no_successful_access_event(tmp_path, document
         review = claim(service, run.id, AgentRole.SUBSTANTIVE_REVIEW)
         with pytest.raises(ConfigurationError):
             service.page_task(review["attempt"].id, number, document)
-        assert not any(item.event_type == "tool.page" for item in service.database.list_events(run.id))
+        assert not any(item.event_type == "tool.page" for item in service.store.list_events(run.id))
 
 
 @pytest.mark.parametrize("artifact", ["sources/supplement.tex", "pages/page-0002.png", "source-map.json"])
@@ -153,9 +153,9 @@ def test_supplement_failure_does_not_publish_review_tasks_and_can_resume(tmp_pat
     with ScriptoriumService(repo, manuscript_manager=manager) as service:
         with pytest.raises(InfrastructureError, match="supplement.tex"):
             asyncio.run(service.start_run("HEAD", "quick"))
-        run = service.database.list_runs()[0]
+        run = service.store.list_runs()[0]
         assert run.status == RunStatus.FAILED
-        assert service.database.list_tasks(run.id) == []
+        assert service.store.list_tasks(run.id) == []
         manager.fail_at = None
         assert asyncio.run(service.resume_run(run.id))["run"].status == RunStatus.REVIEWING
 
@@ -202,15 +202,15 @@ def test_verification_rebuilds_supplement_and_keeps_human_and_stale_worktree_gat
                 ],
             },
         )
-        patch = service.database.list_patches(run.id)[-1]
-        assert service.database.get_run(run.id).status == RunStatus.AWAITING_PATCH_APPROVAL
+        patch = service.store.list_patches(run.id)[-1]
+        assert service.store.get_run(run.id).status == RunStatus.AWAITING_PATCH_APPROVAL
         assert manager.built == ["main.tex", "supplement.tex"] * 2
         service.decide_patch(patch.id, "approve", "Test authorization to verify.")
         manager.fail_at = 6
         with pytest.raises(InfrastructureError, match="supplement.tex"):
             asyncio.run(service.resume_run(run.id))
         assert not service.evaluate_gate(run.id)["passed"]
-        assert not any(item.stage == "verification" for item in service.database.list_tasks(run.id))
+        assert not any(item.stage == "verification" for item in service.store.list_tasks(run.id))
         manager.fail_at = None
         asyncio.run(service.resume_run(run.id))
         verifier = claim(service, run.id, AgentRole.VERIFICATION, session="independent-verification")

@@ -45,10 +45,10 @@ def _review_output(review, *, findings=None):
 
 def _state(service, run_id, attempt_id):
     return (
-        service.database.get_attempt(attempt_id),
-        [task.status for task in service.database.list_tasks(run_id)],
-        service.database.get_run(run_id).status,
-        service.database.list_findings(run_id),
+        service.store.get_attempt(attempt_id),
+        [task.status for task in service.store.list_tasks(run_id)],
+        service.store.get_run(run_id).status,
+        service.store.list_findings(run_id),
     )
 
 
@@ -70,13 +70,13 @@ def test_check_reports_issues_without_recording_or_ending_the_attempt(tmp_path):
         assert checked["validation_report"]["output_artifact_digest"] is None
         assert _state(service, run.id, attempt_id) == before
         assert sorted(path.name for path in service.artifacts.root.rglob("*") if path.is_file()) == artifacts_before
-        events = [event for event in service.database.list_events(run.id) if event.event_type == "tool.submit_check"]
+        events = [event for event in service.store.list_events(run.id) if event.event_type == "tool.submit_check"]
         assert [event.payload["codes"] for event in events] == [["json.invalid"]]
         assert events[0].payload["valid"] is False
 
         output = json.dumps(_review_output(review))
         assert service.check_submission(attempt_id, review["input_digest"], output)["valid"] is True
-        assert service.database.get_attempt(attempt_id).status == AttemptStatus.RUNNING
+        assert service.store.get_attempt(attempt_id).status == AttemptStatus.RUNNING
         receipt = asyncio.run(service.submit_task(attempt_id, review["input_digest"], output))
         assert receipt["attempt"].status == AttemptStatus.COMPLETED
         assert receipt["run_status"] == RunStatus.AWAITING_DECISION
@@ -111,7 +111,7 @@ def test_check_requires_the_attempt_digest_and_an_active_attempt(tmp_path):
         submit(service, review, _review_output(review))
         with pytest.raises(StateError, match="no longer active"):
             service.check_submission(review["attempt"].id, review["input_digest"], output)
-        assert all(task.status == TaskStatus.COMPLETED for task in service.database.list_tasks(run.id))
+        assert all(task.status == TaskStatus.COMPLETED for task in service.store.list_tasks(run.id))
 
 
 def test_check_reports_a_reused_verifier_session(tmp_path):
@@ -119,9 +119,9 @@ def test_check_reports_a_reused_verifier_session(tmp_path):
     with ScriptoriumService(repo, manuscript_manager=PdfBuildingManuscriptManager(repo)) as service:
         run = asyncio.run(service.start_run("HEAD", "quick"))["run"]
         _, finding_id = prepare_verification(service, run.id)
-        task = next(task for task in service.database.list_tasks(run.id) if task.role == AgentRole.VERIFICATION)
+        task = next(task for task in service.store.list_tasks(run.id) if task.role == AgentRole.VERIFICATION)
         verification = service.claim_task(task.id, "codex", "test-model", "max", "revision-session", "host")
         output = {"verdict": "pass", "summary": "Checked.", "resolved_finding_ids": [finding_id], "issues": []}
         checked = service.check_submission(verification["attempt"].id, verification["input_digest"], json.dumps(output))
         assert "verification.session_unconfirmed" in {issue["code"] for issue in checked["validation_report"]["issues"]}
-        assert service.database.get_attempt(verification["attempt"].id).status == AttemptStatus.RUNNING
+        assert service.store.get_attempt(verification["attempt"].id).status == AttemptStatus.RUNNING

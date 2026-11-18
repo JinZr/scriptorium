@@ -36,10 +36,10 @@ def test_several_findings_are_decided_with_one_record_each(tmp_path):
         assert [record.target_id for record in result["decisions"]] == ids
         assert [finding.status for finding in result["findings"]] == [FindingStatus.REJECTED] * 3
         for finding_id in ids:
-            decisions = service.database.list_decisions("finding", finding_id)
+            decisions = service.store.list_decisions("finding", finding_id)
             assert [(d.decision, d.reason, d.actor) for d in decisions] == [("reject", "Not a real problem.", "user")]
         decided = [
-            event.entity_id for event in service.database.list_events(run.id) if event.event_type == "finding.decided"
+            event.entity_id for event in service.store.list_events(run.id) if event.event_type == "finding.decided"
         ]
         assert decided == ids
 
@@ -58,12 +58,12 @@ def test_an_unknown_id_records_nothing(tmp_path):
     repo = make_repository(tmp_path, roles=("substantive_review",))
     with _service(repo) as service:
         _run, ids = _run_with_findings(service)
-        before = [service.database.get_finding(finding_id).status for finding_id in ids]
+        before = [service.store.get_finding(finding_id).status for finding_id in ids]
         with pytest.raises(NotFoundError):
             service.decide_findings([ids[0], "finding_missing", ids[1]], "reject", "No.")
         for finding_id, status in zip(ids, before):
-            assert service.database.list_decisions("finding", finding_id) == []
-            assert service.database.get_finding(finding_id).status == status
+            assert service.store.list_decisions("finding", finding_id) == []
+            assert service.store.get_finding(finding_id).status == status
 
 
 def test_ids_from_different_runs_record_nothing(tmp_path):
@@ -74,7 +74,7 @@ def test_ids_from_different_runs_record_nothing(tmp_path):
         with pytest.raises(StateError, match="same run"):
             service.decide_findings([first_ids[0], second_ids[0]], "reject", "No.")
         for finding_id in (first_ids[0], second_ids[0]):
-            assert service.database.list_decisions("finding", finding_id) == []
+            assert service.store.list_decisions("finding", finding_id) == []
 
 
 def test_repeated_ids_record_nothing(tmp_path):
@@ -83,7 +83,7 @@ def test_repeated_ids_record_nothing(tmp_path):
         _run, ids = _run_with_findings(service, count=1)
         with pytest.raises(StateError, match="repeat"):
             service.decide_findings([ids[0], ids[0]], "reject", "No.")
-        assert service.database.list_decisions("finding", ids[0]) == []
+        assert service.store.list_decisions("finding", ids[0]) == []
 
 
 def test_a_cancelled_run_rejects_the_whole_batch(tmp_path):
@@ -94,4 +94,4 @@ def test_a_cancelled_run_rejects_the_whole_batch(tmp_path):
         with pytest.raises(StateError, match="cannot be decided"):
             service.decide_findings(ids, "reject", "No.")
         for finding_id in ids:
-            assert service.database.list_decisions("finding", finding_id) == []
+            assert service.store.list_decisions("finding", finding_id) == []

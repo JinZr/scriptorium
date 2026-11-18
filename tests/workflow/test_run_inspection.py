@@ -45,14 +45,14 @@ def test_status_and_report_parts_return_the_full_report(tmp_path, monkeypatch, c
         assert overview["next_actions"][0]["requires_human_decision"] is True
         assert "frozen_config" not in overview["run"]
         full = service.render_report(run_id, "json")
-        events = service.database.list_events(run_id)
+        events = service.store.list_events(run_id)
         assert len(success_json(full).encode()) > 100_000
         assert set(full) == set(REPORT_PARTS)
         assert full["validation_reports"]
         assert set(overview["report_parts"]) == set(REPORT_PARTS)
         for part in overview["report_parts"]:
             assert command([*options, "run", "report", run_id, "--part", part]) == full[part]
-        assert service.database.list_events(run_id) == events
+        assert service.store.list_events(run_id) == events
         assert cli.main(["run", "report", run_id, "--format", "json"]) == 0
         assert json.loads(capsys.readouterr().out) == full
         assert cli.main(["run", "report", run_id, "--format", "markdown"]) == 0

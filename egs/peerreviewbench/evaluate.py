@@ -363,7 +363,7 @@ def collect_exports(
             run_id = entry["scriptorium_run_id"]
             findings = service.list_findings(run_id)
             duplicate_events = [
-                event for event in service.database.list_events(run_id) if event.event_type == "finding.duplicate"
+                event for event in service.store.list_events(run_id) if event.event_type == "finding.duplicate"
             ]
         attributions = _finding_attributions(findings, duplicate_events)
         selected, stats = select_findings(findings, attributions, finding_mode)

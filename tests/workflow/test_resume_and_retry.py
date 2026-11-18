@@ -97,7 +97,7 @@ def test_resume_replays_accepted_findings_after_crash(tmp_path):
     with ScriptoriumService(repo, manuscript_manager=PdfBuildingManuscriptManager(repo)) as service:
         resumed = asyncio.run(service.resume_run(run.id))
         assert resumed["run"].status == RunStatus.AWAITING_DECISION
-        assert service.database.get_task(first["task"].id).status == TaskStatus.COMPLETED
+        assert service.store.get_task(first["task"].id).status == TaskStatus.COMPLETED
         assert len(service.list_findings(run.id)) == 1
         assert service.list_findings(run.id)[0].attempt_id == first["attempt"].id
 
@@ -139,9 +139,9 @@ def test_duplicate_submission_uses_attempt_state_after_run_lock(tmp_path, monkey
         assert accepted["run_status"] == RunStatus.AWAITING_DECISION
         assert repeated["run_status"] == RunStatus.AWAITING_DECISION
         assert repeated["output_digest"] == accepted["output_digest"]
-        assert first.database.get_run(run.id).status == RunStatus.AWAITING_DECISION
+        assert first.store.get_run(run.id).status == RunStatus.AWAITING_DECISION
         assert len(first.list_findings(run.id)) == int(with_finding)
-        assert [event.event_type for event in first.database.list_events(run.id)].count("attempt.finished") == 1
+        assert [event.event_type for event in first.store.list_events(run.id)].count("attempt.finished") == 1
 
 
 def test_invalid_anchor_requires_explicit_retry_with_saved_diagnostics(tmp_path):
@@ -155,7 +155,7 @@ def test_invalid_anchor_requires_explicit_retry_with_saved_diagnostics(tmp_path)
         assert failed["attempt"].status == AttemptStatus.FAILED
         assert failed["validation_report"]
         assert service.list_findings(run.id) == []
-        task = service.database.list_tasks(run.id)[0]
+        task = service.store.list_tasks(run.id)[0]
         asyncio.run(service.retry_task(run.id, task.id))
         second = claim(service, run.id, AgentRole.SUBSTANTIVE_REVIEW, session="correction-session")
         assert "source_digest" in second["prompt"]
@@ -174,7 +174,7 @@ def test_abandoned_correction_claim_preserves_rejection_diagnostics(tmp_path):
         run = asyncio.run(service.start_run("HEAD", "quick"))["run"]
         first = claim(service, run.id, AgentRole.SUBSTANTIVE_REVIEW)
         failed = submit(service, first, {"summary": "Invalid output", "findings": [{"wrong": "shape"}]})
-        task = service.database.list_tasks(run.id)[0]
+        task = service.store.list_tasks(run.id)[0]
         asyncio.run(service.retry_task(run.id, task.id))
         correction = claim(service, run.id, AgentRole.SUBSTANTIVE_REVIEW, session="correction-session")
         assert failed["attempt"].id in correction["prompt"]
@@ -198,11 +198,11 @@ def test_corrupt_validation_report_blocks_retry(tmp_path):
         digest = failed["attempt"].validation_report_artifact_digest
         assert digest
         service.artifacts.path_for(digest).write_bytes(b"corrupt")
-        task = service.database.list_tasks(run.id)[0]
+        task = service.store.list_tasks(run.id)[0]
         asyncio.run(service.retry_task(run.id, task.id))
         with pytest.raises(InfrastructureError, match="report|artifact"):
             claim(service, run.id, AgentRole.SUBSTANTIVE_REVIEW, session="correction-session")
-        assert len(service.database.list_attempts(task.id)) == 1
+        assert len(service.store.list_attempts(task.id)) == 1
 
 
 def test_corrupt_attempt_prompt_blocks_submission(tmp_path):
@@ -213,7 +213,7 @@ def test_corrupt_attempt_prompt_blocks_submission(tmp_path):
         service.artifacts.path_for(review["attempt"].prompt_digest).write_bytes(b"corrupt")
         with pytest.raises(InfrastructureError, match="artifact|prompt"):
             submit(service, review, {"summary": "Reviewed the text.", "findings": []})
-        assert service.database.get_attempt(review["attempt"].id).status == AttemptStatus.RUNNING
+        assert service.store.get_attempt(review["attempt"].id).status == AttemptStatus.RUNNING
         assert service.list_findings(run.id) == []
 
 
@@ -232,7 +232,7 @@ def test_missing_or_corrupt_attempt_schema_blocks_submission(tmp_path, damage):
             service.show_task(review["attempt"].id)
         with pytest.raises(InfrastructureError, match="schema artifact"):
             submit(service, review, {"summary": "Reviewed the text.", "findings": []})
-        assert service.database.get_attempt(review["attempt"].id).status == AttemptStatus.RUNNING
+        assert service.store.get_attempt(review["attempt"].id).status == AttemptStatus.RUNNING
         assert service.list_findings(run.id) == []
 
 
@@ -245,9 +245,9 @@ def test_explicit_abandonment_retries_only_the_named_running_attempt(tmp_path):
     with ScriptoriumService(repo, manuscript_manager=PdfBuildingManuscriptManager(repo)) as service:
         with pytest.raises(StateError, match="current running attempt"):
             asyncio.run(service.retry_task(run.id, task.id, "wrong-attempt", "conversation lost"))
-        assert service.database.get_attempt(first["attempt"].id).status == AttemptStatus.RUNNING
+        assert service.store.get_attempt(first["attempt"].id).status == AttemptStatus.RUNNING
         asyncio.run(service.retry_task(run.id, task.id, first["attempt"].id, "conversation lost"))
-        assert service.database.get_attempt(first["attempt"].id).status == AttemptStatus.INTERRUPTED
+        assert service.store.get_attempt(first["attempt"].id).status == AttemptStatus.INTERRUPTED
         with pytest.raises(StateError, match="superseded"):
             submit(service, first, {"summary": "Late output.", "findings": []})
         second = claim(service, run.id, AgentRole.SUBSTANTIVE_REVIEW, session="new-session")
@@ -273,13 +273,13 @@ def test_later_waiver_invalidates_active_revision_and_prepares_new_context(tmp_p
         asyncio.run(service.resume_run(run.id))
         original = claim(service, run.id, AgentRole.REVISION)
         service.decide_finding(findings[0].id, "waive", "No longer required")
-        assert service.database.get_attempt(original["attempt"].id).status == AttemptStatus.INTERRUPTED
+        assert service.store.get_attempt(original["attempt"].id).status == AttemptStatus.INTERRUPTED
         with pytest.raises(StateError, match="superseded"):
             submit(service, original, {"summary": "Old scope.", "edits": []})
         with pytest.raises(StateError, match="context changed"):
             asyncio.run(service.retry_task(run.id, original["task"].id))
         asyncio.run(service.resume_run(run.id))
-        tasks = [task for task in service.database.list_tasks(run.id) if task.stage == "revision"]
+        tasks = [task for task in service.store.list_tasks(run.id) if task.stage == "revision"]
         assert len(tasks) == 2
         replacement = next(task for task in tasks if task.id != original["task"].id)
         assert replacement.status == TaskStatus.PENDING
@@ -295,7 +295,7 @@ def test_later_waiver_invalidates_active_verification(tmp_path):
         _, finding_id = prepare_verification(service, run.id)
         verification = claim(service, run.id, AgentRole.VERIFICATION, session="fresh-verifier")
         service.decide_finding(finding_id, "waive", "The patch is no longer required")
-        assert service.database.get_attempt(verification["attempt"].id).status == AttemptStatus.INTERRUPTED
+        assert service.store.get_attempt(verification["attempt"].id).status == AttemptStatus.INTERRUPTED
         with pytest.raises(StateError, match="superseded"):
             submit(
                 service,
@@ -303,4 +303,4 @@ def test_later_waiver_invalidates_active_verification(tmp_path):
                 {"verdict": "pass", "summary": "Old scope", "resolved_finding_ids": [], "issues": []},
             )
         asyncio.run(service.resume_run(run.id))
-        assert service.database.get_run(run.id).status == RunStatus.COMPLETED
+        assert service.store.get_run(run.id).status == RunStatus.COMPLETED

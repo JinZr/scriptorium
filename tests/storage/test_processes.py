@@ -10,7 +10,7 @@ import time
 import pytest
 
 from scriptorium.domain import AgentRole, Finding, FindingSeverity, RunStatus
-from scriptorium.storage import Database
+from scriptorium.storage import RunStore
 
 from ._factories import create_completed_attempt, make_run
 
@@ -61,10 +61,10 @@ def _finding(run, task, attempt, index: int) -> Finding:
 
 
 def test_processes_mutating_one_run_lose_no_update(tmp_path) -> None:
-    with Database(tmp_path / "state") as database:
-        run = database.create_run(make_run())
-        task, attempt = create_completed_attempt(database, run)
-        findings = [database.create_finding(_finding(run, task, attempt, index)) for index in range(12)]
+    with RunStore(tmp_path / "state") as store:
+        run = store.create_run(make_run())
+        task, attempt = create_completed_attempt(store, run)
+        findings = [store.create_finding(_finding(run, task, attempt, index)) for index in range(12)]
 
     _run_together(
         tmp_path,
@@ -76,19 +76,19 @@ def test_processes_mutating_one_run_lose_no_update(tmp_path) -> None:
         ],
     )
 
-    with Database(tmp_path / "state") as database:
-        events = database.list_events(run.id)
+    with RunStore(tmp_path / "state") as store:
+        events = store.list_events(run.id)
         tags = Counter(event.payload["tag"] for event in events if event.event_type == "test.concurrent")
         assert tags == {"first": 40, "second": 40}
         for tag in ("first", "second"):
             indices = sorted(e.payload["index"] for e in events if e.payload.get("tag") == tag)
             assert indices == list(range(40))
-        statuses = {finding.id: database.get_finding(finding.id).status.value for finding in findings}
+        statuses = {finding.id: store.get_finding(finding.id).status.value for finding in findings}
         assert statuses == {
             **{finding.id: "confirmed" for finding in findings[:6]},
             **{finding.id: "rejected" for finding in findings[6:]},
         }
-        assert all(len(database.list_decisions("finding", finding.id)) == 1 for finding in findings)
+        assert all(len(store.list_decisions("finding", finding.id)) == 1 for finding in findings)
         assert len([event for event in events if event.event_type == "finding.decided"]) == 12
 
 
@@ -99,9 +99,9 @@ def test_processes_creating_runs_create_each_run_once(tmp_path) -> None:
     )
 
     assert sorted(outputs) == ["conflict", "created", "created", "created", "created"]
-    with Database(tmp_path / "state") as database:
-        assert sorted(run.id for run in database.list_runs()) == ["run_a", "run_b", "run_c", "run_same"]
-        assert [event.event_type for event in database.list_events("run_same")] == ["run.created"]
+    with RunStore(tmp_path / "state") as store:
+        assert sorted(run.id for run in store.list_runs()) == ["run_a", "run_b", "run_c", "run_same"]
+        assert [event.event_type for event in store.list_events("run_same")] == ["run.created"]
 
 
 def test_processes_publishing_one_artifact_keep_one_record(tmp_path) -> None:
@@ -109,17 +109,17 @@ def test_processes_publishing_one_artifact_keep_one_record(tmp_path) -> None:
 
     assert len(set(outputs)) == 1
     digest = outputs[0]
-    with Database(tmp_path / "state") as database:
-        record = database.get_artifact(digest)
+    with RunStore(tmp_path / "state") as store:
+        record = store.get_artifact(digest)
     assert record.size == len("shared evidence")
     shard = tmp_path / "state" / "artifacts" / "sha256" / digest[:2]
     assert sorted(path.name for path in shard.iterdir()) == [digest[2:], f"{digest[2:]}.json"]
 
 
 def test_a_process_killed_before_the_replace_leaves_the_previous_state(tmp_path) -> None:
-    with Database(tmp_path / "state") as database:
-        run = database.create_run(make_run())
-        database.update_run(run.id, RunStatus.REVIEWING)
+    with RunStore(tmp_path / "state") as store:
+        run = store.create_run(make_run())
+        store.update_run(run.id, RunStatus.REVIEWING)
     state_file = tmp_path / "state" / "runs" / run.id / "state.json"
     before = state_file.read_bytes()
     ready = tmp_path / "ready"
@@ -143,10 +143,10 @@ def test_a_process_killed_before_the_replace_leaves_the_previous_state(tmp_path)
             process.wait(timeout=10)
 
     assert state_file.read_bytes() == before
-    with Database(tmp_path / "state") as database:
-        assert database.get_run(run.id).status == RunStatus.REVIEWING
-        assert [run.id for run in database.list_runs()] == [run.id]
-        assert database.cancel_run(run.id, "stop", "cancel-after-kill").status == RunStatus.CANCELLED
-        assert [event.payload for event in database.list_events(run.id) if event.event_type == "run.cancelled"] == [
+    with RunStore(tmp_path / "state") as store:
+        assert store.get_run(run.id).status == RunStatus.REVIEWING
+        assert [run.id for run in store.list_runs()] == [run.id]
+        assert store.cancel_run(run.id, "stop", "cancel-after-kill").status == RunStatus.CANCELLED
+        assert [event.payload for event in store.list_events(run.id) if event.event_type == "run.cancelled"] == [
             {"reason": "stop", "request_id": "cancel-after-kill"}
         ]

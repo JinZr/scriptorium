@@ -23,12 +23,12 @@ def test_read_only_views_leave_an_active_external_attempt_untouched(tmp_path):
     repo, run = _started(tmp_path)
     with ScriptoriumService(repo, manuscript_manager=PdfBuildingManuscriptManager(repo)) as service:
         first = claim(service, run.id, AgentRole.SUBSTANTIVE_REVIEW)
-        task = service.database.list_tasks(run.id)[0]
-        before = service.database.get_attempt(first["attempt"].id)
+        task = service.store.list_tasks(run.id)[0]
+        before = service.store.get_attempt(first["attempt"].id)
         assert service.get_run(run.id)["run"].status == RunStatus.REVIEWING
         assert service.list_tasks(run.id)["tasks"][0]["task"].id == task.id
-        assert service.database.get_attempt(first["attempt"].id) == before
-        assert len(service.database.list_attempts(task.id)) == 1
+        assert service.store.get_attempt(first["attempt"].id) == before
+        assert len(service.store.list_attempts(task.id)) == 1
 
 
 def test_cancel_is_durable_and_rejects_a_late_result(tmp_path):
@@ -40,7 +40,7 @@ def test_cancel_is_durable_and_rejects_a_late_result(tmp_path):
         with pytest.raises(StateError, match="no longer active"):
             submit(service, review, {"summary": "Late result.", "findings": []})
         assert service.cancel_run(run.id, "User stopped review")["run"].status == RunStatus.CANCELLED
-        events = [event for event in service.database.list_events(run.id) if event.event_type == "run.cancelled"]
+        events = [event for event in service.store.list_events(run.id) if event.event_type == "run.cancelled"]
         assert len(events) == 1
 
 
@@ -48,10 +48,10 @@ def test_retry_rejects_a_task_from_another_run(tmp_path):
     repo, first = _started(tmp_path)
     with ScriptoriumService(repo, manuscript_manager=PdfBuildingManuscriptManager(repo)) as service:
         second = asyncio.run(service.start_run("HEAD", "quick", allow_duplicate=True))["run"]
-        foreign_task = service.database.list_tasks(second.id)[0]
+        foreign_task = service.store.list_tasks(second.id)[0]
         with pytest.raises(StateError, match="does not belong"):
             asyncio.run(service.retry_task(first.id, foreign_task.id))
-        assert service.database.get_run(first.id).status == RunStatus.REVIEWING
+        assert service.store.get_run(first.id).status == RunStatus.REVIEWING
 
 
 @pytest.mark.parametrize("link_kind", ["symlink", "hardlink"])
@@ -124,11 +124,11 @@ def test_cancel_waits_for_in_progress_operation_then_invalidates_claim(tmp_path)
             worker = threading.Thread(target=cancel)
             worker.start()
             assert not finished.wait(0.1)
-            assert service.database.get_attempt(review["attempt"].id).status.value == "running"
+            assert service.store.get_attempt(review["attempt"].id).status.value == "running"
         worker.join(timeout=5)
         assert finished.is_set()
         assert result["run"].status == RunStatus.CANCELLED
-        assert service.database.get_attempt(review["attempt"].id).status.value == "interrupted"
+        assert service.store.get_attempt(review["attempt"].id).status.value == "interrupted"
 
 
 @pytest.mark.parametrize("operation", ["export", "page"])
@@ -176,7 +176,7 @@ def test_cancel_waits_for_retrieval_and_records_access_before_cancellation(tmp_p
                 stopper.join(timeout=5)
         assert result["retrieval"]
         assert result["cancelled"].status == RunStatus.CANCELLED
-        events = [event.event_type for event in service.database.list_events(run.id)]
+        events = [event.event_type for event in service.store.list_events(run.id)]
         assert events.index(f"tool.{operation}") < events.index("run.cancelled")
         if operation == "page":
             with pytest.raises(StateError, match="active attempt"):
@@ -217,5 +217,5 @@ def test_submit_is_busy_during_export_then_succeeds_after_access_event(tmp_path,
         with ScriptoriumService(repo, manuscript_manager=PdfBuildingManuscriptManager(repo)) as contender:
             receipt = submit(contender, review, {"summary": "Reviewed.", "findings": []})
         assert receipt["run_status"] == RunStatus.AWAITING_DECISION
-        events = [event.event_type for event in service.database.list_events(run.id)]
+        events = [event.event_type for event in service.store.list_events(run.id)]
         assert events.index("tool.export") < events.index("attempt.finished")

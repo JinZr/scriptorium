@@ -104,7 +104,7 @@ def test_verdict_must_agree_with_the_review_findings(tmp_path, severity, recomme
             assert [(issue["code"], issue["path"]) for issue in issues] == [
                 ("verdict.inconsistent", "/verdict/recommendation")
             ]
-        assert service.database.list_findings(run.id) == []
+        assert service.store.list_findings(run.id) == []
 
 
 def test_blocker_finding_needs_a_check_of_a_headline_claim(tmp_path):
@@ -155,7 +155,7 @@ def test_verdict_counts_its_own_findings_deduplicated_into_another_task(tmp_path
         assert receipt["attempt"].status == AttemptStatus.COMPLETED
         assert receipt["run_status"] == RunStatus.AWAITING_DECISION
         # The identical finding keeps the copyedit task's row, yet it is part of this review's accepted output.
-        assert [finding.task_id for finding in service.database.list_findings(run.id)] == [copyedit["task"].id]
+        assert [finding.task_id for finding in service.store.list_findings(run.id)] == [copyedit["task"].id]
 
 
 def test_affected_claim_is_stored_and_reported(tmp_path):
@@ -168,7 +168,7 @@ def test_affected_claim_is_stored_and_reported(tmp_path):
         del minor["affected_claim"]
         output = {"summary": "Checked the text.", "findings": [finding, minor]}
         assert submit(service, first, output)["attempt"].status == AttemptStatus.COMPLETED
-        stored = {item.title: item for item in service.database.list_findings(run.id)}
+        stored = {item.title: item for item in service.store.list_findings(run.id)}
         assert stored[finding["title"]].affected_claim == finding["affected_claim"]
         assert stored["Minor wording"].affected_claim is None
         shown = service.get_finding(stored[finding["title"]].id)["finding"]
@@ -189,20 +189,20 @@ def test_a_duplicate_finding_fills_a_missing_affected_claim_once(tmp_path):
         minor = {**review_finding(first), "severity": "minor", "title": "Minor wording"}
         del minor["affected_claim"]
         submit(service, first, {"summary": "Checked the text.", "findings": [minor]})
-        (original,) = service.database.list_findings(run.id)
+        (original,) = service.store.list_findings(run.id)
         assert original.affected_claim is None
         second = claim(service, run.id, AgentRole.CONSISTENCY)
         named = {**minor, "affected_claim": "The headline accuracy claim."}
         submit(service, second, {"summary": "Checked the page.", "findings": [named]})
 
-        (filled,) = service.database.list_findings(run.id)
+        (filled,) = service.store.list_findings(run.id)
         assert (filled.id, filled.fingerprint) == (original.id, original.fingerprint)
         assert filled.affected_claim == "The headline accuracy claim."
-        events = [event.event_type for event in service.database.list_events(run.id)]
+        events = [event.event_type for event in service.store.list_events(run.id)]
         assert events.count("finding.created") == 1
         assert events.count("finding.duplicate") == 1
 
         assert (
-            service.database.fill_finding_affected_claim(filled.id, "A later claim.").affected_claim
+            service.store.fill_finding_affected_claim(filled.id, "A later claim.").affected_claim
             == "The headline accuracy claim."
         )

@@ -12,8 +12,8 @@ _REVIEW_ROLES = ("substantive_review", "copyedit", "consistency", "figure_review
 
 def _role_inputs(service, run_id):
     inputs = {}
-    for task in service.database.list_tasks(run_id):
-        metadata = service.database.get_external_task(task.id)
+    for task in service.store.list_tasks(run_id):
+        metadata = service.store.get_external_task(task.id)
         bound = {key: metadata[key] for key in ("prompt_digest", "schema_digest", "bundle_digest")}
         assert task.input_digest == digest_json(bound)
         inputs[task.role.value] = (task.input_digest, metadata["prompt_digest"])
@@ -114,7 +114,7 @@ def test_new_findings_require_a_recorded_consequence(tmp_path):
 
         receipt = submit(service, review, {"summary": "Checked language.", "findings": [finding]})
         assert receipt["attempt"].status == AttemptStatus.COMPLETED
-        [stored] = service.database.list_findings(run.id)
+        [stored] = service.store.list_findings(run.id)
         assert stored.consequence == finding["consequence"]
         assert service.get_finding(stored.id)["finding"].consequence == finding["consequence"]
         report = service.render_report(run.id, "json")

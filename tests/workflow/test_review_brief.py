@@ -29,8 +29,8 @@ def _start(service, brief=None):
 
 def _role_inputs(service, run_id):
     return {
-        task.role.value: (task.input_digest, service.database.get_external_task(task.id)["prompt_digest"])
-        for task in service.database.list_tasks(run_id)
+        task.role.value: (task.input_digest, service.store.get_external_task(task.id)["prompt_digest"])
+        for task in service.store.list_tasks(run_id)
     }
 
 
@@ -136,7 +136,7 @@ def test_an_invalid_brief_is_rejected_before_any_run_is_created(tmp_path) -> Non
         with pytest.raises(ConfigurationError, match="invalid review brief"):
             asyncio.run(service.start_run("HEAD", "quick", brief="not json"))
 
-        assert service.database.list_runs() == []
+        assert service.store.list_runs() == []
 
 
 def test_briefs_that_render_alike_still_give_distinct_bound_input_digests(tmp_path) -> None:
@@ -146,7 +146,7 @@ def test_briefs_that_render_alike_still_give_distinct_bound_input_digests(tmp_pa
         first = _start(service, _BRIEF)["run"]
         second = _start(service, {**_BRIEF, "recorded_by": "claude session-2"})["run"]
         claims = [claim(service, run.id, "copyedit") for run in (plain, first, second)]
-        tasks = [service.database.get_external_task(item["task"].id) for item in claims]
+        tasks = [service.store.get_external_task(item["task"].id) for item in claims]
         with pytest.raises(StateError, match="input digest does not match"):
             service.check_submission(claims[2]["attempt"].id, claims[1]["input_digest"], "{}")
 

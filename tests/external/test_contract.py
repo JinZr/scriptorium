@@ -127,7 +127,7 @@ def test_each_host_uses_the_same_frozen_task_contract(tmp_path: Path, client: st
             )
         )
         assert repeated["output_digest"] == result["output_digest"]
-        assert {event.event_type for event in service.database.list_events(run_id)} >= {"tool.export", "tool.page"}
+        assert {event.event_type for event in service.store.list_events(run_id)} >= {"tool.export", "tool.page"}
 
 
 def test_invalid_submission_requires_explicit_retry_and_never_creates_findings(tmp_path: Path) -> None:
@@ -147,7 +147,7 @@ def test_invalid_submission_requires_explicit_retry_and_never_creates_findings(t
         assert "Your previous ReviewOutput was rejected" in second["prompt"]
         with pytest.raises(StateError, match="input digest"):
             service.armarius.submit_task(second["attempt"].id, "0" * 64, "{}")
-        assert service.database.get_task(task_id).status == TaskStatus.RUNNING
+        assert service.store.get_task(task_id).status == TaskStatus.RUNNING
 
 
 def test_cancel_rejects_late_submission(tmp_path: Path) -> None:
@@ -193,11 +193,11 @@ def test_revision_requires_human_gates_and_independent_verification(tmp_path: Pa
                 _review_json("Read the result and supplement.", [finding]),
             )
         )
-        assert service.database.get_run(run_id).status == RunStatus.AWAITING_DECISION
+        assert service.store.get_run(run_id).status == RunStatus.AWAITING_DECISION
         finding_id = service.list_findings(run_id)[0].id
         service.decide_finding(finding_id, "confirm", "Accept the scoped wording")
         asyncio.run(service.resume_run(run_id))
-        revision_task = next(task for task in service.database.list_tasks(run_id) if task.stage == "revision")
+        revision_task = next(task for task in service.store.list_tasks(run_id) if task.stage == "revision")
         revision = service.claim_task(revision_task.id, "claude_code", "sonnet", "max", "revision-session", "host")
         before = (repo / "main.tex").read_text(encoding="utf-8").splitlines()[2]
         edit = {
@@ -217,11 +217,11 @@ def test_revision_requires_human_gates_and_independent_verification(tmp_path: Pa
                 json.dumps({"summary": "Qualified the result.", "edits": [edit]}),
             )
         )
-        patch = service.database.list_patches(run_id)[-1]
-        assert service.database.get_run(run_id).status == RunStatus.AWAITING_PATCH_APPROVAL
+        patch = service.store.list_patches(run_id)[-1]
+        assert service.store.get_run(run_id).status == RunStatus.AWAITING_PATCH_APPROVAL
         service.decide_patch(patch.id, "approve", "The edit matches the finding")
         asyncio.run(service.resume_run(run_id))
-        verification_task = next(task for task in service.database.list_tasks(run_id) if task.stage == "verification")
+        verification_task = next(task for task in service.store.list_tasks(run_id) if task.stage == "verification")
         reused = service.claim_task(verification_task.id, "codex", "model", "max", "review-session", "host")
         output = json.dumps(
             {
@@ -514,7 +514,7 @@ def test_frozen_navigation_damage_blocks_claim_before_any_attempt(tmp_path: Path
         navigation.write_text("{}\n", encoding="utf-8")
         with pytest.raises(InfrastructureError, match="navigation"):
             service.claim_task(task_id, "codex", "model", "max", "session", "host")
-        assert service.database.list_attempts(task_id) == []
+        assert service.store.list_attempts(task_id) == []
 
 
 def test_wrong_evidence_is_rejected_as_a_whole_output(tmp_path: Path) -> None:
@@ -564,12 +564,12 @@ def test_completed_attempt_replays_after_process_exit(tmp_path: Path) -> None:
             claim["input_digest"],
             _review_json("Reviewed the manuscript."),
         )
-        assert service.database.get_run(run_id).status == RunStatus.REVIEWING
+        assert service.store.get_run(run_id).status == RunStatus.REVIEWING
         assert service.list_tasks(run_id)["next_actions"] == [{"command": "run resume", "run_id": run_id}]
     with ScriptoriumService(repo) as service:
         asyncio.run(service.resume_run(run_id))
-        assert service.database.get_run(run_id).status == RunStatus.AWAITING_DECISION
-        assert len(service.database.list_attempts(task_id)) == 1
+        assert service.store.get_run(run_id).status == RunStatus.AWAITING_DECISION
+        assert len(service.store.list_attempts(task_id)) == 1
 
 
 def test_corrupt_completed_output_cannot_be_replayed_or_pass_the_gate(tmp_path: Path) -> None:
@@ -686,7 +686,7 @@ def test_export_writes_the_frozen_bundle_and_task_inputs_and_records_each_export
         bundle = Path(claim["bundle_path"])
         on_disk = {path.relative_to(destination).as_posix() for path in destination.rglob("*") if path.is_file()}
         assert on_disk == expected | inputs
-        events = [e for e in service.database.list_events(run_id) if e.event_type == "tool.export"]
+        events = [e for e in service.store.list_events(run_id) if e.event_type == "tool.export"]
         assert len(events) == 1 and events[0].entity_id == attempt_id
         for item in events[0].payload["files"]:
             exported = destination / item["path"]
@@ -701,7 +701,7 @@ def test_export_writes_the_frozen_bundle_and_task_inputs_and_records_each_export
         empty = tmp_path / "empty"
         empty.mkdir()
         service.export_task(attempt_id, empty)
-        assert len([e for e in service.database.list_events(run_id) if e.event_type == "tool.export"]) == 2
+        assert len([e for e in service.store.list_events(run_id) if e.event_type == "tool.export"]) == 2
         receipt = asyncio.run(service.submit_task(attempt_id, claim["input_digest"], _review_json("Checked.")))
         assert receipt["attempt"].status.value == "completed"
         assert service.export_task(attempt_id, tmp_path / "after")["files_digest"] == response["files_digest"]

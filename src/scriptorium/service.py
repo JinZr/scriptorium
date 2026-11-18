@@ -49,7 +49,7 @@ from .schemas import (
     ReviewBrief,
     ScientificReviewOutput,
 )
-from .storage import ConflictError, Database, NotFoundError as StorageNotFoundError, StorageError
+from .storage import ConflictError, NotFoundError as StorageNotFoundError, RunStore, StorageError
 from .tool_output import REPORT_PARTS, run_list, run_overview, task_view
 from .workflow import Armarius, task_input_digest
 
@@ -70,20 +70,20 @@ class ScriptoriumService:
         self.repo = find_repo(repo)
         self.state_dir = self.repo / ".scriptorium"
         try:
-            self.database = Database(self.state_dir)
+            self.store = RunStore(self.state_dir)
             self.artifacts = ArtifactStore(self.state_dir / "artifacts")
         except (StorageError, OSError) as exc:
             raise InfrastructureError(f"cannot initialize local state: {exc}") from exc
         self.manuscript = manuscript_manager or ManuscriptManager(self.repo)
         self.armarius = Armarius(
             repo=self.repo,
-            database=self.database,
+            store=self.store,
             artifacts=self.artifacts,
             manuscript=self.manuscript,
         )
 
     def close(self) -> None:
-        self.database.close()
+        self.store.close()
 
     def __enter__(self) -> ScriptoriumService:
         return self
@@ -295,7 +295,7 @@ class ScriptoriumService:
                 check("review_profile", False, str(exc), "configuration")
             else:
                 check("review_profile", True, f"profile {selected_profile}")
-        check("run_state", True, str(self.database.runs_dir))
+        check("run_state", True, str(self.store.runs_dir))
 
         failed = [item for item in checks if not item["ok"]]
         exit_code = 3 if infrastructure_failed else 2 if configuration_failed or failed else 0
@@ -317,7 +317,7 @@ class ScriptoriumService:
             return None
 
     def _refuse_duplicate_run(self, commit_sha: str) -> None:
-        active = self._storage(self.database.list_active_runs, commit_sha)
+        active = self._storage(self.store.list_active_runs, commit_sha)
         if active:
             existing = active[0]
             remedy = "resume" if existing.status == RunStatus.FAILED else "cancel"
@@ -359,21 +359,19 @@ class ScriptoriumService:
         return view if brief is None else {**view, "review_brief": brief}
 
     def get_run(self, run_id: str) -> dict[str, Any]:
-        run = self._storage(self.database.get_run, run_id)
-        tasks = self._storage(self.database.list_tasks, run_id)
-        findings = self._storage(self.database.list_findings, run_id)
-        patches = self._storage(self.database.list_patches, run_id)
+        run = self._storage(self.store.get_run, run_id)
+        tasks = self._storage(self.store.list_tasks, run_id)
+        findings = self._storage(self.store.list_findings, run_id)
+        patches = self._storage(self.store.list_patches, run_id)
         return {
             "run": run,
-            "tasks": [
-                {"task": task, "attempts": self._storage(self.database.list_attempts, task.id)} for task in tasks
-            ],
+            "tasks": [{"task": task, "attempts": self._storage(self.store.list_attempts, task.id)} for task in tasks],
             "finding_ids": [finding.id for finding in findings],
             "patch_ids": [patch.id for patch in patches],
         }
 
     def run_status(self, run_id: str) -> dict[str, Any]:
-        run = self._storage(self.database.get_run, run_id)
+        run = self._storage(self.store.get_run, run_id)
         with self._run_operation(run.id, "run status"):
             view = self.get_run(run_id)
             return run_overview(self._with_brief(view), self.list_tasks(run_id)["next_actions"])
@@ -385,7 +383,7 @@ class ScriptoriumService:
         if not 1 <= limit <= RUN_LIST_MAX_LIMIT:
             raise ConfigurationError(f"--limit must be between 1 and {RUN_LIST_MAX_LIMIT}")
         total, summaries = self._storage(
-            self.database.list_run_summaries, None if status is None else RunStatus(status), limit
+            self.store.list_run_summaries, None if status is None else RunStatus(status), limit
         )
         rows = []
         for run, task_counts in summaries:
@@ -397,7 +395,7 @@ class ScriptoriumService:
         return run_list(total, rows, limit)
 
     async def resume_run(self, run_id: str) -> dict[str, Any]:
-        run = self._storage(self.database.get_run, run_id)
+        run = self._storage(self.store.get_run, run_id)
         with self._run_operation(run.id, "run resume"):
             self._storage(self.armarius.invalidate_stale_tasks, run.id)
             await self.armarius.resume_run(run.id)
@@ -406,13 +404,13 @@ class ScriptoriumService:
     async def retry_task(
         self, run_id: str, task_id: str, abandon_attempt_id: str | None = None, reason: str | None = None
     ) -> dict[str, Any]:
-        run = self._storage(self.database.get_run, run_id)
+        run = self._storage(self.store.get_run, run_id)
         with self._run_operation(run.id, "run retry"):
             await self.armarius.retry_task(run.id, task_id, abandon_attempt_id, reason)
             return self.get_run(run.id)
 
     def cancel_run(self, run_id: str, reason: str) -> dict[str, Any]:
-        run = self._storage(self.database.get_run, run_id)
+        run = self._storage(self.store.get_run, run_id)
         with self._run_operation(run.id, "run cancel", wait=True):
             self._storage(self.armarius.cancel_run, run.id, reason, new_id("cancel"))
             return self.get_run(run.id)
@@ -447,13 +445,13 @@ class ScriptoriumService:
         ):
             next_actions.append({"command": "run resume", "run_id": run_id})
         elif view["run"].status == RunStatus.AWAITING_DECISION and not next_actions:
-            findings = self._storage(self.database.list_findings, run_id)
+            findings = self._storage(self.store.list_findings, run_id)
             if any(item.status == FindingStatus.PENDING for item in findings):
                 next_actions.append({"command": "finding list", "run_id": run_id, "requires_human_decision": True})
             else:
                 next_actions.append({"command": "run resume", "run_id": run_id})
         elif view["run"].status == RunStatus.AWAITING_PATCH_APPROVAL:
-            patch = self._storage(self.database.get_patch, view["patch_ids"][-1])
+            patch = self._storage(self.store.get_patch, view["patch_ids"][-1])
             if patch.status == PatchStatus.PROPOSED:
                 next_actions.append({"command": "patch show", "patch_id": patch.id, "requires_human_decision": True})
             else:
@@ -489,7 +487,7 @@ class ScriptoriumService:
             raise ConfigurationError("session source must be host or declared")
         if not all(value.strip() and len(value) <= 200 for value in (model, effort, session_id)):
             raise ConfigurationError("model, effort, and session ID must be 1-200 characters")
-        task = self._storage(self.database.get_task, task_id)
+        task = self._storage(self.store.get_task, task_id)
         with self._run_operation(task.run_id, "task claim"):
             attempt = self._storage(
                 self.armarius.claim_task, task_id, client, model, effort, session_id, session_source
@@ -497,10 +495,10 @@ class ScriptoriumService:
             return self.show_task(attempt.id)
 
     def show_task(self, attempt_id: str) -> dict[str, Any]:
-        attempt = self._storage(self.database.get_attempt, attempt_id)
-        task = self._storage(self.database.get_task, attempt.task_id)
-        run = self._storage(self.database.get_run, task.run_id)
-        metadata = self._storage(self.database.get_external_task, task.id)
+        attempt = self._storage(self.store.get_attempt, attempt_id)
+        task = self._storage(self.store.get_task, attempt.task_id)
+        run = self._storage(self.store.get_run, task.run_id)
+        metadata = self._storage(self.store.get_external_task, task.id)
         if attempt.schema_digest != metadata["schema_digest"]:
             raise InfrastructureError("attempt is not bound to its frozen task")
         bundle = self.armarius._external_bundle(run, metadata)
@@ -530,16 +528,16 @@ class ScriptoriumService:
     async def submit_task(self, attempt_id: str, input_digest: str, output_text: str) -> dict[str, Any]:
         if len(output_text.encode("utf-8")) > 2_000_000:
             raise ConfigurationError("submission exceeds the 2 MB limit")
-        attempt = self._storage(self.database.get_attempt, attempt_id)
-        task = self._storage(self.database.get_task, attempt.task_id)
+        attempt = self._storage(self.store.get_attempt, attempt_id)
+        task = self._storage(self.store.get_task, attempt.task_id)
         with self._run_operation(task.run_id, "task submit"):
-            attempt = self._storage(self.database.get_attempt, attempt_id)
+            attempt = self._storage(self.store.get_attempt, attempt_id)
             finished = self._storage(self.armarius.submit_task, attempt_id, input_digest, output_text)
             if attempt.status == AttemptStatus.RUNNING and finished.status == AttemptStatus.COMPLETED:
                 await self.armarius.resume_run(task.run_id)
             report = None
             if finished.validation_report_artifact_digest:
-                metadata = self._storage(self.database.get_external_task, task.id)
+                metadata = self._storage(self.store.get_external_task, task.id)
                 report = self.armarius._load_validation_report(
                     finished, metadata["schema_kind"], metadata["schema_digest"], metadata["bundle_digest"]
                 ).model_dump(mode="json")
@@ -547,7 +545,7 @@ class ScriptoriumService:
                 "attempt": finished,
                 "output_digest": finished.output_artifact_digest,
                 "validation_report": report,
-                "run_status": self._storage(self.database.get_run, task.run_id).status,
+                "run_status": self._storage(self.store.get_run, task.run_id).status,
                 "next_actions": self.list_tasks(task.run_id)["next_actions"],
             }
 
@@ -555,8 +553,8 @@ class ScriptoriumService:
         if len(output_text.encode("utf-8")) > 2_000_000:
             raise ConfigurationError("submission exceeds the 2 MB limit")
         with self._retrieval_operation(attempt_id, "task submit --check"):
-            attempt = self._storage(self.database.get_attempt, attempt_id)
-            task = self._storage(self.database.get_task, attempt.task_id)
+            attempt = self._storage(self.store.get_attempt, attempt_id)
+            task = self._storage(self.store.get_task, attempt.task_id)
             report = self._storage(self.armarius.check_submission, attempt_id, input_digest, output_text)
             output_digest = ArtifactStore.digest_bytes(output_text.encode("utf-8"))
             valid = report is None
@@ -583,18 +581,18 @@ class ScriptoriumService:
 
     @contextmanager
     def _retrieval_operation(self, attempt_id: str, operation: str) -> Iterator[None]:
-        attempt = self._storage(self.database.get_attempt, attempt_id)
-        task = self._storage(self.database.get_task, attempt.task_id)
+        attempt = self._storage(self.store.get_attempt, attempt_id)
+        task = self._storage(self.store.get_task, attempt.task_id)
         with self._run_operation(task.run_id, operation, wait=True):
             yield
 
     def _task_bundle(self, attempt_id: str, *, active: bool):
-        attempt = self._storage(self.database.get_attempt, attempt_id)
-        task = self._storage(self.database.get_task, attempt.task_id)
-        run = self._storage(self.database.get_run, task.run_id)
+        attempt = self._storage(self.store.get_attempt, attempt_id)
+        task = self._storage(self.store.get_task, attempt.task_id)
+        run = self._storage(self.store.get_run, task.run_id)
         if active and (attempt.status != AttemptStatus.RUNNING or task.status != TaskStatus.RUNNING):
             raise StateError("rendering pages requires an active attempt")
-        metadata = self._storage(self.database.get_external_task, task.id)
+        metadata = self._storage(self.store.get_external_task, task.id)
         if attempt.schema_digest != metadata["schema_digest"]:
             raise InfrastructureError("attempt is not bound to its frozen task")
         bundle, files = self.armarius._retrieval_bundle(run, metadata)
@@ -775,7 +773,7 @@ class ScriptoriumService:
 
     def _record_access(self, run_id: str, attempt_id: str, operation: str, payload: dict[str, Any]) -> None:
         self._storage(
-            self.database.append_event,
+            self.store.append_event,
             Event(
                 run_id=run_id,
                 event_type=f"tool.{operation}",
@@ -786,12 +784,12 @@ class ScriptoriumService:
         )
 
     def list_findings(self, run_id: str):
-        self._storage(self.database.get_run, run_id)
-        return self._storage(self.database.list_findings, run_id)
+        self._storage(self.store.get_run, run_id)
+        return self._storage(self.store.list_findings, run_id)
 
     def get_finding(self, finding_id: str) -> dict[str, Any]:
-        finding = self._storage(self.database.get_finding, finding_id)
-        decisions = self._storage(self.database.list_decisions, "finding", finding_id)
+        finding = self._storage(self.store.get_finding, finding_id)
+        decisions = self._storage(self.store.list_decisions, "finding", finding_id)
         return {"finding": finding, "decisions": decisions}
 
     def decide_finding(
@@ -812,19 +810,19 @@ class ScriptoriumService:
             raise StateError("at least one finding ID is required")
         if len(set(finding_ids)) != len(finding_ids):
             raise StateError("finding IDs must not repeat")
-        initial = [self._storage(self.database.get_finding, finding_id) for finding_id in finding_ids]
+        initial = [self._storage(self.store.get_finding, finding_id) for finding_id in finding_ids]
         run_ids = {finding.run_id for finding in initial}
         if len(run_ids) != 1:
             raise StateError("findings must all belong to the same run")
         with self._run_operation(initial[0].run_id, "finding decide"):
-            before = [self._storage(self.database.get_finding, finding_id) for finding_id in finding_ids]
-            run = self._storage(self.database.get_run, initial[0].run_id)
+            before = [self._storage(self.store.get_finding, finding_id) for finding_id in finding_ids]
+            run = self._storage(self.store.get_run, initial[0].run_id)
             if run.status in {RunStatus.COMPLETED, RunStatus.FAILED, RunStatus.CANCELLED}:
                 raise StateError(f"findings cannot be decided while run is {run.status.value}")
             if run.status != RunStatus.AWAITING_DECISION and decision != "waive":
                 raise StateError("only a later explicit waiver is allowed after the decision stage")
-            records = self._storage(self.database.decide_findings, finding_ids, decision, reason)
-            updated = [self._storage(self.database.get_finding, finding_id) for finding_id in finding_ids]
+            records = self._storage(self.store.decide_findings, finding_ids, decision, reason)
+            updated = [self._storage(self.store.get_finding, finding_id) for finding_id in finding_ids]
             if any(
                 old.status == FindingStatus.CONFIRMED and new.status == FindingStatus.WAIVED
                 for old, new in zip(before, updated)
@@ -838,9 +836,9 @@ class ScriptoriumService:
         return result
 
     def get_patch(self, patch_id: str) -> dict[str, Any]:
-        patch = self._storage(self.database.get_patch, patch_id)
-        decisions = self._storage(self.database.list_decisions, "patch", patch_id)
-        verifications = self._storage(self.database.list_verifications, patch_id)
+        patch = self._storage(self.store.get_patch, patch_id)
+        decisions = self._storage(self.store.list_decisions, "patch", patch_id)
+        verifications = self._storage(self.store.list_verifications, patch_id)
         diff = self.artifacts.get_bytes(patch.diff_digest).decode("utf-8")
         return {
             "patch": patch,
@@ -855,28 +853,28 @@ class ScriptoriumService:
         decision: str,
         reason: str,
     ) -> dict[str, Any]:
-        initial = self._storage(self.database.get_patch, patch_id)
+        initial = self._storage(self.store.get_patch, patch_id)
         with self._run_operation(initial.run_id, "patch decide"):
-            patch = self._storage(self.database.get_patch, patch_id)
-            run = self._storage(self.database.get_run, patch.run_id)
+            patch = self._storage(self.store.get_patch, patch_id)
+            run = self._storage(self.store.get_run, patch.run_id)
             if run.status != RunStatus.AWAITING_PATCH_APPROVAL:
                 raise StateError(f"patches cannot be decided while run is {run.status.value}")
-            patches = self._storage(self.database.list_patches, run.id)
+            patches = self._storage(self.store.list_patches, run.id)
             if patches[-1].id != patch_id:
                 raise StateError("only the latest patch can be decided")
-            record = self._storage(self.database.decide_patch, patch_id, decision, reason)
-            updated = self._storage(self.database.get_patch, patch_id)
+            record = self._storage(self.store.decide_patch, patch_id, decision, reason)
+            updated = self._storage(self.store.get_patch, patch_id)
         return {"decision": record, "patch": updated}
 
     def apply_patch(self, patch_id: str):
-        initial = self._storage(self.database.get_patch, patch_id)
+        initial = self._storage(self.store.get_patch, patch_id)
         with self._run_operation(initial.run_id, "patch apply"):
-            patch = self._storage(self.database.get_patch, patch_id)
-            run = self._storage(self.database.get_run, patch.run_id)
+            patch = self._storage(self.store.get_patch, patch_id)
+            run = self._storage(self.store.get_run, patch.run_id)
             if run.status != RunStatus.READY_TO_APPLY:
                 raise StateError(f"patch cannot be applied while run is {run.status.value}")
             if patch.status == PatchStatus.APPLIED:
-                self._storage(self.database.update_run, run.id, RunStatus.COMPLETED)
+                self._storage(self.store.update_run, run.id, RunStatus.COMPLETED)
                 return patch
             if patch.status != PatchStatus.VERIFIED:
                 raise StateError(f"patch cannot be applied while {patch.status.value}")
@@ -889,17 +887,17 @@ class ScriptoriumService:
                 self.manuscript.apply_to_worktree(snapshot, patched, paths)
             except StateError as exc:
                 if not self._finish_partially_applied_patch(snapshot, patched, paths):
-                    stale = self._storage(self.database.update_patch, patch.id, PatchStatus.STALE)
-                    self._storage(self.database.update_run, run.id, RunStatus.FAILED, str(exc))
+                    stale = self._storage(self.store.update_patch, patch.id, PatchStatus.STALE)
+                    self._storage(self.store.update_run, run.id, RunStatus.FAILED, str(exc))
                     return stale
-            applied = self._storage(self.database.update_patch, patch.id, PatchStatus.APPLIED)
-            self._storage(self.database.update_run, run.id, RunStatus.COMPLETED)
+            applied = self._storage(self.store.update_patch, patch.id, PatchStatus.APPLIED)
+            self._storage(self.store.update_run, run.id, RunStatus.COMPLETED)
         return applied
 
     def read_report(self, run_id: str, part: str):
         if part not in REPORT_PARTS:
             raise ConfigurationError(f"unknown report part: {part}")
-        run = self._storage(self.database.get_run, run_id)
+        run = self._storage(self.store.get_run, run_id)
         with self._run_operation(run.id, "run report"):
             return self.render_report(run_id, "json")[part]
 
@@ -907,9 +905,9 @@ class ScriptoriumService:
         if format not in {"markdown", "json"}:
             raise ConfigurationError("report format must be markdown or json")
         run_view = self.get_run(run_id)
-        findings = self._storage(self.database.list_findings, run_id)
-        patches = self._storage(self.database.list_patches, run_id)
-        events = self._storage(self.database.list_events, run_id)
+        findings = self._storage(self.store.list_findings, run_id)
+        patches = self._storage(self.store.list_patches, run_id)
+        events = self._storage(self.store.list_events, run_id)
         validation_reports = []
         review_limitations = []
         review_claim_checks = []
@@ -921,7 +919,7 @@ class ScriptoriumService:
                 "verification": "verification",
             }.get(task.stage)
             if task.stage == "review":
-                metadata = self._storage(self.database.get_external_task, task.id)
+                metadata = self._storage(self.store.get_external_task, task.id)
                 schema_kind = metadata["schema_kind"]
             for attempt in item["attempts"]:
                 if task.stage == "review" and attempt.status == AttemptStatus.COMPLETED:
@@ -971,7 +969,7 @@ class ScriptoriumService:
             item.pop("created_at")
         finding_records = []
         for finding in findings:
-            decisions = self._storage(self.database.list_decisions, "finding", finding.id)
+            decisions = self._storage(self.store.list_decisions, "finding", finding.id)
             # The findings were read before their decisions; report the status the latest decision implies.
             finding_records.append(
                 {"finding": replace(finding, status=current_status(finding, decisions)), "decisions": decisions}
@@ -994,8 +992,8 @@ class ScriptoriumService:
             "patches": [
                 {
                     "patch": patch,
-                    "decisions": self._storage(self.database.list_decisions, "patch", patch.id),
-                    "verifications": self._storage(self.database.list_verifications, patch.id),
+                    "decisions": self._storage(self.store.list_decisions, "patch", patch.id),
+                    "verifications": self._storage(self.store.list_verifications, patch.id),
                 }
                 for patch in patches
             ],
@@ -1014,10 +1012,10 @@ class ScriptoriumService:
         return run if brief is None else {**_plain(run), "review_brief": brief["content"]}
 
     def evaluate_gate(self, run_id: str) -> dict[str, Any]:
-        run = self._storage(self.database.get_run, run_id)
-        tasks = self._storage(self.database.list_tasks, run_id)
-        findings = self._storage(self.database.list_findings, run_id)
-        patches = self._storage(self.database.list_patches, run_id)
+        run = self._storage(self.store.get_run, run_id)
+        tasks = self._storage(self.store.list_tasks, run_id)
+        findings = self._storage(self.store.list_findings, run_id)
+        patches = self._storage(self.store.list_patches, run_id)
         required_roles = set(run.frozen_config["profile_roles"])
         completed_roles = set()
         review_errors = []
@@ -1047,7 +1045,7 @@ class ScriptoriumService:
             else set()
         )
         verifications = (
-            self._storage(self.database.list_verifications, applied_patch.id) if applied_patch is not None else []
+            self._storage(self.store.list_verifications, applied_patch.id) if applied_patch is not None else []
         )
         conditions = {
             "required_reviews_completed": required_roles.issubset(completed_roles),

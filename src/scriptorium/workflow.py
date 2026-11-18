@@ -66,7 +66,7 @@ from .schemas import (
     output_schema,
     render_review_brief,
 )
-from .storage import Database, StorageError
+from .storage import RunStore, StorageError
 
 VALIDATION_REPORT_MEDIA_TYPE = "application/vnd.scriptorium.validation-report+json"
 REVIEW_BRIEF_MEDIA_TYPE = "application/vnd.scriptorium.review-brief+json"
@@ -97,12 +97,12 @@ class Armarius:
     def __init__(
         self,
         repo: Path,
-        database: Database,
+        store: RunStore,
         artifacts: ArtifactStore,
         manuscript: ManuscriptManager,
     ) -> None:
         self.repo = repo
-        self.database = database
+        self.store = store
         self.artifacts = artifacts
         self.manuscript = manuscript
         self.state_dir = repo / ".scriptorium"
@@ -142,13 +142,13 @@ class Armarius:
             frozen_config=frozen_config,
             brief_digest=self._publish_brief(brief),
         )
-        self.database.create_run(run)
+        self.store.create_run(run)
         try:
             await self._prepare_and_review(run, project, revision, sources)
         except Exception as exc:
             self._fail_active_run(run.id, exc)
             raise
-        return self.database.get_run(run.id)
+        return self.store.get_run(run.id)
 
     def _publish_brief(self, brief: ReviewBrief | None) -> str | None:
         if brief is None:
@@ -170,16 +170,16 @@ class Armarius:
         return self.manuscript.detect_template(self._run_dir(run.id) / "snapshot", self._manuscript_config(run))
 
     async def resume_run(self, run_id: str) -> Run:
-        run = self.database.get_run(run_id)
+        run = self.store.get_run(run_id)
         if run.status in {RunStatus.COMPLETED, RunStatus.CANCELLED}:
             return run
         self.require_evidence_anchor_contract(run.id)
         if run.status == RunStatus.READY_TO_APPLY:
-            if not self.database.list_findings(run.id, [FindingStatus.CONFIRMED]):
-                return self.database.update_run(run.id, RunStatus.COMPLETED)
+            if not self.store.list_findings(run.id, [FindingStatus.CONFIRMED]):
+                return self.store.update_run(run.id, RunStatus.COMPLETED)
             return run
         if run.status == RunStatus.FAILED:
-            run = self.database.update_run(run.id, self._status_before_failure(run.id))
+            run = self.store.update_run(run.id, self._status_before_failure(run.id))
         try:
             if run.status == RunStatus.PREPARING:
                 project = self._project_for_run(run)
@@ -199,17 +199,17 @@ class Armarius:
         except Exception as exc:
             self._fail_active_run(run.id, exc)
             raise
-        return self.database.get_run(run_id)
+        return self.store.get_run(run_id)
 
     async def retry_task(
         self, run_id: str, task_id: str, abandon_attempt_id: str | None = None, reason: str | None = None
     ) -> Run:
-        run = self.database.get_run(run_id)
-        task = self.database.get_task(task_id)
+        run = self.store.get_run(run_id)
+        task = self.store.get_task(task_id)
         if task.run_id != run_id:
             raise StateError(f"task {task_id} does not belong to run {run_id}")
         if abandon_attempt_id is not None:
-            attempts = self.database.list_attempts(task.id)
+            attempts = self.store.list_attempts(task.id)
             if (
                 task.status != TaskStatus.RUNNING
                 or not attempts
@@ -248,18 +248,18 @@ class Armarius:
         if not self._task_context_is_current(run, task):
             raise StateError("task context changed; run resume to prepare a new task")
         if abandon_attempt_id is not None:
-            self.database.finish_attempt(
+            self.store.finish_attempt(
                 abandon_attempt_id, AttemptStatus.INTERRUPTED, error=f"explicitly abandoned: {reason}"
             )
-        self.database.update_task_status(task.id, TaskStatus.PENDING)
+        self.store.update_task_status(task.id, TaskStatus.PENDING)
         if run.status == RunStatus.FAILED:
-            self.database.update_run(run.id, target_status)
-        return self.database.get_run(run_id)
+            self.store.update_run(run.id, target_status)
+        return self.store.get_run(run_id)
 
     def _task_context_is_current(self, run: Run, task: Task) -> bool:
         if task.stage == "review":
             return True
-        confirmed = self.database.list_findings(run.id, [FindingStatus.CONFIRMED])
+        confirmed = self.store.list_findings(run.id, [FindingStatus.CONFIRMED])
         if not confirmed:
             return False
         if task.stage == "revision":
@@ -267,7 +267,7 @@ class Armarius:
         elif task.stage == "verification":
             approved = [
                 patch
-                for patch in self.database.list_patches(run.id)
+                for patch in self.store.list_patches(run.id)
                 if patch.status in {PatchStatus.APPROVED, PatchStatus.VERIFIED}
             ]
             if not approved:
@@ -275,12 +275,12 @@ class Armarius:
             prompt = self._verification_prompt(run, approved[-1], confirmed)
         else:
             raise InfrastructureError(f"unsupported external task stage: {task.stage}")
-        metadata = self.database.get_external_task(task.id)
+        metadata = self.store.get_external_task(task.id)
         return ArtifactStore.digest_bytes(prompt.encode("utf-8")) == metadata["prompt_digest"]
 
     def invalidate_stale_tasks(self, run_id: str) -> None:
-        run = self.database.get_run(run_id)
-        for task in self.database.list_tasks(run_id):
+        run = self.store.get_run(run_id)
+        for task in self.store.list_tasks(run_id):
             if task.stage not in {"revision", "verification"} or task.status not in {
                 TaskStatus.PENDING,
                 TaskStatus.RUNNING,
@@ -289,15 +289,15 @@ class Armarius:
             if self._task_context_is_current(run, task):
                 continue
             if task.status == TaskStatus.RUNNING:
-                attempt = self.database.list_attempts(task.id)[-1]
-                self.database.finish_attempt(
+                attempt = self.store.list_attempts(task.id)[-1]
+                self.store.finish_attempt(
                     attempt.id, AttemptStatus.INTERRUPTED, error="finding decision changed frozen task context"
                 )
             else:
-                self.database.update_task_status(task.id, TaskStatus.CANCELLED)
+                self.store.update_task_status(task.id, TaskStatus.CANCELLED)
 
     def require_evidence_anchor_contract(self, run_id: str) -> EvidenceAnchorContract:
-        run = self.database.get_run(run_id)
+        run = self.store.get_run(run_id)
         contract = self._evidence_anchor_contract_for_run(run)
         self._navigation_for_run(run)
         return contract
@@ -327,7 +327,7 @@ class Armarius:
     def cancel_run(self, run_id: str, reason: str, request_id: str) -> Run:
         if not reason.strip():
             raise StateError("cancellation reason is required")
-        return self.database.cancel_run(run_id, reason, request_id)
+        return self.store.cancel_run(run_id, reason, request_id)
 
     async def _prepare_and_review(
         self,
@@ -370,8 +370,8 @@ class Armarius:
         }
         self._write_json(run_dir / "manifest.json", manifest)
         self._record_text(canonical_json(manifest), "application/json")
-        self.database.update_run(run.id, RunStatus.REVIEWING)
-        await self._run_reviews(self.database.get_run(run.id))
+        self.store.update_run(run.id, RunStatus.REVIEWING)
+        await self._run_reviews(self.store.get_run(run.id))
 
     async def _run_reviews(self, run: Run) -> None:
         roles = [AgentRole(role) for role in self._profile_roles(run)]
@@ -405,7 +405,7 @@ class Armarius:
             return None
         output = outcome.output
         assert isinstance(output, (ReviewOutput, ScientificReviewOutput))
-        all_findings = self.database.list_findings(run.id)
+        all_findings = self.store.list_findings(run.id)
         for candidate in output.findings:
             evidence = tuple(item.model_dump(mode="json", exclude_none=True) for item in candidate.evidence)
             fingerprint = digest_json(
@@ -441,11 +441,11 @@ class Armarius:
             )
             stored = next((item for item in all_findings if item.fingerprint == fingerprint), None)
             if stored is None:
-                stored = self.database.get_or_create_finding(finding)
+                stored = self.store.get_or_create_finding(finding)
                 all_findings.append(stored)
             if stored.affected_claim is None and finding.affected_claim is not None:
                 # A duplicate that names the affected claim completes the stored row; the fingerprint is unchanged.
-                stored = self.database.fill_finding_affected_claim(stored.id, finding.affected_claim)
+                stored = self.store.fill_finding_affected_claim(stored.id, finding.affected_claim)
             if (
                 stored.id != finding.id
                 and (stored.task_id != outcome.task.id or stored.attempt_id != outcome.attempt.id)
@@ -453,10 +453,10 @@ class Armarius:
                     event.event_type == "finding.duplicate"
                     and event.entity_id == stored.id
                     and event.payload.get("attempt_id") == outcome.attempt.id
-                    for event in self.database.list_events(run.id)
+                    for event in self.store.list_events(run.id)
                 )
             ):
-                self.database.append_event(
+                self.store.append_event(
                     Event(
                         run_id=run.id,
                         event_type="finding.duplicate",
@@ -476,34 +476,34 @@ class Armarius:
         # An accepted submission completes its review task.
         completed_roles = {
             task.role
-            for task in self.database.list_tasks(run.id)
+            for task in self.store.list_tasks(run.id)
             if task.stage == "review" and task.status == TaskStatus.COMPLETED
         }
         if roles.issubset(completed_roles):
-            self.database.update_run(run.id, RunStatus.AWAITING_DECISION)
+            self.store.update_run(run.id, RunStatus.AWAITING_DECISION)
         else:
-            self.database.update_run(run.id, RunStatus.REVIEWING)
+            self.store.update_run(run.id, RunStatus.REVIEWING)
 
     async def _advance_after_decisions(self, run: Run) -> None:
-        findings = self.database.list_findings(run.id)
+        findings = self.store.list_findings(run.id)
         pending = [finding for finding in findings if finding.status == FindingStatus.PENDING]
         if pending:
             raise StateError(f"{len(pending)} findings still require a human decision")
         confirmed = [finding for finding in findings if finding.status == FindingStatus.CONFIRMED]
         if not confirmed:
-            self.database.update_run(run.id, RunStatus.COMPLETED)
+            self.store.update_run(run.id, RunStatus.COMPLETED)
             return
-        self.database.update_run(run.id, RunStatus.REVISING)
-        await self._run_revision(self.database.get_run(run.id))
+        self.store.update_run(run.id, RunStatus.REVISING)
+        await self._run_revision(self.store.get_run(run.id))
 
     async def _run_revision(
         self,
         run: Run,
         feedback: str | None = None,
     ) -> None:
-        confirmed = self.database.list_findings(run.id, [FindingStatus.CONFIRMED])
+        confirmed = self.store.list_findings(run.id, [FindingStatus.CONFIRMED])
         if not confirmed:
-            self.database.update_run(run.id, RunStatus.COMPLETED)
+            self.store.update_run(run.id, RunStatus.COMPLETED)
             return
         if feedback is None:
             recovered = self._rejected_patch_revision_context(run)
@@ -559,7 +559,7 @@ class Armarius:
         existing = next(
             (
                 item
-                for item in self.database.list_patches(run.id)
+                for item in self.store.list_patches(run.id)
                 if item.base_commit == patch.base_commit and item.diff_digest == patch.diff_digest
             ),
             None,
@@ -567,11 +567,11 @@ class Armarius:
         if existing is None:
             target = candidate.parent / patch.id
             candidate.replace(target)
-            self.database.create_patch(patch)
+            self.store.create_patch(patch)
         else:
             shutil.rmtree(candidate)
             if existing.status == PatchStatus.REJECTED:
-                patch = self.database.repropose_patch(
+                patch = self.store.repropose_patch(
                     existing.id,
                     attempt_id=outcome.attempt.id,
                     summary=patch.summary,
@@ -590,29 +590,29 @@ class Armarius:
                 "edits": list(patch.edits),
             },
         )
-        self.database.update_run(run.id, RunStatus.AWAITING_PATCH_APPROVAL)
+        self.store.update_run(run.id, RunStatus.AWAITING_PATCH_APPROVAL)
 
     async def _advance_after_patch_decision(self, run: Run) -> None:
-        if not self.database.list_findings(run.id, [FindingStatus.CONFIRMED]):
-            self.database.update_run(run.id, RunStatus.COMPLETED)
+        if not self.store.list_findings(run.id, [FindingStatus.CONFIRMED]):
+            self.store.update_run(run.id, RunStatus.COMPLETED)
             return
-        patches = self.database.list_patches(run.id)
+        patches = self.store.list_patches(run.id)
         if not patches:
             raise StateError("the run has no proposed patch")
         patch = patches[-1]
         if patch.status == PatchStatus.PROPOSED:
             raise StateError(f"patch {patch.id} still requires a human decision")
         if patch.status == PatchStatus.REJECTED:
-            self.database.update_run(run.id, RunStatus.REVISING)
-            await self._run_revision(self.database.get_run(run.id))
+            self.store.update_run(run.id, RunStatus.REVISING)
+            await self._run_revision(self.store.get_run(run.id))
             return
         if patch.status == PatchStatus.APPROVED:
-            self.database.update_run(run.id, RunStatus.VERIFYING)
-            await self._run_verification(self.database.get_run(run.id))
+            self.store.update_run(run.id, RunStatus.VERIFYING)
+            await self._run_verification(self.store.get_run(run.id))
             return
         if patch.status == PatchStatus.VERIFIED:
-            self.database.update_run(run.id, RunStatus.VERIFYING)
-            self.database.update_run(run.id, RunStatus.READY_TO_APPLY)
+            self.store.update_run(run.id, RunStatus.VERIFYING)
+            self.store.update_run(run.id, RunStatus.READY_TO_APPLY)
             return
         raise StateError(f"patch {patch.id} cannot advance while {patch.status.value}")
 
@@ -620,16 +620,16 @@ class Armarius:
         self,
         run: Run,
     ) -> str | None:
-        patches = self.database.list_patches(run.id)
+        patches = self.store.list_patches(run.id)
         if not patches or patches[-1].status != PatchStatus.REJECTED:
             return None
         patch = patches[-1]
-        decisions = self.database.list_decisions("patch", patch.id)
+        decisions = self.store.list_decisions("patch", patch.id)
         feedback = decisions[-1].reason
         if patch.attempt_id is None:
             return feedback
-        attempt = self.database.get_attempt(patch.attempt_id)
-        task = self.database.get_task(attempt.task_id)
+        attempt = self.store.get_attempt(patch.attempt_id)
+        task = self.store.get_task(attempt.task_id)
         if task.run_id != run.id or task.stage != "revision" or task.role != AgentRole.REVISION:
             raise InfrastructureError(f"patch {patch.id} has an invalid generating attempt")
         return feedback
@@ -638,16 +638,16 @@ class Armarius:
         self,
         run: Run,
     ) -> None:
-        if not self.database.list_findings(run.id, [FindingStatus.CONFIRMED]):
-            self.database.update_run(run.id, RunStatus.COMPLETED)
+        if not self.store.list_findings(run.id, [FindingStatus.CONFIRMED]):
+            self.store.update_run(run.id, RunStatus.COMPLETED)
             return
-        patches = self.database.list_patches(run.id)
+        patches = self.store.list_patches(run.id)
         approved = [patch for patch in patches if patch.status in {PatchStatus.APPROVED, PatchStatus.VERIFIED}]
         if not approved:
             raise StateError("verification requires an approved patch")
         patch = approved[-1]
         if patch.status == PatchStatus.VERIFIED:
-            self.database.update_run(run.id, RunStatus.READY_TO_APPLY)
+            self.store.update_run(run.id, RunStatus.READY_TO_APPLY)
             return
         patched = self._run_dir(run.id) / "patched" / patch.id
         verification_workspace = self._run_dir(run.id) / "verifications" / patch.id / "bundle"
@@ -688,7 +688,7 @@ class Armarius:
             )
         if "navigation" in run.frozen_config:
             self._record_file(verification_workspace / "navigation.json", "application/json")
-        confirmed = self.database.list_findings(run.id, [FindingStatus.CONFIRMED])
+        confirmed = self.store.list_findings(run.id, [FindingStatus.CONFIRMED])
         prompt = self._verification_prompt(run, patch, confirmed)
         outcome = await self._execute_task(
             run=run,
@@ -717,11 +717,11 @@ class Armarius:
             summary=output.summary,
             artifact_digest=outcome.attempt.output_artifact_digest,
         )
-        self.database.create_verification(verification)
+        self.store.create_verification(verification)
         if result == VerificationResult.PASS:
-            self.database.update_run(run.id, RunStatus.READY_TO_APPLY)
+            self.store.update_run(run.id, RunStatus.READY_TO_APPLY)
         else:
-            self.database.update_run(run.id, RunStatus.AWAITING_PATCH_APPROVAL)
+            self.store.update_run(run.id, RunStatus.AWAITING_PATCH_APPROVAL)
 
     def _parse_and_validate_output(
         self,
@@ -916,7 +916,7 @@ class Armarius:
             raise InfrastructureError(f"attempt {attempt.id} has no validation report artifact")
         try:
             # Durable reports are replayed as recorded; recomputing would rewrite historical diagnostics.
-            artifact = self.database.get_artifact(digest)
+            artifact = self.store.get_artifact(digest)
             if artifact.media_type != VALIDATION_REPORT_MEDIA_TYPE:
                 raise InfrastructureError(f"validation report {digest} has an invalid media type")
             report = ValidationReport.model_validate_json(self.artifacts.get_bytes(digest))
@@ -937,7 +937,7 @@ class Armarius:
 
     def _load_prompt_artifact(self, digest: str) -> str:
         try:
-            artifact = self.database.get_artifact(digest)
+            artifact = self.store.get_artifact(digest)
             if artifact.media_type != "text/markdown; charset=utf-8":
                 raise InfrastructureError(f"attempt prompt {digest} has an invalid media type")
             return self.artifacts.get_bytes(digest).decode("utf-8")
@@ -948,7 +948,7 @@ class Armarius:
 
     def _load_schema_artifact(self, run: Run, schema_kind: str, digest: str) -> dict[str, Any]:
         try:
-            artifact = self.database.get_artifact(digest)
+            artifact = self.store.get_artifact(digest)
             if artifact.media_type != "application/schema+json":
                 raise InfrastructureError(f"attempt schema {digest} has an invalid media type")
             contents = self.artifacts.get_bytes(digest)
@@ -1101,15 +1101,15 @@ class Armarius:
         bundle_digest = digest_json(files)
         self._record_text(canonical_json(files), "application/vnd.scriptorium.bundle-index+json")
         input_digest = task_input_digest(run, prompt_artifact.digest, schema_artifact.digest, bundle_digest)
-        task = self.database.find_task(run.id, stage, role, input_digest)
+        task = self.store.find_task(run.id, stage, role, input_digest)
         if task is None:
-            task = self.database.create_task(Task(run_id=run.id, stage=stage, role=role, input_digest=input_digest))
+            task = self.store.create_task(Task(run_id=run.id, stage=stage, role=role, input_digest=input_digest))
         example_digest = None
-        if not self.database.has_external_task(task.id):
+        if not self.store.has_external_task(task.id):
             # The example is frozen once with the task, outside its input digest, so earlier tasks keep theirs.
             example = self._output_example(run, role, schema_kind, base_bundle)
             example_digest = None if example is None else self._record_text(example, "application/json").digest
-        self.database.record_external_task(
+        self.store.record_external_task(
             task.id,
             prompt_artifact.digest,
             schema_artifact.digest,
@@ -1120,7 +1120,7 @@ class Armarius:
         )
         if task.status != TaskStatus.COMPLETED:
             return None
-        attempts = self.database.list_attempts(task.id)
+        attempts = self.store.list_attempts(task.id)
         completed = next(attempt for attempt in reversed(attempts) if attempt.status == AttemptStatus.COMPLETED)
         if completed.output_artifact_digest is None:
             raise InfrastructureError(f"completed attempt {completed.id} has no output artifact")
@@ -1136,12 +1136,12 @@ class Armarius:
     def completed_review_output(self, task: Task) -> tuple[Attempt, ReviewOutput | ScientificReviewOutput] | None:
         """The accepted output of a review task, or None before its submission is accepted."""
         completed = next(
-            (item for item in self.database.list_attempts(task.id) if item.status == AttemptStatus.COMPLETED), None
+            (item for item in self.store.list_attempts(task.id) if item.status == AttemptStatus.COMPLETED), None
         )
         if completed is None:
             return None
-        run = self.database.get_run(task.run_id)
-        schema_kind = self.database.get_external_task(task.id)["schema_kind"]
+        run = self.store.get_run(task.run_id)
+        schema_kind = self.store.get_external_task(task.id)["schema_kind"]
         self._load_schema_artifact(run, schema_kind, completed.schema_digest)
         if completed.output_artifact_digest is None:
             raise InfrastructureError(f"completed review attempt {completed.id} has no output artifact")
@@ -1163,8 +1163,8 @@ class Armarius:
         session_id: str,
         session_source: str,
     ) -> Attempt:
-        task = self.database.get_task(task_id)
-        run = self.database.get_run(task.run_id)
+        task = self.store.get_task(task_id)
+        run = self.store.get_run(task.run_id)
         self.require_evidence_anchor_contract(run.id)
         expected_status = {
             "review": RunStatus.REVIEWING,
@@ -1176,7 +1176,7 @@ class Armarius:
         if not self._task_context_is_current(run, task):
             raise StateError("task context changed; run resume to prepare a new task")
         if task.status == TaskStatus.RUNNING:
-            attempt = self.database.list_attempts(task.id)[-1]
+            attempt = self.store.list_attempts(task.id)[-1]
             if (attempt.external_client, attempt.model, attempt.effort, attempt.thread_id, attempt.session_source) == (
                 client,
                 model,
@@ -1188,10 +1188,10 @@ class Armarius:
             raise StateError(f"task {task_id} is claimed by a different session")
         if task.status != TaskStatus.PENDING:
             raise StateError(f"task {task_id} is {task.status.value}; retry explicitly if it failed")
-        metadata = self.database.get_external_task(task.id)
+        metadata = self.store.get_external_task(task.id)
         self._external_bundle(run, metadata)
         prompt_digest = metadata["prompt_digest"]
-        previous = self.database.list_attempts(task.id)
+        previous = self.store.list_attempts(task.id)
         rejected = next((item for item in reversed(previous) if item.validation_report_artifact_digest), None)
         if rejected is not None:
             report = self._load_validation_report(
@@ -1207,7 +1207,7 @@ class Armarius:
                 self._load_prompt_artifact(prompt_digest) + "\n\n" + correction,
                 "text/markdown; charset=utf-8",
             ).digest
-        return self.database.begin_attempt(
+        return self.store.begin_attempt(
             task.id,
             thread_id=session_id,
             external_client=client,
@@ -1313,7 +1313,7 @@ class Armarius:
         attempt, task, run, metadata, output_model = self._submission_target(attempt_id, input_digest)
         output_digest = ArtifactStore.digest_bytes(output_text.encode("utf-8"))
         if attempt.status != AttemptStatus.RUNNING:
-            latest = self.database.list_attempts(task.id)[-1]
+            latest = self.store.list_attempts(task.id)[-1]
             if latest.id != attempt.id or task.status not in {TaskStatus.COMPLETED, TaskStatus.FAILED}:
                 raise StateError(f"attempt {attempt_id} was superseded")
             if attempt.output_artifact_digest == output_digest and attempt.status in {
@@ -1337,7 +1337,7 @@ class Armarius:
                 issues,
             )
             error = self._validation_error_summary(report)
-        return self.database.finish_attempt(
+        return self.store.finish_attempt(
             attempt.id,
             AttemptStatus.COMPLETED if parsed is not None and not issues else AttemptStatus.FAILED,
             output_artifact_digest=output_artifact.digest,
@@ -1363,14 +1363,14 @@ class Armarius:
         )
 
     def _submission_target(self, attempt_id: str, input_digest: str):
-        attempt = self.database.get_attempt(attempt_id)
-        task = self.database.get_task(attempt.task_id)
-        run = self.database.get_run(task.run_id)
+        attempt = self.store.get_attempt(attempt_id)
+        task = self.store.get_task(attempt.task_id)
+        run = self.store.get_run(task.run_id)
         if input_digest != task_input_digest(run, attempt.prompt_digest, attempt.schema_digest, attempt.bundle_digest):
             raise StateError("submitted input digest does not match frozen attempt")
         self._load_prompt_artifact(attempt.prompt_digest)
         self.review_brief(run)
-        metadata = self.database.get_external_task(task.id)
+        metadata = self.store.get_external_task(task.id)
         if attempt.bundle_digest != metadata["bundle_digest"] or attempt.schema_digest != metadata["schema_digest"]:
             raise InfrastructureError("attempt is not bound to its frozen task")
         self._load_schema_artifact(run, metadata["schema_kind"], attempt.schema_digest)
@@ -1410,9 +1410,9 @@ class Armarius:
         if task.stage == "verification":
             older = [
                 item
-                for item in self.database.list_tasks(run.id)
+                for item in self.store.list_tasks(run.id)
                 if item.stage in {"review", "revision"}
-                for item in self.database.list_attempts(item.id)
+                for item in self.store.list_attempts(item.id)
                 if item.external_client == attempt.external_client and item.thread_id == attempt.thread_id
             ]
             if attempt.session_source != "host" or older:
@@ -1440,7 +1440,7 @@ class Armarius:
             def validator(output):
                 return self._validate_revision_output(
                     output,
-                    self.database.list_findings(run.id, [FindingStatus.CONFIRMED]),
+                    self.store.list_findings(run.id, [FindingStatus.CONFIRMED]),
                     bundle.anchor_map,
                     self._run_dir(run.id) / "snapshot",
                     contract,
@@ -1449,14 +1449,14 @@ class Armarius:
         elif task.stage == "verification":
             patch = next(
                 patch
-                for patch in reversed(self.database.list_patches(run.id))
+                for patch in reversed(self.store.list_patches(run.id))
                 if patch.status in {PatchStatus.APPROVED, PatchStatus.VERIFIED}
             )
 
             def validator(output):
                 return self._validate_verification_output(
                     output,
-                    self.database.list_findings(run.id, [FindingStatus.CONFIRMED]),
+                    self.store.list_findings(run.id, [FindingStatus.CONFIRMED]),
                     bundle.anchor_map,
                     self._run_dir(run.id) / "patched" / patch.id,
                     contract,
@@ -2270,7 +2270,7 @@ class Armarius:
             raise InfrastructureError(f"bundle file is unsafe: {path}")
 
     def _status_before_failure(self, run_id: str) -> RunStatus:
-        for event in reversed(self.database.list_events(run_id)):
+        for event in reversed(self.store.list_events(run_id)):
             if event.event_type != "run.status_changed" or event.payload.get("to") != RunStatus.FAILED.value:
                 continue
             previous = RunStatus(event.payload["from"])
@@ -2303,11 +2303,11 @@ class Armarius:
 
     def _record_text(self, value: str, media_type: str):
         artifact = self.artifacts.put_text(value, media_type)
-        return self.database.record_artifact(artifact)
+        return self.store.record_artifact(artifact)
 
     def _record_file(self, path: Path, media_type: str):
         artifact = self.artifacts.put_file(path, media_type)
-        return self.database.record_artifact(artifact)
+        return self.store.record_artifact(artifact)
 
     def _prompt_record(self, role: AgentRole) -> dict[str, str]:
         retrieval = resources.files("scriptorium").joinpath("prompts", "retrieval.md").read_text(encoding="utf-8")
@@ -2353,7 +2353,7 @@ class Armarius:
         temporary.replace(path)
 
     def _fail_active_run(self, run_id: str, exc: Exception) -> None:
-        run = self.database.get_run(run_id)
+        run = self.store.get_run(run_id)
         if run.status in {
             RunStatus.PREPARING,
             RunStatus.REVIEWING,
@@ -2361,4 +2361,4 @@ class Armarius:
             RunStatus.VERIFYING,
             RunStatus.READY_TO_APPLY,
         }:
-            self.database.update_run(run_id, RunStatus.FAILED, str(exc))
+            self.store.update_run(run_id, RunStatus.FAILED, str(exc))

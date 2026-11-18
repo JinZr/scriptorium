@@ -37,7 +37,7 @@ def _anchors(value):
 
 
 def _output_model(service, context):
-    return SCHEMA_MODELS[service.database.get_external_task(context["task"].id)["schema_kind"]]
+    return SCHEMA_MODELS[service.store.get_external_task(context["task"].id)["schema_kind"]]
 
 
 @pytest.mark.parametrize("role", _REVIEW_ROLES)
@@ -49,7 +49,7 @@ def test_each_review_role_serves_a_checked_example_with_real_frozen_anchors(tmp_
         text, digest = _example(service, context["attempt"].id, tmp_path / "export")
         check = service.check_submission(context["attempt"].id, context["input_digest"], text)
         model = _output_model(service, context)
-        frozen = service.database.get_external_task(context["task"].id)["example_digest"]
+        frozen = service.store.get_external_task(context["task"].id)["example_digest"]
         stored = service.armarius.artifacts.get_bytes(frozen).decode("utf-8")
 
     assert (stored, frozen) == (text, digest)
@@ -117,7 +117,7 @@ def test_an_example_that_fails_validation_is_not_frozen(tmp_path, monkeypatch):
         run = asyncio.run(service.start_run("HEAD", "quick"))["run"]
         context = claim(service, run.id, "copyedit")
         assert _example(service, context["attempt"].id, tmp_path / "export") is None
-        assert service.database.get_external_task(context["task"].id)["example_digest"] is None
+        assert service.store.get_external_task(context["task"].id)["example_digest"] is None
 
 
 def test_revision_attempts_export_no_example(tmp_path):
@@ -125,10 +125,10 @@ def test_revision_attempts_export_no_example(tmp_path):
     with ScriptoriumService(repo, manuscript_manager=PdfBuildingManuscriptManager(repo)) as service:
         run = asyncio.run(service.start_run("HEAD", "quick"))["run"]
         prepare_patch(service, run.id)
-        revision = next(task for task in service.database.list_tasks(run.id) if task.role == AgentRole.REVISION)
-        attempt_id = service.database.list_attempts(revision.id)[-1].id
+        revision = next(task for task in service.store.list_tasks(run.id) if task.role == AgentRole.REVISION)
+        attempt_id = service.store.list_attempts(revision.id)[-1].id
         assert _example(service, attempt_id, tmp_path / "export") is None
-        assert service.database.get_external_task(revision.id)["example_digest"] is None
+        assert service.store.get_external_task(revision.id)["example_digest"] is None
 
 
 def test_a_tampered_snapshot_fails_example_preparation_as_infrastructure(tmp_path):
