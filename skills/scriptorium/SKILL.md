@@ -14,7 +14,7 @@ or generated patches.
 
 ```text
 scriptorium --json doctor --revision REV --profile PROFILE          -> ok, detected_template
-scriptorium --json run start --revision REV --profile PROFILE --brief brief.json [--allow-duplicate]
+scriptorium --json run start --revision REV --profile PROFILE --brief brief.md [--allow-duplicate]
 scriptorium --json run status RUN_ID                                -> next_actions; follow them
 scriptorium --json run list [--status STATUS] [--limit N]           -> newest first; find RUN_ID
 scriptorium --json run report RUN_ID --part PART > PART.json       -> one whole report section
@@ -36,7 +36,7 @@ Before a new run, agree a short brief with the author. Run `doctor` until `ok` i
 commit without calling a model. Infer the venue family (`ml_conference`, `nature_family`, or `other`) from its
 `detected_template`; when that is `unknown`, ask the author, and use `other` if they do not know.
 `reference/venues/<family>.md` lists what to ask and the defaults: the stage, the claims that must survive, earlier
-reviews, known weaknesses, and what to ignore. The author confirms or edits your draft. Write `brief.json` (format:
+reviews, known weaknesses, and what to ignore. The author confirms or edits your draft. Write `brief.md` (format:
 `reference/brief.md`) for `run start --brief`; it is frozen into every review prompt of that run.
 
 ## Start, follow, recover
@@ -55,7 +55,7 @@ decision, or recovers a failed run once the external prerequisite is repaired.
 `run status` lists `report_parts`; write a section to a file with `run report RUN_ID --part PART > PART.json`
 and read it. Send `task list`, `finding list/show`, and
 `patch show` to files too. If `has_error` is true, read `run`, `validation_reports`, and `gate`. `decision_stats`
-helps calibrate the next brief's `severity_notes`; it is not a quality score.
+helps calibrate the next brief's severity notes; it is not a quality score.
 
 ## Triage
 

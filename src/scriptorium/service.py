@@ -17,9 +17,8 @@ import subprocess
 import tempfile
 from typing import Any, Iterator
 
-from pydantic import ValidationError
-
 from .artifacts import ArtifactError, ArtifactStore
+from .brief import read_brief
 from .config import find_repo, load_project_config, validate_ready
 from .decision_stats import current_status, decision_stats, markdown_lines as markdown_decision_stats
 from .domain import (
@@ -48,7 +47,6 @@ from .schemas import (
     UNIVERSAL_LINE_TERMINATORS,
     WRITING_NOTE_LIMIT,
     EvidenceAnchorContract,
-    ReviewBrief,
     ScientificReviewOutput,
 )
 from .storage import ConflictError, NotFoundError as StorageNotFoundError, RunStore, StorageError
@@ -330,9 +328,10 @@ class ScriptoriumService:
             )
 
     async def start_run(
-        self, revision: str, profile: str, allow_duplicate: bool = False, brief: str | None = None
+        self, revision: str, profile: str, allow_duplicate: bool = False, brief: str | Path | None = None
     ) -> dict[str, Any]:
-        review_brief = self._parse_brief(brief)
+        """Start a run; ``brief`` is the path of a review brief file, read and validated before anything starts."""
+        review_brief = None if brief is None else read_brief(brief)
         run_id = new_id("run")
         with ExitStack() as locks:
             if not allow_duplicate:
@@ -344,18 +343,6 @@ class ScriptoriumService:
                 self._refuse_duplicate_run(revision)
             run = await self.armarius.start_run(revision, profile, run_id=run_id, brief=review_brief)
             return {**self._with_brief(self.get_run(run_id)), "detected_template": self.armarius.detected_template(run)}
-
-    @staticmethod
-    def _parse_brief(text: str | None) -> ReviewBrief | None:
-        if text is None:
-            return None
-        try:
-            return ReviewBrief.model_validate_json(text)
-        except ValidationError as exc:
-            problems = "; ".join(
-                f"{'.'.join(map(str, error['loc'])) or 'brief'}: {error['msg']}" for error in exc.errors()
-            )
-            raise ConfigurationError(f"invalid review brief: {problems}") from exc
 
     def _with_brief(self, view: dict[str, Any]) -> dict[str, Any]:
         brief = self.armarius.review_brief(view["run"])
@@ -394,7 +381,7 @@ class ScriptoriumService:
                 brief = self.armarius.review_brief(run)
             except (InfrastructureError, OSError):
                 brief = None  # one unreadable brief must not hide the other runs; `run status` reports it
-            rows.append((run, task_counts, None if brief is None else brief["content"]))
+            rows.append((run, task_counts, None if brief is None else brief.fields()))
         return run_list(total, rows, limit)
 
     async def resume_run(self, run_id: str) -> dict[str, Any]:
@@ -798,7 +785,7 @@ class ScriptoriumService:
             )
             brief = self.armarius.review_brief(run)
             if brief is not None:
-                inputs[f"{TASK_INPUT_DIRECTORY}/brief.json"] = (brief["text"].encode("utf-8"), brief["digest"])
+                inputs[f"{TASK_INPUT_DIRECTORY}/brief.md"] = (brief.data, run.brief_digest)
             example = self.armarius.frozen_output_example(metadata)
             if example is not None:
                 inputs[f"{TASK_INPUT_DIRECTORY}/example.json"] = (example.encode("utf-8"), metadata["example_digest"])
@@ -1089,7 +1076,7 @@ class ScriptoriumService:
 
     def _report_run(self, run: Run) -> Run | dict[str, Any]:
         brief = self.armarius.review_brief(run)
-        return run if brief is None else {**_plain(run), "review_brief": brief["content"]}
+        return run if brief is None else {**_plain(run), "review_brief": {**brief.fields(), "text": brief.text}}
 
     def evaluate_gate(self, run_id: str) -> dict[str, Any]:
         run = self._storage(self.store.get_run, run_id)
@@ -1472,11 +1459,7 @@ class ScriptoriumService:
         if brief is None:
             return []
         venue = f" ({brief['venue']})" if brief["venue"] else ""
-        return [
-            f"- Review brief: `{brief['venue_family']}`{venue}, stage `{brief['stage']}`; "
-            f"{len(brief['priority_claims'])} priority claims, {len(brief['known_weaknesses'])} known weaknesses, "
-            f"{len(brief['ignore'])} out-of-scope items"
-        ]
+        return [f"- Review brief: `{brief['venue_family']}`{venue}, stage `{brief['stage']}`"]
 
     @staticmethod
     def _markdown_report(payload: dict[str, Any]) -> str:

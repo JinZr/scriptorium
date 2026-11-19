@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 from pathlib import Path
 import shutil
@@ -607,9 +608,11 @@ def test_json_cli_freezes_a_review_brief_and_detects_a_committed_template(tmp_pa
         check=True,
         capture_output=True,
     )
-    brief = {"venue_family": "ml_conference", "stage": "presubmission", "priority_claims": ["A result."]}
-    brief_path = tmp_path / "brief.json"
-    brief_path.write_text(json.dumps(brief), encoding="utf-8")
+    brief_path = tmp_path / "brief.md"
+    brief_path.write_text(
+        "---\nvenue_family: ml_conference\nstage: presubmission\n---\n## Claims to check\n- A result.\n",
+        encoding="utf-8",
+    )
 
     def command(*args: str):
         result = subprocess.run(
@@ -622,8 +625,12 @@ def test_json_cli_freezes_a_review_brief_and_detects_a_committed_template(tmp_pa
     assert command("doctor", "--profile", "full")["detected_template"] == template
     started = command("run", "start", "--profile", "full", "--brief", str(brief_path))
     assert started["detected_template"] == template
-    assert started["review_brief"]["venue_family"] == "ml_conference"
-    assert started["review_brief"]["priority_claims"] == 1
+    assert started["review_brief"] == {
+        "digest": hashlib.sha256(brief_path.read_bytes()).hexdigest(),
+        "venue_family": "ml_conference",
+        "venue": None,
+        "stage": "presubmission",
+    }
     run_id = started["run"]["id"]
     status = command("run", "status", run_id)
     assert status["review_brief"] == started["review_brief"]
@@ -643,19 +650,11 @@ def test_json_cli_freezes_a_review_brief_and_detects_a_committed_template(tmp_pa
         "host",
     )
     exported = command("task", "export", claim["attempt"]["id"], "--dir", str(tmp_path / "export"))
-    assert {"path": "task/brief.json", "digest": started["review_brief"]["digest"]} in exported["task_inputs"]
-    assert json.loads((tmp_path / "export/task/brief.json").read_text(encoding="utf-8")) == {
-        **brief,
-        "venue": None,
-        "known_weaknesses": [],
-        "prior_reviews": None,
-        "ignore": [],
-        "severity_notes": None,
-        "recorded_by": None,
-    }
+    assert {"path": "task/brief.md", "digest": started["review_brief"]["digest"]} in exported["task_inputs"]
+    assert (tmp_path / "export/task/brief.md").read_bytes() == brief_path.read_bytes()
     with ScriptoriumService(repo) as service:
         prompt = service.show_task(claim["attempt"]["id"])["prompt"]
-    assert "- Venue family: ml_conference" in prompt and "  - A result." in prompt
+    assert "- Venue family: ml_conference" in prompt and "## Claims to check\n- A result.\n" in prompt
 
 
 def test_duplicate_start_on_a_real_project_is_refused_until_the_first_run_ends(tmp_path):

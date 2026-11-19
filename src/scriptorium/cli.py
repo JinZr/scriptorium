@@ -24,7 +24,6 @@ class _ArgumentParser(argparse.ArgumentParser):
         raise _UsageError(message)
 
 
-_BRIEF_LIMIT_BYTES = 256_000
 _TASK_DESCRIPTION = """Use a frozen task from the current host model session.
 
 Typical order: claim, export (frozen sources, navigation, source map, PDF, and this attempt's inputs under task/),
@@ -60,7 +59,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="start even if a non-terminal run already exists on the same commit",
     )
     start_parser.add_argument(
-        "--brief", help="review brief JSON file agreed with the authors, frozen into every review prompt"
+        "--brief", help="review brief Markdown file agreed with the authors, frozen into every review prompt"
     )
 
     status_parser = run_commands.add_parser("status", help="show a compact run overview and next actions")
@@ -285,7 +284,7 @@ def _dispatch_run(service: Any, arguments: argparse.Namespace) -> tuple[Any, int
                 revision=arguments.revision,
                 profile=arguments.profile,
                 allow_duplicate=arguments.allow_duplicate,
-                brief=None if arguments.brief is None else _read_brief(arguments.brief),
+                brief=arguments.brief,
             )
         )
         return run_overview(result), 0, None
@@ -499,20 +498,6 @@ def _read_submission(path: str) -> str:
         return raw.decode("utf-8")
     except UnicodeDecodeError as exc:
         raise ConfigurationError("submission must be UTF-8") from exc
-
-
-def _read_brief(path: str) -> str:
-    try:
-        with Path(path).open("rb") as brief:
-            raw = brief.read(_BRIEF_LIMIT_BYTES + 1)
-    except OSError as exc:
-        raise ConfigurationError(f"cannot read review brief: {exc}") from exc
-    if len(raw) > _BRIEF_LIMIT_BYTES:
-        raise ConfigurationError("review brief exceeds the 256 KB limit")
-    try:
-        return raw.decode("utf-8")
-    except UnicodeDecodeError as exc:
-        raise ConfigurationError("review brief must be UTF-8") from exc
 
 
 def _nonnegative_float(value: str) -> float:

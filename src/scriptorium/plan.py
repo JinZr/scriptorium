@@ -78,7 +78,7 @@ def _issue(code: str, path: str, message: str, *, expected: Any = None, actual: 
     return ValidationIssue(code=code, path=path, message=message, expected=expected, actual=actual)
 
 
-def _regular_file(path: Path, limit: int) -> tuple[bytes | None, str | None]:
+def read_regular_file(path: Path, limit: int) -> tuple[bytes | None, str | None]:
     """Return a regular file's bytes, or the reason it cannot be used; symbolic links are refused."""
     try:
         metadata = path.lstat()
@@ -119,7 +119,7 @@ def read_plan_directory(directory: str | Path) -> tuple[PlanDirectory | None, li
 
 
 def _read_plan(root: Path, issues: list[ValidationIssue]) -> bytes | None:
-    data, problem = _regular_file(root / PLAN_FILE, PLAN_LIMIT)
+    data, problem = read_regular_file(root / PLAN_FILE, PLAN_LIMIT)
     if data is not None:
         text = _text(data)
         problem = "is not UTF-8" if text is None else "is blank" if not text.strip() else None
@@ -179,7 +179,7 @@ def _read_assignments(root: Path, issues: list[ValidationIssue]) -> list[Assignm
 
 def _read_assignment(stem: str, path: Path, issues: list[ValidationIssue]) -> Assignment | None:
     label = f"{ASSIGNMENTS_DIRECTORY}/{path.name}"
-    data, problem = _regular_file(path, ASSIGNMENT_LIMIT)
+    data, problem = read_regular_file(path, ASSIGNMENT_LIMIT)
     text = None if data is None else _text(data)
     if data is not None and text is None:
         problem = "is not UTF-8"
@@ -198,9 +198,8 @@ def _read_assignment(stem: str, path: Path, issues: list[ValidationIssue]) -> As
 
 def parse_assignment(stem: str, data: bytes, text: str, label: str, issues: list[ValidationIssue]) -> Assignment | None:
     """Parse flat front matter (target lines, at most one findings line) and a non-blank Markdown body."""
-    lines = re.split(r"\r\n|\r|\n", text)
-    close = next((index for index in range(1, len(lines)) if lines[index].strip() == _FRONT_MATTER_FENCE), None)
-    if not lines or lines[0].strip() != _FRONT_MATTER_FENCE or close is None:
+    split = front_matter(text)
+    if split is None:
         issues.append(
             _issue(
                 "plan.front_matter_invalid",
@@ -212,16 +211,15 @@ def parse_assignment(stem: str, data: bytes, text: str, label: str, issues: list
     targets: list[Target] = []
     finding_ids: tuple[str, ...] | None = None
     problems = []
-    for number, line in enumerate(lines[1:close], start=2):
-        key, separator, value = line.partition(":")
-        key, value = key.strip(), value.strip()
-        if key == "target" and separator:
+    entries, body = split
+    for number, key, value in entries:
+        if key == "target" and value is not None:
             target = _parse_target(value)
             if target is None:
                 problems.append(f"line {number}: target must be PATH:START-END with 1 <= START <= END")
             else:
                 targets.append(target)
-        elif key == "findings" and separator:
+        elif key == "findings" and value is not None:
             if finding_ids is not None:
                 problems.append(f"line {number}: findings appears more than once")
             finding_ids = _parse_findings(value, number, problems)
@@ -232,11 +230,27 @@ def parse_assignment(stem: str, data: bytes, text: str, label: str, issues: list
     if problems:
         issues.append(_issue("plan.front_matter_invalid", label, "; ".join(problems)))
         return None
-    body = "\n".join(lines[close + 1 :])
     if not body.strip():
         issues.append(_issue("plan.assignment_empty", label, "No instructions follow the front matter."))
         return None
     return Assignment(stem, data, body.strip("\n"), tuple(targets), finding_ids or ())
+
+
+def front_matter(text: str) -> tuple[list[tuple[int, str, str | None]], str] | None:
+    """Split a Markdown file into flat front matter and its body, or return None without both --- fences.
+
+    Each line between the fences becomes (line number, key, value), stripped of surrounding whitespace; the value is
+    None for a line without a colon. The body is the text after the closing fence, with line endings as ``\\n``.
+    """
+    lines = re.split(r"\r\n|\r|\n", text)
+    close = next((index for index in range(1, len(lines)) if lines[index].strip() == _FRONT_MATTER_FENCE), None)
+    if lines[0].strip() != _FRONT_MATTER_FENCE or close is None:
+        return None
+    entries = []
+    for number, line in enumerate(lines[1:close], start=2):
+        key, separator, value = line.partition(":")
+        entries.append((number, key.strip(), value.strip() if separator else None))
+    return entries, "\n".join(lines[close + 1 :])
 
 
 def assignment_body(data: bytes) -> str | None:

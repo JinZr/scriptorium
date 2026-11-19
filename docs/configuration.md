@@ -60,36 +60,54 @@ Before a run, the host agent agrees a short brief with the author:
 2. Ask only what that does not answer: the stage, the two or three claims to check first, what earlier reviewers
    said, known weaknesses, and what to ignore this round.
 3. Show the draft. The author confirms it, edits it, or accepts the defaults.
-4. Write `brief.json` and pass it to `run start --brief brief.json`.
+4. Write `brief.md` and pass it to `run start --brief brief.md`.
 
-The brief is one UTF-8 JSON object of at most 256 KB. It is not a manuscript source and need not be committed.
+The brief is a Markdown file: flat front matter, then a free body. It is not a manuscript source and need not be
+committed.
 
-```json
-{
-  "venue_family": "ml_conference",
-  "venue": "NeurIPS 2026",
-  "stage": "presubmission",
-  "priority_claims": ["The method improves accuracy on all three benchmarks."],
-  "known_weaknesses": ["The ablation uses a single seed."],
-  "prior_reviews": "An internal reviewer asked for a stronger baseline.",
-  "ignore": ["Checklist answers"],
-  "severity_notes": "Checklist items were waived last time.",
-  "recorded_by": "claude_code SESSION_ID"
-}
+```markdown
+---
+venue_family: ml_conference
+venue: NeurIPS 2026
+stage: presubmission
+recorded_by: claude_code SESSION_ID
+---
+## Claims the authors most want checked
+- The gain on benchmark one holds across seeds.
+
+## Weaknesses the authors already know
+- Only two benchmarks.
+
+## Out of scope this round
+- Related work.
+
+## Earlier reviewer comments
+Reviewer 2 asked for an ablation.
+
+## Severity notes
+Treat missing seeds as major.
 ```
 
-| Field | Rule |
+- The file is a regular UTF-8 file, not a symbolic link, of at most 64 KB.
+- The front matter is the `key: value` lines between a first line `---` and the next line `---`, each key at most
+  once. Any other key, a repeated key, or a line without a colon is invalid.
+
+| Key | Rule |
 | --- | --- |
 | `venue_family` | Required: `ml_conference`, `nature_family`, or `other` |
 | `stage` | Required: `internal_draft`, `presubmission`, `rebuttal_revision`, or `camera_ready` |
-| `priority_claims`, `known_weaknesses`, `ignore` | Default empty; at most 10 non-blank items of up to 500 characters |
-| `venue`, `recorded_by` | Up to 200 characters |
-| `prior_reviews` | Up to 4,000 characters |
-| `severity_notes` | Up to 2,000 characters |
+| `venue` | Optional: non-blank, up to 200 characters |
+| `recorded_by` | Optional: non-blank, up to 200 characters; the host session identity as declared |
 
-Omit an optional text field or use `null`; a blank string is rejected, and so are unknown keys. `recorded_by` is
-the host session identity as declared; it is stored with the brief but not rendered into prompts. The brief cannot
-change for the run; to review under a different brief, start a new run. How the brief is frozen is in
+The body is free Markdown and may be blank; Scriptorium looks for no headings in it. The headings above are the
+recommended template from the operator skill. An invalid brief fails `run start` with `configuration_error`,
+naming every problem, and starts nothing.
+
+Every review prompt renders the brief once, before the severity rubric: a fixed lead-in, the venue family and stage,
+the venue when given, a fixed rule that something the brief puts out of scope is reported only if it meets the
+blocker definition, and the body verbatim when it is not blank, marked as the authors' context rather than
+evidence. `recorded_by` is not rendered. Writing and check prompts do not include the brief. The brief cannot change
+for the run; to review under a different brief, start a new run. How the brief is frozen is in
 [architecture](architecture.md#freezing-a-run).
 
 `detected_template` is the first known class or package declared by the main entrypoint or a supplement (for

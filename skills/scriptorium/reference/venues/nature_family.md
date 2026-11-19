@@ -37,4 +37,4 @@ House style, reference formatting, and light language editing, which production 
 
 ## Defaults
 
-If the author says "defaults": `venue_family` `nature_family`, no venue, stage `presubmission`, and every list empty.
+If the author says "defaults": `venue_family: nature_family`, no `venue` line, `stage: presubmission`, and an empty body.

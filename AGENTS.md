@@ -6,8 +6,8 @@ manuscript bundle shown to external reviewers.
 ## Project scope
 
 Scriptorium is a lab-local, single-user, Git-native CLI for durable LaTeX
-manuscript review, revision, approval, verification, and release gating. Keep
-it a modular monolith. Do not add a GUI, HTTP service, background queue, graph
+manuscript review, planned revision, checking, approval, and release gating.
+Keep it a modular monolith. Do not add a GUI, HTTP service, background queue, graph
 orchestration layer, or distributed worker system unless the user explicitly
 requests that expansion.
 
@@ -64,6 +64,8 @@ Preserve the dependency direction and existing ownership:
   source anchors, and exact patch construction.
 - `plan.py`: reading and validating the plan directory, and turning returned
   passages into exact edits.
+- `brief.py`: reading and validating the review brief file, and rendering its
+  prompt section.
 - `service.py`: application operations shared by entrypoints.
 - `cli.py`: argument parsing and text/JSON presentation, not business rules.
 - `schemas.py` and `prompts/`: structured task I/O contracts and role prompts.
@@ -85,7 +87,7 @@ Keep PeerReviewBench-specific code and dependencies under
 Scriptorium core APIs for the benchmark unless explicitly required.
 
 Treat reviewer recall, precision, and F1 as one capability channel, not as
-end-to-end acceptance of revision, approval, compilation, verification,
+end-to-end acceptance of revision, approval, compilation, the check,
 resume, or release-gate behavior. Offline fixtures and dry runs are not evidence
 of a live paid benchmark run. Preserve upstream revisions, hashes, dependency
 versions, and run provenance without adding product-style schema or generation
