@@ -675,23 +675,34 @@ class WritingOutput(StrictModel):
     note: str | None = Field(default=None, max_length=WRITING_NOTE_LIMIT)
 
 
-class VerificationIssue(StrictModel):
-    title: str = Field(min_length=1)
-    explanation: str = Field(min_length=1)
-    evidence: list[Evidence] = Field(default_factory=list)
+CHECK_FEEDBACK_LIMIT = 8_000
 
 
-class VerificationOutput(StrictModel):
-    verdict: str = Field(pattern="^(pass|fail)$")
+class CheckVerdict(StrictModel):
+    assignment_id: str = Field(min_length=1, description="The ID of one assignment of the patch's approved plan.")
+    verdict: Literal["accept", "redo"] = Field(
+        description="accept when the assignment's new text does what it asks; redo returns it to the writer."
+    )
+    feedback: str | None = Field(
+        default=None,
+        max_length=CHECK_FEEDBACK_LIMIT,
+        description="For redo, required: what the writer must change, written for the writer. "
+        "For accept, an optional remark.",
+    )
+
+
+class CheckOutput(StrictModel):
+    """The lead's check of a candidate patch: one verdict per assignment of the approved plan."""
+
     summary: str = Field(min_length=1)
-    resolved_finding_ids: list[str]
-    issues: list[VerificationIssue] = Field(default_factory=list)
+    assignments: list[CheckVerdict]
 
-    @model_validator(mode="after")
-    def validate_verdict(self) -> "VerificationOutput":
-        if self.verdict == "pass" and self.issues:
-            raise ValueError("passing verification cannot contain issues")
-        return self
+    @field_validator("summary")
+    @classmethod
+    def require_summary_text(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("summary must not be blank")
+        return value
 
 
 class ValidationIssue(StrictModel):
@@ -704,7 +715,7 @@ class ValidationIssue(StrictModel):
 
 
 class ValidationReport(StrictModel):
-    schema_kind: Literal["review", "scientific_review", "writing", "verification"]
+    schema_kind: Literal["review", "scientific_review", "writing", "check"]
     schema_digest: str = Field(pattern="^[0-9a-f]{64}$")
     bundle_digest: str = Field(pattern="^[0-9a-f]{64}$")
     output_artifact_digest: str | None = Field(default=None, pattern="^[0-9a-f]{64}$")
@@ -715,7 +726,7 @@ SCHEMA_MODELS: dict[str, type[StrictModel]] = {
     "review": ReviewOutput,
     "scientific_review": ScientificReviewOutput,
     "writing": WritingOutput,
-    "verification": VerificationOutput,
+    "check": CheckOutput,
 }
 
 
@@ -724,7 +735,7 @@ def output_schema(
     contract: EvidenceAnchorContract = DEFAULT_EVIDENCE_ANCHOR_CONTRACT,
 ) -> dict[str, Any]:
     schema = SCHEMA_MODELS[kind].model_json_schema()
-    if kind in {"review", "scientific_review", "verification"}:
+    if kind in {"review", "scientific_review"}:
         evidence = schema["$defs"]["Evidence"]
         evidence["properties"]["source_path"]["description"] = (
             f"Source-line evidence uses a {contract.source_line.source_path_rule}; "

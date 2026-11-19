@@ -80,7 +80,7 @@ def test_anchor_contract_is_content_addressed_and_not_a_runtime_schema() -> None
 
 
 def test_evidence_schema_exposes_mutually_exclusive_contract_shapes() -> None:
-    for kind in ("review", "verification"):
+    for kind in ("review", "scientific_review"):
         evidence_schema = output_schema(kind)["$defs"]["Evidence"]
 
         assert evidence_schema["additionalProperties"] is False

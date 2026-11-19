@@ -1506,7 +1506,7 @@ class ManuscriptManager:
             json.dumps(anchor_map.model_dump(mode="json"), indent=2, sort_keys=True) + "\n",
             encoding="utf-8",
         )
-        # This final rename is the completion marker consumed by verification resume.
+        # This final rename is the completion marker consumed when a check bundle is reused on resume.
         source_map_temporary.replace(source_map_path)
         return ManuscriptBundle(destination, sources, page_count, anchor_map)
 

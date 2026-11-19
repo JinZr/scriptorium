@@ -161,7 +161,9 @@ def test_cancel_rejects_late_submission(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize("stale", [False, True])
-def test_writing_requires_human_gates_and_independent_verification(tmp_path: Path, stale: bool) -> None:
+def test_writing_requires_human_gates_and_a_check_from_a_session_that_did_not_write(
+    tmp_path: Path, stale: bool
+) -> None:
     repo = _repo(tmp_path / "paper")
     run_id, review_task_id = _start(repo)
     with ScriptoriumService(repo) as service:
@@ -221,26 +223,27 @@ def test_writing_requires_human_gates_and_independent_verification(tmp_path: Pat
         output = service.pack_writing_output(writing["attempt"].id, export)
         asyncio.run(service.submit_task(writing["attempt"].id, writing["input_digest"], output))
         patch = service.store.list_patches(run_id)[-1]
-        assert service.store.get_run(run_id).status == RunStatus.AWAITING_PATCH_APPROVAL
-        service.decide_patch(patch.id, "approve", "The edit matches the finding")
-        asyncio.run(service.resume_run(run_id))
-        verification_task = next(task for task in service.store.list_tasks(run_id) if task.stage == "verification")
-        reused = service.claim_task(verification_task.id, "codex", "model", "max", "review-session", "host")
+        assert service.store.get_run(run_id).status == RunStatus.CHECKING
+        assert service.get_patch(patch.id)["facts"]["pages"] == [{"document": "main.tex", "before": 1, "after": 1}]
+        check_task = next(task for task in service.store.list_tasks(run_id) if task.stage == "check")
         output = json.dumps(
             {
-                "verdict": "pass",
                 "summary": "The qualifier is present.",
-                "resolved_finding_ids": [finding_id],
-                "issues": [],
+                "assignments": [{"assignment_id": "result", "verdict": "accept", "feedback": None}],
             }
         )
-        invalid = asyncio.run(service.submit_task(reused["attempt"].id, reused["input_digest"], output))
+        # The writer's session cannot check its own run's patch.
+        writer = service.claim_task(check_task.id, "antigravity", "model", "max", "writing-session", "host")
+        invalid = asyncio.run(service.submit_task(writer["attempt"].id, writer["input_digest"], output))
         assert invalid["attempt"].status == AttemptStatus.FAILED
-        assert invalid["validation_report"]["issues"][0]["code"] == "verification.session_unconfirmed"
-        asyncio.run(service.retry_task(run_id, verification_task.id))
-        verifier = service.claim_task(verification_task.id, "codex", "model", "max", "new-session", "host")
-        accepted = asyncio.run(service.submit_task(verifier["attempt"].id, verifier["input_digest"], output))
-        assert accepted["run_status"] == RunStatus.READY_TO_APPLY
+        assert invalid["validation_report"]["issues"][0]["code"] == "check.session_unconfirmed"
+        asyncio.run(service.retry_task(run_id, check_task.id))
+        # The reviewer's session did no writing, so the lead may check from it.
+        lead = service.claim_task(check_task.id, "codex", "model", "max", "review-session", "host")
+        accepted = asyncio.run(service.submit_task(lead["attempt"].id, lead["input_digest"], output))
+        assert accepted["run_status"] == RunStatus.AWAITING_PATCH_APPROVAL
+        service.decide_patch(patch.id, "approve", "The edit matches the finding")
+        assert asyncio.run(service.resume_run(run_id))["run"].status == RunStatus.READY_TO_APPLY
         assert not service.evaluate_gate(run_id)["passed"]
         if stale:
             (repo / "main.tex").write_text("changed after approval\n", encoding="utf-8")

@@ -30,7 +30,7 @@ def test_a_run_is_one_state_file_that_reopens_unchanged(tmp_path) -> None:
             "decisions",
             "plans",
             "patches",
-            "verifications",
+            "checks",
             "events",
         ]
     )

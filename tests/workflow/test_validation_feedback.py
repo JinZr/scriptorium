@@ -1,7 +1,6 @@
 from hashlib import sha256
 import json
 
-from scriptorium.domain import AgentRole, Finding, FindingSeverity
 from scriptorium.manuscript import SourceFile
 from scriptorium.schemas import (
     DEFAULT_EVIDENCE_ANCHOR_CONTRACT,
@@ -12,7 +11,6 @@ from scriptorium.schemas import (
     ReviewOutput,
     SourceAnchorRecord,
     ValidationReport,
-    VerificationOutput,
     evidence_anchor_contract_digest,
 )
 from scriptorium.service import ScriptoriumService
@@ -68,26 +66,6 @@ def _service(tmp_path):
     return repo, ScriptoriumService(
         repo,
         manuscript_manager=PdfBuildingManuscriptManager(repo),
-    )
-
-
-def _finding(identifier):
-    return Finding(
-        id=identifier,
-        run_id="run_1",
-        task_id="task_1",
-        attempt_id="attempt_1",
-        fingerprint=identifier,
-        role=AgentRole.SUBSTANTIVE_REVIEW,
-        category="clarity",
-        severity=FindingSeverity.MAJOR,
-        title="Finding",
-        claim="Claim",
-        evidence=(),
-        explanation="Explanation",
-        suggested_action="Fix it",
-        confidence=0.9,
-        consequence="A reader misreads the claim.",
     )
 
 
@@ -374,49 +352,6 @@ def test_non_text_source_paths_are_diagnostic_reads_not_durable_anchors(tmp_path
     assert review_issues[1].expected["canonical_path"] == "Fig5.pdf"
 
 
-def test_verification_evidence_uses_the_patched_source_map_digest(tmp_path):
-    repo, service = _service(tmp_path)
-    patched_source = SourceFile(
-        "main.tex",
-        sha256((repo / "main.tex").read_bytes()).hexdigest(),
-        4,
-    )
-    verification = VerificationOutput.model_validate(
-        {
-            "verdict": "fail",
-            "summary": "New issue",
-            "resolved_finding_ids": ["finding_1"],
-            "issues": [
-                {
-                    "title": "Issue",
-                    "explanation": "Explanation",
-                    "evidence": [
-                        {
-                            "source_path": "main.tex",
-                            "start_line": 3,
-                            "end_line": 3,
-                            "source_digest": "0" * 64,
-                            "quoted_text": "The result is teh clear.",
-                        }
-                    ],
-                }
-            ],
-        }
-    )
-
-    with service:
-        issues = service.armarius._validate_verification_output(
-            verification,
-            [_finding("finding_1")],
-            _anchor_map(patched_source),
-            repo,
-            DEFAULT_EVIDENCE_ANCHOR_CONTRACT,
-        )
-
-    assert [issue.code for issue in issues] == ["evidence.source_digest_mismatch"]
-    assert issues[0].expected == patched_source.digest
-
-
 def test_pdf_page_anchor_does_not_depend_on_pdf_text_extraction(tmp_path):
     repo, service = _service(tmp_path)
     source = SourceFile("main.tex", sha256((repo / "main.tex").read_bytes()).hexdigest(), 4)
@@ -434,32 +369,6 @@ def test_pdf_page_anchor_does_not_depend_on_pdf_text_extraction(tmp_path):
         )
 
     assert issues == []
-
-
-def test_verification_validator_accumulates_issues(tmp_path):
-    repo, service = _service(tmp_path)
-    source = SourceFile("main.tex", sha256((repo / "main.tex").read_bytes()).hexdigest(), 4)
-    verification = VerificationOutput.model_validate(
-        {
-            "verdict": "pass",
-            "summary": "Incomplete",
-            "resolved_finding_ids": ["finding_unknown"],
-            "issues": [],
-        }
-    )
-    with service:
-        verification_issues = service.armarius._validate_verification_output(
-            verification,
-            [_finding("finding_1"), _finding("finding_2")],
-            _anchor_map(source),
-            repo,
-            DEFAULT_EVIDENCE_ANCHOR_CONTRACT,
-        )
-
-    assert [issue.code for issue in verification_issues] == [
-        "verification.unknown_finding_ids",
-        "verification.pass_incomplete",
-    ]
 
 
 def test_report_digest_is_content_deterministic_and_projection_is_bounded(tmp_path):

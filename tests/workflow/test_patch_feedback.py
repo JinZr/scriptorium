@@ -11,6 +11,7 @@ from ._support import (
     complete_reviews,
     export_writing,
     make_repository,
+    run_check,
     submit_writing,
     write_plan,
 )
@@ -26,6 +27,7 @@ def _rejected_run(service, tmp_path):
     asyncio.run(service.approve_plan(run.id, first, "The author approved the first plan."))
     writing, export = export_writing(service, run.id, session="writer-1")
     submit_writing(service, writing, export, {1: "The result is clear."})
+    run_check(service, run.id)
     patch = service.store.list_patches(run.id)[-1]
     service.decide_patch(patch.id, "reject", "Use more precise wording.")
     return run, finding_id, first, patch
@@ -61,7 +63,7 @@ def test_a_rejected_patch_returns_the_run_to_planning_and_an_unchanged_plan_is_r
         asyncio.run(service.approve_plan(run.id, second, "The author approved the precise wording."))
         writing, export = export_writing(service, run.id, session="writer-2")
         receipt = submit_writing(service, writing, export, {1: "The result is clear and precise."})
-        assert receipt["run_status"] == RunStatus.AWAITING_PATCH_APPROVAL
+        assert receipt["run_status"] == RunStatus.CHECKING
         patches = service.store.list_patches(run.id)
         assert [patch.id for patch in patches][0] == first_patch.id
         assert patches[-1].id != first_patch.id
@@ -85,3 +87,9 @@ def test_an_identical_diff_from_a_new_plan_reproposes_the_rejected_patch(tmp_pat
         assert [patch.id for patch in patches] == [first_patch.id]
         assert patches[0].status == PatchStatus.PROPOSED
         assert patches[0].plan_id == service.store.list_plans(run.id)[-1].id
+        assert patches[0].sources == ({"assignment_id": "result", "attempt_id": writing["attempt"].id},)
+        assert service.store.get_run(run.id).status == RunStatus.CHECKING
+        # The reproposed patch carries a new writing attempt, so its check is a new task.
+        run_check(service, run.id)
+        assert [check.patch_id for check in service.store.list_checks(run.id)] == [first_patch.id, first_patch.id]
+        assert service.store.get_patch(first_patch.id).status == PatchStatus.CHECKED

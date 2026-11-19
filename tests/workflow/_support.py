@@ -229,8 +229,63 @@ def prepare_patch(service, run_id, *, after="The result is clear."):
     return service.store.list_patches(run_id)[-1], finding_id
 
 
-def prepare_verification(service, run_id):
+def check_task(service, run_id):
+    return next(
+        task
+        for task in service.store.list_tasks(run_id)
+        if task.stage == "check" and task.status.value in {"pending", "running"}
+    )
+
+
+def claim_check(service, run_id, *, session="lead-session", source="host", client="claude_code"):
+    """Claim the open check task as the lead, from a session that did no writing in the run."""
+    return service.claim_task(check_task(service, run_id).id, client, "test-model", "max", session, source)
+
+
+def check_output(service, run_id, verdicts=None, *, summary="Checked each assignment against the plan."):
+    """A check output for the latest patch; verdicts maps assignment ID to feedback for redo, else every one accepts."""
+    patch = service.store.list_patches(run_id)[-1]
+    plan = service.store.get_plan(patch.plan_id)
+    verdicts = verdicts or {}
+    return {
+        "summary": summary,
+        "assignments": [
+            {
+                "assignment_id": item["id"],
+                "verdict": "redo" if item["id"] in verdicts else "accept",
+                "feedback": verdicts.get(item["id"]),
+            }
+            for item in plan.assignments
+        ],
+    }
+
+
+def submit_check(service, claim_data, output, *, check=False):
+    text = json.dumps(output)
+    if check:
+        return service.check_submission(claim_data["attempt"].id, claim_data["input_digest"], text)
+    return asyncio.run(service.submit_task(claim_data["attempt"].id, claim_data["input_digest"], text))
+
+
+def run_check(service, run_id, verdicts=None, *, session="lead-session"):
+    """Claim the open check and submit verdicts; it must be accepted."""
+    receipt = submit_check(
+        service, claim_check(service, run_id, session=session), check_output(service, run_id, verdicts)
+    )
+    assert receipt["attempt"].status.value == "completed", receipt["validation_report"]
+    return receipt
+
+
+def prepare_checked(service, run_id):
+    """A patch whose check accepted every assignment, waiting for the author's decision."""
     patch, finding_id = prepare_patch(service, run_id)
-    service.decide_patch(patch.id, "approve", "Verify the exact edit.")
+    run_check(service, run_id)
+    return service.store.get_patch(patch.id), finding_id
+
+
+def prepare_approved(service, run_id):
+    """A checked patch the author approved, with the run resumed to ready_to_apply."""
+    patch, finding_id = prepare_checked(service, run_id)
+    service.decide_patch(patch.id, "approve", "Apply the exact edit.")
     asyncio.run(service.resume_run(run_id))
-    return patch, finding_id
+    return service.store.get_patch(patch.id), finding_id

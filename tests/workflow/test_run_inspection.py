@@ -11,7 +11,7 @@ from scriptorium.errors import ConfigurationError, InfrastructureError, NotFound
 from scriptorium.service import ScriptoriumService
 from scriptorium.tool_output import REPORT_PARTS, success_json
 
-from ._support import PdfBuildingManuscriptManager, claim, make_repository, prepare_verification, review_finding, submit
+from ._support import PdfBuildingManuscriptManager, claim, make_repository, prepare_checked, review_finding, submit
 
 
 @pytest.mark.parametrize("json_output", [True, False], ids=["json", "plain"])
@@ -106,19 +106,14 @@ def test_status_preserves_human_gates(tmp_path, monkeypatch, capsys):
         monkeypatch.setattr(cli, "_build_service", lambda _: service)
         assert cli.main(["--json", "run", "status", run_id]) == 0
         assert json.loads(capsys.readouterr().out)["data"]["next_actions"] == status["next_actions"]
-        patch, finding_id = prepare_verification(service, run_id)
-        verification = claim(service, run_id, AgentRole.VERIFICATION, session="independent-verifier")
-        receipt = submit(
-            service,
-            verification,
-            {
-                "summary": "The approved correction is sound.",
-                "verdict": "pass",
-                "resolved_finding_ids": [finding_id],
-                "issues": [],
-            },
-        )
-        assert receipt["attempt"].status.value == "completed"
+        patch, _ = prepare_checked(service, run_id)
+        status = service.run_status(run_id)
+        assert status["run"]["status"] == RunStatus.AWAITING_PATCH_APPROVAL.value
+        assert status["next_actions"] == [
+            {"command": "patch show", "patch_id": patch.id, "requires_human_decision": True}
+        ]
+        service.decide_patch(patch.id, "approve", "The author approved the checked patch.")
+        asyncio.run(service.resume_run(run_id))
         status = service.run_status(run_id)
         assert status["run"]["status"] == RunStatus.READY_TO_APPLY.value
         assert status["next_actions"] == [

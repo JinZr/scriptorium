@@ -13,13 +13,16 @@ from scriptorium.service import ScriptoriumService
 from ._support import (
     PdfBuildingManuscriptManager,
     approve_plan,
+    check_output,
     claim,
+    claim_check,
     complete_reviews,
     export_writing,
     make_repository,
-    prepare_verification,
+    prepare_patch,
     review_finding,
     submit,
+    submit_check,
     submit_writing,
     writing_task,
 )
@@ -325,19 +328,16 @@ def test_waiving_the_last_confirmed_finding_during_writing_completes_the_run(tmp
         assert asyncio.run(service.resume_run(run.id))["run"].status == RunStatus.COMPLETED
 
 
-def test_later_waiver_invalidates_active_verification(tmp_path):
+def test_waiving_the_last_confirmed_finding_during_the_check_interrupts_it_and_completes_the_run(tmp_path):
     repo = make_repository(tmp_path, roles=("substantive_review",))
     with ScriptoriumService(repo, manuscript_manager=PdfBuildingManuscriptManager(repo)) as service:
         run = asyncio.run(service.start_run("HEAD", "quick"))["run"]
-        _, finding_id = prepare_verification(service, run.id)
-        verification = claim(service, run.id, AgentRole.VERIFICATION, session="fresh-verifier")
+        _, finding_id = prepare_patch(service, run.id)
+        lead = claim_check(service, run.id)
         service.decide_finding(finding_id, "waive", "The patch is no longer required")
-        assert service.store.get_attempt(verification["attempt"].id).status == AttemptStatus.INTERRUPTED
+        assert service.store.get_attempt(lead["attempt"].id).status == AttemptStatus.INTERRUPTED
+        assert service.store.get_run(run.id).status == RunStatus.PLANNING
         with pytest.raises(StateError, match="superseded"):
-            submit(
-                service,
-                verification,
-                {"verdict": "pass", "summary": "Old scope", "resolved_finding_ids": [], "issues": []},
-            )
+            submit_check(service, lead, check_output(service, run.id))
         asyncio.run(service.resume_run(run.id))
         assert service.store.get_run(run.id).status == RunStatus.COMPLETED

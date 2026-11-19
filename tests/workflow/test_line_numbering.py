@@ -6,7 +6,6 @@ import subprocess
 
 import pytest
 
-from scriptorium.domain import AgentRole
 from scriptorium.errors import InfrastructureError
 from scriptorium.service import ScriptoriumService
 from scriptorium.workflow import Armarius
@@ -14,10 +13,13 @@ from scriptorium.workflow import Armarius
 from ._support import (
     PdfBuildingManuscriptManager,
     approve_plan,
+    check_output,
     claim,
+    claim_check,
     export_writing,
     make_repository,
     submit,
+    submit_check,
     submit_writing,
 )
 
@@ -71,16 +73,11 @@ def _write_verify_apply(service, run, line, before, after):
     assert receipt["validation_report"] is None
     patch = service.store.list_patches(run.id)[-1]
     diff = service.artifacts.get_bytes(patch.diff_digest).decode("utf-8")
-    service.decide_patch(patch.id, "approve", "Apply the exact edit.")
-    asyncio.run(service.resume_run(run.id))
-    verification = claim(service, run.id, AgentRole.VERIFICATION, session="verification-session")
-    receipt = submit(
-        service,
-        verification,
-        {"verdict": "pass", "summary": "Resolved.", "resolved_finding_ids": [finding.id], "issues": []},
-    )
+    receipt = submit_check(service, claim_check(service, run.id), check_output(service, run.id))
     assert receipt["validation_report"] is None
-    assert receipt["run_status"].value == "ready_to_apply"
+    assert receipt["run_status"].value == "awaiting_patch_approval"
+    service.decide_patch(patch.id, "approve", "Apply the exact edit.")
+    assert asyncio.run(service.resume_run(run.id))["run"].status.value == "ready_to_apply"
     # Applying recomputes the diff from the frozen snapshot and compares it with the immutable artifact.
     service.apply_patch(patch.id)
     return diff, (service.repo / "main.tex").read_text(encoding="utf-8")

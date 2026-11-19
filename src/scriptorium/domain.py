@@ -31,8 +31,8 @@ class RunStatus(str, Enum):
     AWAITING_DECISION = "awaiting_decision"
     PLANNING = "planning"
     WRITING = "writing"
+    CHECKING = "checking"
     AWAITING_PATCH_APPROVAL = "awaiting_patch_approval"
-    VERIFYING = "verifying"
     READY_TO_APPLY = "ready_to_apply"
     COMPLETED = "completed"
     FAILED = "failed"
@@ -72,14 +72,15 @@ class FindingSeverity(str, Enum):
 
 class PatchStatus(str, Enum):
     PROPOSED = "proposed"
+    RETURNED = "returned"
+    CHECKED = "checked"
     APPROVED = "approved"
     REJECTED = "rejected"
-    VERIFIED = "verified"
     APPLIED = "applied"
     STALE = "stale"
 
 
-class VerificationResult(str, Enum):
+class CheckResult(str, Enum):
     PASS = "pass"
     FAIL = "fail"
 
@@ -104,7 +105,7 @@ class AgentRole(str, Enum):
     CONSISTENCY = "consistency"
     FIGURE_REVIEW = "figure_review"
     WRITING = "writing"
-    VERIFICATION = "verification"
+    CHECK = "check"
 
 
 @dataclass(frozen=True)
@@ -147,10 +148,10 @@ ROLE_CATALOG: Mapping[AgentRole, RoleSpec] = {
         display_name="Scribe",
         description="Rewrites the passages one assignment of an approved plan names",
     ),
-    AgentRole.VERIFICATION: RoleSpec(
-        key=AgentRole.VERIFICATION,
-        display_name="Verifier",
-        description="Independent patch and manuscript verification",
+    AgentRole.CHECK: RoleSpec(
+        key=AgentRole.CHECK,
+        display_name="Checker",
+        description="The lead's check of a candidate patch against the approved plan, assignment by assignment",
     ),
 }
 
@@ -163,8 +164,12 @@ RUN_TRANSITIONS: Mapping[RunStatus, frozenset[RunStatus]] = {
     ),
     RunStatus.PLANNING: frozenset({RunStatus.WRITING, RunStatus.COMPLETED, RunStatus.CANCELLED}),
     RunStatus.WRITING: frozenset(
+        {RunStatus.CHECKING, RunStatus.PLANNING, RunStatus.COMPLETED, RunStatus.FAILED, RunStatus.CANCELLED}
+    ),
+    RunStatus.CHECKING: frozenset(
         {
             RunStatus.AWAITING_PATCH_APPROVAL,
+            RunStatus.WRITING,
             RunStatus.PLANNING,
             RunStatus.COMPLETED,
             RunStatus.FAILED,
@@ -172,20 +177,11 @@ RUN_TRANSITIONS: Mapping[RunStatus, frozenset[RunStatus]] = {
         }
     ),
     RunStatus.AWAITING_PATCH_APPROVAL: frozenset(
-        {RunStatus.PLANNING, RunStatus.VERIFYING, RunStatus.COMPLETED, RunStatus.CANCELLED}
-    ),
-    RunStatus.VERIFYING: frozenset(
-        {
-            RunStatus.AWAITING_PATCH_APPROVAL,
-            RunStatus.READY_TO_APPLY,
-            RunStatus.COMPLETED,
-            RunStatus.FAILED,
-            RunStatus.CANCELLED,
-        }
+        {RunStatus.PLANNING, RunStatus.READY_TO_APPLY, RunStatus.COMPLETED, RunStatus.CANCELLED}
     ),
     RunStatus.READY_TO_APPLY: frozenset({RunStatus.COMPLETED, RunStatus.FAILED, RunStatus.CANCELLED}),
     RunStatus.COMPLETED: frozenset(),
-    RunStatus.FAILED: frozenset({RunStatus.PREPARING, RunStatus.REVIEWING, RunStatus.WRITING, RunStatus.VERIFYING}),
+    RunStatus.FAILED: frozenset({RunStatus.PREPARING, RunStatus.REVIEWING, RunStatus.WRITING, RunStatus.CHECKING}),
     RunStatus.CANCELLED: frozenset(),
 }
 
@@ -338,16 +334,27 @@ class Patch:
     applied_at: str | None = None
     # The plan whose accepted writing outputs this patch was built from.
     plan_id: str | None = None
+    # The writing attempt each assignment's edits came from: ``{"assignment_id", "attempt_id"}`` in plan order.
+    sources: tuple[Mapping[str, Any], ...] = ()
+    # The fact-change list artifact: a reading aid from the navigation index, never evidence.
+    facts_digest: str | None = None
 
 
 @dataclass(frozen=True)
-class Verification:
+class Check:
+    """The lead's check of one candidate patch against its approved plan.
+
+    Each assignment verdict is ``{"assignment_id", "writing_attempt_id", "verdict", "feedback"}``: the writing attempt
+    is the one the patch carried for that assignment, so a ``redo`` returns exactly that output.
+    """
+
     patch_id: str
-    result: VerificationResult
+    result: CheckResult
     summary: str
+    assignments: tuple[Mapping[str, Any], ...]
     attempt_id: str | None = None
     artifact_digest: str | None = None
-    id: str = field(default_factory=lambda: new_id("verification"))
+    id: str = field(default_factory=lambda: new_id("check"))
     created_at: str = field(default_factory=utc_now)
 
 

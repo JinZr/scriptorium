@@ -30,7 +30,8 @@ _TASK_DESCRIPTION = """Use a frozen task from the current host model session.
 Typical order: claim, export (frozen sources, navigation, source map, PDF, and this attempt's inputs under task/),
 page for rendered pages, then submit --check and submit. Read the exported files with the host's own tools;
 evidence anchors cite frozen source paths, digests, and lines. A writing task rewrites the exported
-task/passages/ files and submits the export directory with --dir."""
+task/passages/ files and submits the export directory with --dir. A check task reads the patched manuscript and
+returns one verdict per assignment."""
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -194,21 +195,23 @@ def build_parser() -> argparse.ArgumentParser:
     patch_parser = commands.add_parser("patch", help="inspect, decide, and apply patches")
     patch_commands = patch_parser.add_subparsers(dest="patch_command", required=True)
 
-    patch_show_parser = patch_commands.add_parser("show", help="show a patch")
+    patch_show_parser = patch_commands.add_parser(
+        "show", help="show a patch with its decisions, checks, diff, and fact-change list"
+    )
     patch_show_parser.add_argument("patch_id", help="patch ID")
 
     patch_decide_parser = patch_commands.add_parser("decide", help="record a human patch decision")
     patch_decide_parser.add_argument("patch_id", help="patch ID")
     patch_decisions = patch_decide_parser.add_mutually_exclusive_group(required=True)
     patch_decisions.add_argument(
-        "--approve", action="store_const", const="approve", dest="decision", help="approve for verification"
+        "--approve", action="store_const", const="approve", dest="decision", help="approve the checked patch"
     )
     patch_decisions.add_argument(
         "--reject", action="store_const", const="reject", dest="decision", help="reject the patch"
     )
     patch_decide_parser.add_argument("--reason", required=True, type=_nonempty, help="non-empty decision reason")
 
-    patch_apply_parser = patch_commands.add_parser("apply", help="apply a verified patch to the worktree")
+    patch_apply_parser = patch_commands.add_parser("apply", help="apply an approved patch to the worktree")
     patch_apply_parser.add_argument("patch_id", help="patch ID")
 
     return parser

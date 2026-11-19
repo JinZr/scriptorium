@@ -13,7 +13,18 @@ from scriptorium.errors import ConfigurationError, InfrastructureError
 from scriptorium.manuscript import BuildResult, CompilerInput, ManuscriptManager
 from scriptorium.service import ScriptoriumService
 
-from ._support import approve_plan, claim, export_writing, make_repository, review_finding, submit, submit_writing
+from ._support import (
+    approve_plan,
+    check_output,
+    claim,
+    claim_check,
+    export_writing,
+    make_repository,
+    review_finding,
+    submit,
+    submit_check,
+    submit_writing,
+)
 
 SUPPLEMENT = "\\documentclass{article}\n\\begin{document}\nThe result is limited to adults.\n\\end{document}\n"
 
@@ -161,7 +172,7 @@ def test_supplement_failure_does_not_publish_review_tasks_and_can_resume(tmp_pat
 
 
 @pytest.mark.parametrize("stale", [False, True])
-def test_verification_rebuilds_supplement_and_keeps_human_and_stale_worktree_gates(tmp_path, stale):
+def test_the_check_reads_every_patched_document_and_keeps_human_and_stale_worktree_gates(tmp_path, stale):
     repo = supplemented_repository(tmp_path)
     manager = DocumentBuilder(repo)
     with ScriptoriumService(repo, manuscript_manager=manager) as service:
@@ -186,31 +197,22 @@ def test_verification_rebuilds_supplement_and_keeps_human_and_stale_worktree_gat
         writing, export = export_writing(service, run.id)
         submit_writing(service, writing, export, {1: "The result is limited to adults aged 18 years or older."})
         patch = service.store.list_patches(run.id)[-1]
-        assert service.store.get_run(run.id).status == RunStatus.AWAITING_PATCH_APPROVAL
-        # The base, the writing submission's compile check, and the combined candidate each build both documents.
+        assert service.store.get_run(run.id).status == RunStatus.CHECKING
+        # The base, the writing submission's compile check, and the combined candidate each build both documents;
+        # the check reads the candidate's build.
         assert manager.built == ["main.tex", "supplement.tex"] * 3
-        service.decide_patch(patch.id, "approve", "Test authorization to verify.")
-        manager.fail_at = 8
-        with pytest.raises(InfrastructureError, match="supplement.tex"):
-            asyncio.run(service.resume_run(run.id))
+        lead = claim_check(service, run.id)
+        assert len(lead["source_map"]["compiled_pdf"]["documents"]) == 2
+        assert service.page_task(lead["attempt"].id, 1, "supplement.tex")["page"] == 2
+        facts = service.get_patch(patch.id)["facts"]
+        assert facts["pages"] == [
+            {"document": "main.tex", "before": 1, "after": 1},
+            {"document": "supplement.tex", "before": 1, "after": 1},
+        ]
+        submit_check(service, lead, check_output(service, run.id))
         assert not service.evaluate_gate(run.id)["passed"]
-        assert not any(item.stage == "verification" for item in service.store.list_tasks(run.id))
-        manager.fail_at = None
+        service.decide_patch(patch.id, "approve", "Test authorization to apply.")
         asyncio.run(service.resume_run(run.id))
-        verifier = claim(service, run.id, AgentRole.VERIFICATION, session="independent-verification")
-        assert len(verifier["source_map"]["compiled_pdf"]["documents"]) == 2
-        assert service.page_task(verifier["attempt"].id, 1, "supplement.tex")["page"] == 2
-        submit(
-            service,
-            verifier,
-            {
-                "verdict": "pass",
-                "summary": "Verified all documents.",
-                "resolved_finding_ids": [finding_id],
-                "issues": [],
-            },
-        )
-        assert not service.evaluate_gate(run.id)["passed"]
         if stale:
             (repo / "supplement.tex").write_text("stale worktree")
             assert service.apply_patch(patch.id).status.value == "stale"

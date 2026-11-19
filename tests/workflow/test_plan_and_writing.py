@@ -17,6 +17,7 @@ from ._support import (
     export_writing,
     make_repository,
     review_finding,
+    run_check,
     submit,
     submit_writing,
     write_plan,
@@ -151,7 +152,7 @@ def test_a_writing_task_is_submitted_from_its_export_directory(tmp_path, monkeyp
         assert code == 0 and checked["data"]["valid"] is True and checked["data"]["recorded"] is False
         code, receipt = _cli(capsys, *submit_args, "--dir", str(export))
         assert code == 0 and receipt["data"]["attempt"]["status"] == "completed"
-        assert receipt["data"]["run_status"] == "awaiting_patch_approval"
+        assert receipt["data"]["run_status"] == "checking"
         stored = json.loads(service.artifacts.get_bytes(receipt["data"]["output_digest"]))
         assert stored == {
             "passages": [{"index": 1, "text": "The result is clear."}],
@@ -216,7 +217,7 @@ def test_a_latex_error_in_a_passage_returns_to_the_writer_and_the_run_stays_usab
         assert "writing.build_failed" in retried["prompt"]
         receipt = submit_writing(service, retried, export, {1: "The result is clear."})
         assert receipt["attempt"].status == AttemptStatus.COMPLETED
-        assert receipt["run_status"] == RunStatus.AWAITING_PATCH_APPROVAL
+        assert receipt["run_status"] == RunStatus.CHECKING
 
 
 def test_a_missing_tool_while_compiling_a_submission_is_inconclusive(tmp_path):
@@ -257,7 +258,7 @@ def test_two_assignments_one_without_findings_reach_a_passing_gate(tmp_path):
         assert receipt["run_status"] == RunStatus.WRITING
         writing, export = export_writing(service, run.id, "result", session="writer-result")
         receipt = submit_writing(service, writing, export, {1: "The result is clear."})
-        assert receipt["run_status"] == RunStatus.AWAITING_PATCH_APPROVAL
+        assert receipt["run_status"] == RunStatus.CHECKING
 
         patch = service.store.list_patches(run.id)[-1]
         plan = service.store.list_plans(run.id)[-1]
@@ -266,25 +267,9 @@ def test_two_assignments_one_without_findings_reach_a_passing_gate(tmp_path):
             (2, ()),
             (3, (finding_id,)),
         ]
+        run_check(service, run.id)
         service.decide_patch(patch.id, "approve", "The author approved the patch.")
-        asyncio.run(service.resume_run(run.id))
-        reused = claim(service, run.id, AgentRole.VERIFICATION, session="writer-result")
-        rejected = submit(
-            service,
-            reused,
-            {"verdict": "pass", "summary": "Checked.", "resolved_finding_ids": [finding_id], "issues": []},
-        )
-        assert "verification.session_unconfirmed" in {
-            issue["code"] for issue in rejected["validation_report"]["issues"]
-        }
-        asyncio.run(service.retry_task(run.id, reused["task"].id))
-        verifier = claim(service, run.id, AgentRole.VERIFICATION, session="independent-verifier")
-        receipt = submit(
-            service,
-            verifier,
-            {"verdict": "pass", "summary": "Checked.", "resolved_finding_ids": [finding_id], "issues": []},
-        )
-        assert receipt["run_status"] == RunStatus.READY_TO_APPLY
+        assert asyncio.run(service.resume_run(run.id))["run"].status == RunStatus.READY_TO_APPLY
         service.apply_patch(patch.id)
         assert (repo / "main.tex").read_text() == MANUSCRIPT.replace(
             "\\begin{document}\n", "\\begin{document}\nThis note states one result.\n"
@@ -339,7 +324,7 @@ def test_assignments_that_compile_alone_but_not_together_return_the_run_to_plann
         assert service.store.get_run(run.id).error is None
         writing, export = export_writing(service, run.id, "result", session="writer-3")
         receipt = submit_writing(service, writing, export, {1: "The result is clear."})
-        assert receipt["run_status"] == RunStatus.AWAITING_PATCH_APPROVAL
+        assert receipt["run_status"] == RunStatus.CHECKING
 
 
 def _two_finding_run(service):
@@ -381,7 +366,8 @@ def _rejected_two_assignment_run(service, tmp_path):
     opening_attempt = writing["attempt"]
     writing, export = export_writing(service, run.id, "result", session="writer-result")
     receipt = submit_writing(service, writing, export, {1: "The result is clear."})
-    assert receipt["run_status"] == RunStatus.AWAITING_PATCH_APPROVAL
+    assert receipt["run_status"] == RunStatus.CHECKING
+    run_check(service, run.id)
     patch = service.store.list_patches(run.id)[-1]
     service.decide_patch(patch.id, "reject", "The opening is right; the result sentence is too vague.")
     asyncio.run(service.resume_run(run.id))
@@ -405,7 +391,7 @@ def test_a_changed_plan_rewrites_only_its_changed_assignments(tmp_path):
         assert service.list_tasks(run.id)["next_actions"] == [{"command": "task claim", "task_id": tasks["result"].id}]
         writing, export = export_writing(service, run.id, "result", session="writer-result-2")
         receipt = submit_writing(service, writing, export, {1: "The result is clear in every setting."})
-        assert receipt["run_status"] == RunStatus.AWAITING_PATCH_APPROVAL
+        assert receipt["run_status"] == RunStatus.CHECKING
         patch = service.store.list_patches(run.id)[-1]
         assert patch.plan_id == service.store.list_plans(run.id)[-1].id
         assert sorted((edit["start_line"], edit["after"]) for edit in patch.edits) == [
@@ -470,7 +456,7 @@ def test_a_cancelled_task_does_not_block_the_same_assignment_in_a_later_plan(tmp
         assert service.list_tasks(run.id)["next_actions"] == [{"command": "task claim", "task_id": replacement.id}]
         writing, export = export_writing(service, run.id, "opening", session="writer-opening")
         receipt = submit_writing(service, writing, export, {1: OPENING})
-        assert receipt["run_status"] == RunStatus.AWAITING_PATCH_APPROVAL
+        assert receipt["run_status"] == RunStatus.CHECKING
         (edit,) = service.store.list_patches(run.id)[-1].edits
         assert edit["start_line"] == 2
 

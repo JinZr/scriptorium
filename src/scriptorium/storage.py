@@ -17,6 +17,8 @@ from scriptorium.domain import (
     Artifact,
     Attempt,
     AttemptStatus,
+    Check,
+    CheckResult,
     Decision,
     Event,
     Finding,
@@ -29,8 +31,6 @@ from scriptorium.domain import (
     RunStatus,
     Task,
     TaskStatus,
-    Verification,
-    VerificationResult,
     canonical_json,
     utc_now,
     validate_run_transition,
@@ -47,12 +47,17 @@ _FINDING_DECISIONS = {
     "waive": FindingStatus.WAIVED,
 }
 _PATCH_DECISIONS = {"approve": PatchStatus.APPROVED, "reject": PatchStatus.REJECTED}
-_DECIDABLE_PATCHES = {PatchStatus.PROPOSED, PatchStatus.APPROVED, PatchStatus.REJECTED}
+# The author decides a patch once its check accepted every assignment, and may change the decision until resume.
+_DECIDABLE_PATCHES = {PatchStatus.CHECKED, PatchStatus.APPROVED, PatchStatus.REJECTED}
+# A new candidate with the diff of a patch in one of these statuses proposes that patch again.
+_REPROPOSABLE_PATCHES = {PatchStatus.PROPOSED, PatchStatus.RETURNED, PatchStatus.REJECTED}
+# Status updates; a check, a decision, and a reproposal each move a patch through their own operation.
 _PATCH_TRANSITIONS = {
-    PatchStatus.PROPOSED: {PatchStatus.APPROVED, PatchStatus.REJECTED},
-    PatchStatus.APPROVED: {PatchStatus.REJECTED, PatchStatus.VERIFIED, PatchStatus.STALE},
+    PatchStatus.PROPOSED: set(),
+    PatchStatus.RETURNED: set(),
+    PatchStatus.CHECKED: set(),
+    PatchStatus.APPROVED: {PatchStatus.APPLIED, PatchStatus.STALE},
     PatchStatus.REJECTED: set(),
-    PatchStatus.VERIFIED: {PatchStatus.APPLIED, PatchStatus.STALE},
     PatchStatus.APPLIED: set(),
     PatchStatus.STALE: set(),
 }
@@ -67,6 +72,8 @@ _EXTERNAL_TASK_KEYS = (
     "plan_text_digest",
     "assignment_id",
     "assignment_digest",
+    "check_id",
+    "returned_attempt_id",
     "example_digest",
 )
 # Every key but the task ID and the example digest is frozen task material and must never change.
@@ -98,7 +105,7 @@ class _RunState:
         "decisions",
         "plans",
         "patches",
-        "verifications",
+        "checks",
         "events",
     )
 
@@ -111,7 +118,7 @@ class _RunState:
         self.decisions: list[Decision] = []
         self.plans: dict[str, Plan] = {}
         self.patches: dict[str, Patch] = {}
-        self.verifications: dict[str, Verification] = {}
+        self.checks: dict[str, Check] = {}
         self.events: list[Event] = []
         self.dirty = False
 
@@ -129,7 +136,7 @@ class _RunState:
             state.decisions = [Decision(**item) for item in raw["decisions"]]
             state.plans = {item.id: item for item in map(_plan_from, raw["plans"])}
             state.patches = {item.id: item for item in map(_patch_from, raw["patches"])}
-            state.verifications = {item.id: item for item in map(_verification_from, raw["verifications"])}
+            state.checks = {item.id: item for item in map(_check_from, raw["checks"])}
             state.events = [Event(**item) for item in raw["events"]]
             if state.run.id != path.parent.name:
                 raise ValueError(f"run {state.run.id} does not match its directory")
@@ -147,7 +154,7 @@ class _RunState:
             "decisions": [vars(item) for item in self.decisions],
             "plans": [vars(item) for item in self.plans.values()],
             "patches": [vars(item) for item in self.patches.values()],
-            "verifications": [vars(item) for item in self.verifications.values()],
+            "checks": [vars(item) for item in self.checks.values()],
             "events": [vars(item) for item in self.events],
         }
         return canonical_json(document).encode("utf-8")
@@ -468,9 +475,12 @@ class RunStore:
         plan_text_digest: str | None = None,
         assignment_id: str | None = None,
         assignment_digest: str | None = None,
+        check_id: str | None = None,
+        returned_attempt_id: str | None = None,
     ) -> None:
         # The example digest is written only with the first record; it is not part of the frozen-input identity.
-        # A writing task names the plan text and the assignment file it was prepared from, not a plan record.
+        # A writing task names the plan text and the assignment file it was prepared from, not a plan record; a redo
+        # task also names the check that returned the assignment and the returned writing attempt.
         record = dict(
             zip(
                 _EXTERNAL_TASK_KEYS,
@@ -484,6 +494,8 @@ class RunStore:
                     plan_text_digest,
                     assignment_id,
                     assignment_digest,
+                    check_id,
+                    returned_attempt_id,
                     example_digest,
                 ),
             )
@@ -741,7 +753,7 @@ class RunStore:
         state = self._load_if_present(run_id)
         return [] if state is None else sorted(state.plans.values(), key=lambda item: (item.created_at, item.id))
 
-    # Patches and verifications
+    # Patches and checks
 
     def create_patch(self, patch: Patch) -> Patch:
         if patch.plan_id is None:
@@ -753,7 +765,7 @@ class RunStore:
             if any((item.base_commit, item.diff_digest) == key for item in state.patches.values()):
                 raise ConflictError("patch already exists for run, base commit, and diff digest")
             _require_plan_in(state, patch.plan_id)
-            self._require_artifact(patch.diff_digest)
+            self._require_patch_material(state, patch.diff_digest, patch.facts_digest, patch.sources)
             state.set_patch(patch)
             state.add_event(
                 Event(
@@ -785,24 +797,30 @@ class RunStore:
         summary: str,
         edits: Sequence[Mapping[str, Any]],
         build_succeeded: bool,
+        sources: Sequence[Mapping[str, Any]] = (),
+        facts_digest: str | None = None,
     ) -> Patch:
+        """Propose a patch again for a new candidate with its diff; an identical proposed patch stays unchanged."""
         with self._mutation(self._owner(patch_id, "patch", _patches).run.id) as state:
             patch = state.patches[patch_id]
-            if patch.status != PatchStatus.REJECTED:
+            if patch.status not in _REPROPOSABLE_PATCHES:
                 raise ConflictError(f"patch cannot be reproposed in status {patch.status.value}")
             _require_plan_in(state, plan_id)
-            state.set_patch(
-                replace(
-                    patch,
-                    summary=summary,
-                    # Stored edits are plain JSON; return them as a later read would.
-                    edits=tuple(json.loads(canonical_json(list(edits)))),
-                    plan_id=plan_id,
-                    status=PatchStatus.PROPOSED,
-                    build_succeeded=bool(build_succeeded),
-                    updated_at=utc_now(),
-                )
+            self._require_patch_material(state, patch.diff_digest, facts_digest, sources)
+            # Stored records are plain JSON; return them as a later read would.
+            proposed = replace(
+                patch,
+                summary=summary,
+                edits=tuple(json.loads(canonical_json(list(edits)))),
+                sources=tuple(json.loads(canonical_json(list(sources)))),
+                facts_digest=facts_digest,
+                plan_id=plan_id,
+                status=PatchStatus.PROPOSED,
+                build_succeeded=bool(build_succeeded),
             )
+            if proposed == patch:
+                return patch
+            state.set_patch(replace(proposed, updated_at=utc_now()))
             state.add_event(
                 Event(
                     run_id=state.run.id,
@@ -859,35 +877,60 @@ class RunStore:
     def update_patch(self, patch_id: str, status: PatchStatus, *, build_succeeded: bool | None = None) -> Patch:
         return self.update_patch_status(patch_id, status, build_succeeded=build_succeeded)
 
-    def create_verification(self, verification: Verification) -> Verification:
-        with self._mutation(self._owner(verification.patch_id, "patch", _patches).run.id) as state:
-            if verification.id in state.verifications:
-                raise ConflictError(f"verification already exists: {verification.id}")
-            if verification.attempt_id is not None:
-                _require_attempt_in(state, verification.attempt_id)
-            if verification.artifact_digest is not None:
-                self._require_artifact(verification.artifact_digest)
-            state.verifications[verification.id] = verification
-            state.dirty = True
-            patch = state.patches[verification.patch_id]
-            if verification.result == VerificationResult.PASS and patch.status == PatchStatus.APPROVED:
-                state.set_patch(replace(patch, status=PatchStatus.VERIFIED, updated_at=verification.created_at))
-            state.add_event(
-                Event(
-                    run_id=state.run.id,
-                    event_type="verification.created",
-                    entity_type="verification",
-                    entity_id=verification.id,
-                    payload={"patch_id": verification.patch_id, "result": verification.result.value},
-                )
-            )
-        return verification
+    def record_check(self, check: Check) -> Check:
+        """Record the check of a proposed patch and move the patch and the run on, in one replacement.
 
-    def list_verifications(self, patch_id: str) -> list[Verification]:
-        state = self._find(patch_id, _patches)
+        A passing check makes the patch ``checked`` and the run ``awaiting_patch_approval``; a check that returns any
+        assignment makes the patch ``returned`` and the run ``writing``.
+        """
+        with self._mutation(self._owner(check.patch_id, "patch", _patches).run.id) as state:
+            if check.id in state.checks:
+                raise ConflictError(f"check already exists: {check.id}")
+            patch = state.patches[check.patch_id]
+            if patch.status != PatchStatus.PROPOSED:
+                raise ConflictError(f"patch cannot be checked in status {patch.status.value}")
+            current = state.run.status
+            if current != RunStatus.CHECKING:
+                raise ConflictError(f"a check cannot be recorded while the run is {current.value}")
+            if check.attempt_id is not None:
+                _require_attempt_in(state, check.attempt_id)
+            if check.artifact_digest is not None:
+                self._require_artifact(check.artifact_digest)
+            passed = check.result == CheckResult.PASS
+            status = PatchStatus.CHECKED if passed else PatchStatus.RETURNED
+            run_status = RunStatus.AWAITING_PATCH_APPROVAL if passed else RunStatus.WRITING
+            validate_run_transition(current, run_status)
+            state.checks[check.id] = check
+            state.set_patch(replace(patch, status=status, updated_at=check.created_at))
+            state.set_run(replace(state.run, status=run_status, error=None, updated_at=check.created_at))
+            changes = (
+                ("check.created", "check", check.id, {"patch_id": patch.id, "result": check.result.value}),
+                ("patch.status_changed", "patch", patch.id, {"from": patch.status.value, "to": status.value}),
+                (
+                    "run.status_changed",
+                    "run",
+                    state.run.id,
+                    {"from": current.value, "to": run_status.value, "error": None},
+                ),
+            )
+            for event_type, entity_type, entity_id, payload in changes:
+                state.add_event(
+                    Event(
+                        run_id=state.run.id,
+                        event_type=event_type,
+                        entity_type=entity_type,
+                        entity_id=entity_id,
+                        payload=payload,
+                    )
+                )
+        return check
+
+    def list_checks(self, run_id: str, patch_id: str | None = None) -> list[Check]:
+        """The run's checks, oldest first, or only those of one patch."""
+        state = self._load_if_present(run_id)
         if state is None:
             return []
-        selected = [item for item in state.verifications.values() if item.patch_id == patch_id]
+        selected = [item for item in state.checks.values() if patch_id is None or item.patch_id == patch_id]
         return sorted(selected, key=lambda item: (item.created_at, item.id))
 
     # Events
@@ -1016,6 +1059,19 @@ class RunStore:
             recorded = False
         if not recorded:
             raise StorageError(f"artifact is not recorded: {digest}")
+
+    def _require_patch_material(
+        self,
+        state: _RunState,
+        diff_digest: str,
+        facts_digest: str | None,
+        sources: Sequence[Mapping[str, Any]],
+    ) -> None:
+        for digest in (diff_digest, facts_digest):
+            if digest is not None:
+                self._require_artifact(digest)
+        for source in sources:
+            _require_attempt_in(state, source["attempt_id"])
 
     def _add_attempt(self, state: _RunState, attempt: Attempt) -> None:
         task = state.tasks[attempt.task_id]
@@ -1159,10 +1215,11 @@ def _patch_from(record: dict[str, Any]) -> Patch:
             **record,
             "status": PatchStatus(record["status"]),
             "edits": tuple(record["edits"]),
+            "sources": tuple(record["sources"]),
             "build_succeeded": bool(record["build_succeeded"]),
         }
     )
 
 
-def _verification_from(record: dict[str, Any]) -> Verification:
-    return Verification(**{**record, "result": VerificationResult(record["result"])})
+def _check_from(record: dict[str, Any]) -> Check:
+    return Check(**{**record, "result": CheckResult(record["result"]), "assignments": tuple(record["assignments"])})
