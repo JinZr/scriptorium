@@ -54,8 +54,7 @@ and gates are in [architecture](architecture.md).
 
 The overview has `run` (`id`, `status`, `commit_sha`), `task_counts`, `finding_count`, `patch_count`, `has_error`,
 `next_actions`, `report_parts` (one `run report --part` command per section), and, for a run with a brief,
-`review_brief`: its `digest`, `venue_family`, `venue`, `stage`, list counts, and whether `prior_reviews` and
-`severity_notes` are set. It leaves out the frozen configuration and attempt history, which the `run` and `tasks`
+`review_brief`: its `digest`, `venue_family`, `venue`, and `stage`. It leaves out the frozen configuration and attempt history, which the `run` and `tasks`
 report sections hold. `task list` gives the detail; the normal loop uses `run status`.
 
 ### Starting and listing runs
@@ -144,7 +143,7 @@ gives `input_digest` to submit with and `export_command`.
 | `manuscript.pdf` | The review PDF |
 | `task/prompt.md` | This attempt's prompt, with correction feedback after a retry |
 | `task/schema.json` | Review and check tasks: the output schema |
-| `task/brief.json` | Review and check tasks: the review brief, when the run has one |
+| `task/brief.md` | Review and check tasks: the frozen review brief file, when the run has one |
 | `task/example.json` | Review tasks: a complete output that passed this task's checks |
 | `task/plan.md` | Writing tasks: the approved plan |
 | `task/assignment.md` | Writing tasks: this task's assignment file |
@@ -462,7 +461,7 @@ gate.
 `decision_stats` counts findings by current decision (`confirmed`, `rejected`, `waived`, `pending`) in total and by
 role, category, severity, and role with severity, and lists the latest rejection and waiver reasons (first 200
 characters, newest first, at most 50). A finding decided twice counts once, under its latest decision. Rows are
-lists, sorted by name and from `blocker` to `suggestion`. Use it to calibrate the next brief's `severity_notes`; it
+lists, sorted by name and from `blocker` to `suggestion`. Use it to calibrate the next brief's severity notes; it
 is not a quality metric and does not affect the gate.
 
 ## Patches, the check, and application
@@ -504,7 +503,7 @@ scriptorium run report RUN_ID --format markdown > report.md
 
 | Part | Content |
 | --- | --- |
-| `run` | The run record: frozen configuration, error, and the full brief |
+| `run` | The run record: frozen configuration, error, and, for a briefed run, `review_brief` with `venue_family`, `venue`, `stage`, and the brief's `text` |
 | `tasks` | Each task with its attempts; a writing task also names its `assignment_id` |
 | `finding_ids`, `patch_ids` | IDs in order |
 | `findings` | Each finding with its decisions; status follows the latest decision |
@@ -518,7 +517,7 @@ scriptorium run report RUN_ID --format markdown > report.md
 | `review_claim_checks` | Each accepted substantive output's `submitted_findings` (in submitted order, which `finding_indices` refer to), `claim_checks`, `claim_inventory`, `verdict` |
 | `gate` | The release gate result |
 
-The Markdown report has the run header, tasks, reviewer limitations, claim checks (verdict first), validation
+The Markdown report has the run header (with the brief's venue family, venue, and stage for a briefed run), tasks, reviewer limitations, claim checks (verdict first), validation
 failures, findings by group, findings, decision statistics, plans, patches, and open gate conditions. Reports validate
 stored outputs again, so a corrupt artifact fails the report. When `has_error` is true, read `run`,
 `validation_reports`, and `gate`.

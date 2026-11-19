@@ -34,7 +34,7 @@ the run (`check.session_unconfirmed`). The claim returns the attempt ID and the 
 
 - `task/prompt.md`: your frozen instructions; follow the role's method in it (claim tracing, counterchecks,
   recomputation, verdict rules). `task/schema.json`: the output schema. `task/example.json` (review tasks only): a
-  checked placeholder output; copy its shape, not its content. `task/brief.json`: the author's brief, if any.
+  checked placeholder output; copy its shape, not its content. `task/brief.md`: the author's brief, if any.
 - `sources/`: every frozen source at its `read_path`; `source-map.json` maps each `source_path` to its `read_path`,
   `source_digest`, and `line_count`, and lists the PDF's documents and pages.
 - `navigation.json`: an index of headings, labels, references, citations, captions, figure paths, tables, figures,

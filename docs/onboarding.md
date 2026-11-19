@@ -74,8 +74,9 @@ scriptorium --json doctor --revision HEAD --profile quick
 ## 第五步：第一次审稿
 
 先用 `quick` profile，任务少、花费低。想让审稿有针对性时，先在模型客户端里按操作者 skill 和你商定一份审稿
-brief，保存为 `brief.json`，在下面的 `run start` 后加 `--brief brief.json`（格式见
-[configuration](configuration.md#review-brief)）。运行开始后 brief 不能再改。
+brief，保存为 Markdown 文件 `brief.md`：开头几行 front matter 写目标会议或期刊的类型和稿件阶段，正文自由书写。
+在下面的 `run start` 后加 `--brief brief.md`（格式见 [configuration](configuration.md#review-brief)）。
+运行开始后 brief 不能再改。
 
 ```bash
 scriptorium --json run start --revision HEAD --profile quick

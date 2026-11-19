@@ -14,7 +14,7 @@ the same client and session. Sessions that only reviewed or checked earlier may 
 - `sources/`, `source-map.json`, `navigation.json`, and `manuscript.pdf` are the patched manuscript, compiled.
 - `task/prompt.md` holds the approved plan, each assignment (instructions, targets, finding IDs, the writer's note,
   and the writing attempt the patch carries), the confirmed findings, the diff, and the fact-change list.
-- `task/schema.json` is the output schema; `task/brief.json` is the author's brief, if any. There is no example.
+- `task/schema.json` is the output schema; `task/brief.md` is the author's brief, if any. There is no example.
 
 The fact-change list compares the navigation index before and after the patch. It is a reading aid, not evidence:
 an empty list does not show that no fact changed, and nothing is gated on it.

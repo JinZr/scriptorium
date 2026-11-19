@@ -15,9 +15,10 @@ contract, and the gates. Commands and output rules are in [operations](operation
 | `artifacts.py` | Atomic, SHA-256-addressed artifact publication |
 | `manuscript.py` | Git snapshots, LaTeX dependency scanning and builds, bundles, navigation, source anchors, exact edits, patch application |
 | `plan.py` | Reading and validating the plan directory; turning a writer's returned passages into exact edits |
+| `brief.py` | Reading and validating the review brief file and rendering its prompt section |
 | `fact_changes.py` | The fact-change list: comparing two navigation indexes and two document indexes |
 | `domain.py` | Entities, enums, invariants, and state transitions |
-| `schemas.py`, `prompts/` | Output schemas, the evidence contract, the severity rubric, the brief model, and role prompts |
+| `schemas.py`, `prompts/` | Output schemas, the evidence contract, the severity rubric, and role prompts |
 | `config.py` | `scriptorium.toml` loading and `init` |
 | `finding_groups.py`, `decision_stats.py`, `tool_output.py`, `examples.py` | Report grouping, decision counts, compact CLI views, task example outputs |
 
@@ -93,15 +94,16 @@ The run freezes:
   findings, the diff, and the fact-change list. Slots are filled when a task is prepared;
 - the output schemas, which repeat the severity levels on `severity`;
 - the evidence contract;
-- the review brief, when one is given: validated against a strict model, published as an artifact, recorded by
-  digest on the run, and rendered deterministically before the severity rubric in every review prompt template.
-  Writing and check prompts do not include it.
+- the review brief, when one is given: the file's exact bytes, validated
+  ([format](configuration.md#review-brief)), published as a Markdown artifact, recorded by digest on the run, and
+  rendered deterministically before the severity rubric in every review prompt template. Writing and check prompts
+  do not include it.
 
 A run keeps the prompts it froze; a changed prompt applies only to new runs.
 
 Each task records its prompt, schema, and bundle digests and a content-addressed index of its bundle files. Its
 input digest is the digest of those three digests and, for a run with a brief, the brief's artifact digest, so
-brief fields that are not rendered are bound too. Every attempt binds its own prompt; a correction prompt after a
+the parts of the brief that are not rendered, such as `recorded_by`, are bound too. Every attempt binds its own prompt; a correction prompt after a
 rejected submission is a new prompt with a new input digest. A review task also freezes an example output, built
 from its schema and the first non-blank line of a text source (an entrypoint first) whose bundle and snapshot
 copies both match its digest, and kept only if it passes the task's output model and anchor checks. Its digest is

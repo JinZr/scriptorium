@@ -80,11 +80,11 @@ answer at the human gates. [Operations](docs/operations.md) has every command's 
    Fix whatever `doctor` reports, commit, and run it again until it succeeds
    ([configuration](docs/configuration.md#doctor)).
 
-2. Optionally agree a review brief with the author and save it as `brief.json`
-   ([format](docs/configuration.md#review-brief)). Then start the run and read its status:
+2. Optionally agree a review brief with the author and save it as `brief.md`, a Markdown file with a few
+   front-matter lines ([format](docs/configuration.md#review-brief)). Then start the run and read its status:
 
    ```bash
-   scriptorium --json run start --revision HEAD --profile full --brief brief.json
+   scriptorium --json run start --revision HEAD --profile full --brief brief.md
    scriptorium --json run status RUN_ID
    ```
 

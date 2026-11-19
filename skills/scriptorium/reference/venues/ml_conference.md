@@ -37,4 +37,4 @@ Typographical polish, notation preferences, reference formatting, figure styling
 
 ## Defaults
 
-If the author says "defaults": `venue_family` `ml_conference`, the venue named by the template if any, stage `presubmission`, and every list empty.
+If the author says "defaults": `venue_family: ml_conference`, the venue named by the template if any, `stage: presubmission`, and an empty body.
