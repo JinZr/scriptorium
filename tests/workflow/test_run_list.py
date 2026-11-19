@@ -1,5 +1,6 @@
 import asyncio
 import json
+import uuid
 
 import pytest
 
@@ -13,8 +14,11 @@ _BRIEF = {"venue_family": "ml_conference", "venue": "NeurIPS 2026", "stage": "pr
 
 
 def _start(service, brief=None):
-    text = None if brief is None else json.dumps(brief)
-    return asyncio.run(service.start_run("HEAD", "quick", allow_duplicate=True, brief=text))["run"]
+    path = None
+    if brief is not None:
+        path = service.repo.parent / f"brief-{uuid.uuid4().hex[:8]}.md"
+        path.write_text("".join(["---\n", *(f"{key}: {value}\n" for key, value in brief.items()), "---\n"]))
+    return asyncio.run(service.start_run("HEAD", "quick", allow_duplicate=True, brief=path))["run"]
 
 
 def test_run_list_reports_rows_with_brief_fields_and_truncation(tmp_path) -> None:

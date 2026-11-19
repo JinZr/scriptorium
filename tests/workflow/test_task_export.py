@@ -1,4 +1,5 @@
 import asyncio
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -78,16 +79,19 @@ def test_export_writes_the_bundle_and_task_inputs_and_records_them(exporting):
     assert event.payload["bundle_digest"] == attempt.bundle_digest
 
 
-def test_a_briefed_run_exports_its_brief(tmp_path):
+def test_a_briefed_run_exports_the_frozen_brief_bytes(tmp_path):
     repo = make_repository(tmp_path, roles=("copyedit",))
-    brief = json.dumps({"venue_family": "other", "stage": "internal_draft"})
+    brief = tmp_path / "brief.md"
+    brief.write_bytes(b"---\r\nvenue_family: other\r\nstage: internal_draft\r\n---\r\nCheck the result.\r\n")
     with ScriptoriumService(repo, manuscript_manager=PdfBuildingManuscriptManager(repo)) as service:
         run = asyncio.run(service.start_run("HEAD", "quick", brief=brief))["run"]
         context = claim(service, run.id, "copyedit")
         response = service.export_task(context["attempt"].id, tmp_path / "out")
-        frozen = service.artifacts.get_bytes(run.brief_digest)
-    assert {"path": "task/brief.json", "digest": run.brief_digest} in response["task_inputs"]
-    assert (tmp_path / "out/task/brief.json").read_bytes() == frozen
+        record = service.artifacts.read_record(run.brief_digest)
+    assert {"path": "task/brief.md", "digest": run.brief_digest} in response["task_inputs"]
+    assert (tmp_path / "out/task/brief.md").read_bytes() == brief.read_bytes()
+    assert run.brief_digest == hashlib.sha256(brief.read_bytes()).hexdigest()
+    assert record.media_type == "text/markdown; charset=utf-8"
 
 
 def test_a_retried_attempt_exports_its_own_prompt_with_the_correction(exporting, tmp_path):

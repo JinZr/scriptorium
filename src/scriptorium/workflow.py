@@ -16,6 +16,7 @@ from typing import Any, Callable, Mapping
 from pydantic import ValidationError
 
 from .artifacts import ArtifactError, ArtifactNotFoundError, ArtifactStore
+from .brief import BRIEF_MEDIA_TYPE, ReviewBrief, parse_brief, render_brief
 from .config import ManuscriptConfig, ProjectConfig, load_project_config, validate_ready
 from .domain import (
     AgentRole,
@@ -67,7 +68,6 @@ from .schemas import (
     EvidenceAnchorContract,
     EvidenceAnchorMap,
     ExactEdit,
-    ReviewBrief,
     ReviewOutput,
     ScientificReviewOutput,
     SourceAnchorRecord,
@@ -78,12 +78,10 @@ from .schemas import (
     evidence_anchor_contract_content,
     evidence_anchor_contract_digest,
     output_schema,
-    render_review_brief,
 )
 from .storage import RunStore, StorageError
 
 VALIDATION_REPORT_MEDIA_TYPE = "application/vnd.scriptorium.validation-report+json"
-REVIEW_BRIEF_MEDIA_TYPE = "application/vnd.scriptorium.review-brief+json"
 _DIAGNOSTIC_TEXT_LIMIT = 2_000
 _DIAGNOSTIC_DIFF_LIMIT = 4_000
 _CORRECTION_PROJECTION_LIMIT = 64 * 1024
@@ -203,18 +201,19 @@ class Armarius:
     def _publish_brief(self, brief: ReviewBrief | None) -> str | None:
         if brief is None:
             return None
-        return self._record_text(canonical_json(brief.model_dump(mode="json")), REVIEW_BRIEF_MEDIA_TYPE).digest
+        return self._record_bytes(brief.data, BRIEF_MEDIA_TYPE).digest
 
-    def review_brief(self, run: Run) -> dict[str, Any] | None:
-        """Return the run's frozen brief text, digest and content, or None for a run started without one."""
+    def review_brief(self, run: Run) -> ReviewBrief | None:
+        """Return the run's frozen brief, or None for a run started without one."""
         if run.brief_digest is None:
             return None
         try:
-            text = self.artifacts.get_bytes(run.brief_digest).decode("utf-8")
-            content = ReviewBrief.model_validate_json(text).model_dump(mode="json")
-        except (ArtifactError, UnicodeDecodeError, ValidationError) as exc:
+            brief, _ = parse_brief(self.artifacts.get_bytes(run.brief_digest))
+        except ArtifactError as exc:
             raise InfrastructureError(f"run {run.id} has a missing or corrupt review brief") from exc
-        return {"digest": run.brief_digest, "text": text, "content": content}
+        if brief is None:
+            raise InfrastructureError(f"run {run.id} has a missing or corrupt review brief")
+        return brief
 
     def detected_template(self, run: Run) -> dict[str, str | None]:
         return self.manuscript.detect_template(self._run_dir(run.id) / "snapshot", self._manuscript_config(run))
@@ -2030,7 +2029,7 @@ class Armarius:
         brief: ReviewBrief | None = None,
     ) -> dict[str, Any]:
         anchor_contract = DEFAULT_EVIDENCE_ANCHOR_CONTRACT
-        brief_section = None if brief is None else render_review_brief(brief)
+        brief_section = None if brief is None else render_brief(brief)
         anchor_content = evidence_anchor_contract_content(anchor_contract)
         anchor_digest = evidence_anchor_contract_digest(anchor_contract)
         roles = (

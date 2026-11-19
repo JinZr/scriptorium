@@ -39,18 +39,7 @@ def report_command(run_id, part):
 
 
 def brief_summary(brief):
-    content = brief["content"]
-    return {
-        "digest": brief["digest"],
-        "venue_family": content["venue_family"],
-        "venue": content["venue"],
-        "stage": content["stage"],
-        "priority_claims": len(content["priority_claims"]),
-        "known_weaknesses": len(content["known_weaknesses"]),
-        "ignore": len(content["ignore"]),
-        "has_prior_reviews": content["prior_reviews"] is not None,
-        "has_severity_notes": content["severity_notes"] is not None,
-    }
+    return {"digest": brief.digest, **brief.fields()}
 
 
 def run_overview(view, next_actions=None):
@@ -86,7 +75,7 @@ def run_list(total, rows, limit):
             "task_counts": task_counts,
         }
         if brief is not None:
-            entry.update({key: brief[key] for key in ("venue_family", "venue", "stage")})
+            entry.update(brief)
         entries.append(entry)
     return {
         "total": total,
