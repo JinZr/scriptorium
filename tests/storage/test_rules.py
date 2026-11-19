@@ -17,7 +17,7 @@ from scriptorium.domain import (
 )
 from scriptorium.storage import ConflictError, NotFoundError, RunStore, StorageError
 
-from ._factories import create_completed_attempt, make_run
+from ._factories import approve_plan, create_completed_attempt, make_run
 
 
 def _finding(run, task, attempt, fingerprint: str) -> Finding:
@@ -57,6 +57,22 @@ def test_one_task_per_run_stage_role_and_input_digest(tmp_path) -> None:
         store.create_task(Task(run_id=other.id, stage="review", role=AgentRole.COPYEDIT, input_digest="d"))
         assert store.find_task(run.id, "review", AgentRole.COPYEDIT, "d") == task
         assert len(store.list_tasks(run.id)) == 2
+
+
+def test_a_cancelled_task_gives_way_to_a_task_with_the_same_inputs(tmp_path) -> None:
+    with RunStore(tmp_path) as store:
+        run = store.create_run(make_run())
+        cancelled = store.create_task(Task(run_id=run.id, stage="writing", role=AgentRole.WRITING, input_digest="d"))
+        store.update_task_status(cancelled.id, TaskStatus.CANCELLED)
+        assert store.find_task(run.id, "writing", AgentRole.WRITING, "d") is None
+
+        replacement = store.create_task(Task(run_id=run.id, stage="writing", role=AgentRole.WRITING, input_digest="d"))
+        assert store.find_task(run.id, "writing", AgentRole.WRITING, "d") == replacement
+        assert store.get_task(cancelled.id).status == TaskStatus.CANCELLED
+        with pytest.raises(ConflictError, match="stage, role, and input digest"):
+            store.create_task(Task(run_id=run.id, stage="writing", role=AgentRole.WRITING, input_digest="d"))
+    with RunStore(tmp_path) as reopened:
+        assert reopened.find_task(run.id, "writing", AgentRole.WRITING, "d") == replacement
 
 
 def test_one_attempt_per_task_ordinal_and_an_attempt_names_its_task(tmp_path) -> None:
@@ -119,19 +135,19 @@ def test_one_finding_per_run_fingerprint_and_its_references_resolve(tmp_path) ->
 def test_one_patch_per_run_base_and_diff_and_its_references_resolve(tmp_path) -> None:
     with RunStore(tmp_path) as store:
         run = store.create_run(make_run())
-        _, attempt = create_completed_attempt(store, run)
+        plan = approve_plan(store, run)
         diff = _diff(store, "1" * 64)
 
-        def patch(digest: str, attempt_id: str = attempt.id) -> Patch:
-            return Patch(run.id, run.commit_sha, digest, "Fix.", (), attempt_id=attempt_id)
+        def patch(digest: str, plan_id: str = plan.id) -> Patch:
+            return Patch(run.id, run.commit_sha, digest, "Fix.", (), plan_id=plan_id)
 
         first = store.create_patch(patch(diff.digest))
         with pytest.raises(ConflictError, match="base commit, and diff digest"):
             store.create_patch(patch(diff.digest))
         with pytest.raises(StorageError, match="artifact is not recorded"):
             store.create_patch(patch("2" * 64))
-        with pytest.raises(StorageError, match="attempt is not recorded"):
-            store.create_patch(patch(_diff(store, "3" * 64).digest, "attempt_missing"))
+        with pytest.raises(StorageError, match="plan is not recorded"):
+            store.create_patch(patch(_diff(store, "3" * 64).digest, "plan_missing"))
         assert [item.id for item in store.list_patches(run.id)] == [first.id]
 
 

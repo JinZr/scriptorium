@@ -42,18 +42,21 @@ from .domain import (
 from .errors import ConfigurationError, DuplicateRunError, InfrastructureError, NotFoundError, StateError
 from .finding_groups import finding_groups, markdown_lines as markdown_finding_groups
 from .manuscript import ManuscriptManager, export_files, export_root, page_text, render_page_view
+from .plan import passage_file
 from .schemas import (
     SCHEMA_MODELS,
     UNIVERSAL_LINE_TERMINATORS,
+    WRITING_NOTE_LIMIT,
     EvidenceAnchorContract,
     ReviewBrief,
     ScientificReviewOutput,
 )
 from .storage import ConflictError, NotFoundError as StorageNotFoundError, RunStore, StorageError
 from .tool_output import REPORT_PARTS, run_list, run_overview, task_view
-from .workflow import Armarius, task_input_digest
+from .workflow import STAGE_STATUS, Armarius, task_input_digest
 
 RUN_LIST_MAX_LIMIT = 100
+SUBMISSION_LIMIT_BYTES = 2_000_000
 
 
 class _RunBusyError(StateError):
@@ -417,46 +420,25 @@ class ScriptoriumService:
 
     def list_tasks(self, run_id: str) -> dict[str, Any]:
         view = self.get_run(run_id)
-        next_actions = []
-        active_stage = {
-            RunStatus.REVIEWING: "review",
-            RunStatus.REVISING: "revision",
-            RunStatus.VERIFYING: "verification",
-        }.get(view["run"].status)
-        for item in view["tasks"]:
-            task = item["task"]
-            if task.stage != active_stage:
-                continue
-            if task.status == TaskStatus.PENDING:
-                next_actions.append({"command": "task claim", "task_id": task.id})
-            elif task.status == TaskStatus.RUNNING:
-                next_actions.append({"command": "task show", "attempt_id": item["attempts"][-1].id})
-            elif task.status in {TaskStatus.FAILED, TaskStatus.INTERRUPTED}:
-                next_actions.append({"command": "run retry", "run_id": run_id, "task_id": task.id})
-        if (
-            view["run"].status
-            in {
-                RunStatus.PREPARING,
-                RunStatus.REVIEWING,
-                RunStatus.REVISING,
-                RunStatus.VERIFYING,
-            }
-            and not next_actions
-        ):
+        status = view["run"].status
+        next_actions = self._task_actions(view)
+        if status in {RunStatus.PREPARING, *STAGE_STATUS.values()} and not next_actions:
             next_actions.append({"command": "run resume", "run_id": run_id})
-        elif view["run"].status == RunStatus.AWAITING_DECISION and not next_actions:
+        elif status == RunStatus.AWAITING_DECISION and not next_actions:
             findings = self._storage(self.store.list_findings, run_id)
             if any(item.status == FindingStatus.PENDING for item in findings):
                 next_actions.append({"command": "finding list", "run_id": run_id, "requires_human_decision": True})
             else:
                 next_actions.append({"command": "run resume", "run_id": run_id})
-        elif view["run"].status == RunStatus.AWAITING_PATCH_APPROVAL:
+        elif status == RunStatus.PLANNING:
+            next_actions.extend(self._planning_actions(run_id, view))
+        elif status == RunStatus.AWAITING_PATCH_APPROVAL:
             patch = self._storage(self.store.get_patch, view["patch_ids"][-1])
             if patch.status == PatchStatus.PROPOSED:
                 next_actions.append({"command": "patch show", "patch_id": patch.id, "requires_human_decision": True})
             else:
                 next_actions.append({"command": "run resume", "run_id": run_id})
-        elif view["run"].status == RunStatus.READY_TO_APPLY:
+        elif status == RunStatus.READY_TO_APPLY:
             next_actions.append(
                 {
                     "command": "patch apply",
@@ -464,19 +446,60 @@ class ScriptoriumService:
                     "requires_human_decision": True,
                 }
             )
-        elif view["run"].status == RunStatus.FAILED:
-            try:
-                self.armarius._status_before_failure(run_id)
-            except StateError:
-                pass
-            else:
-                next_actions.append({"command": "run resume", "run_id": run_id})
+        elif status == RunStatus.FAILED and self._resumable(run_id):
+            next_actions.append({"command": "run resume", "run_id": run_id})
         return {
             "run_id": run_id,
-            "run_status": view["run"].status,
+            "run_status": status,
             "tasks": view["tasks"],
             "next_actions": next_actions,
         }
+
+    def _task_actions(self, view: dict[str, Any]) -> list[dict[str, Any]]:
+        active_stage = next((stage for stage, status in STAGE_STATUS.items() if status == view["run"].status), None)
+        actions = []
+        for item in view["tasks"]:
+            task = item["task"]
+            if task.stage != active_stage:
+                continue
+            if task.stage == "writing" and not self.armarius._task_context_is_current(view["run"], task):
+                continue  # An earlier plan's task; only the latest plan's assignments are worked.
+            if task.status == TaskStatus.PENDING:
+                actions.append({"command": "task claim", "task_id": task.id})
+            elif task.status == TaskStatus.RUNNING:
+                actions.append({"command": "task show", "attempt_id": item["attempts"][-1].id})
+            elif task.status in {TaskStatus.FAILED, TaskStatus.INTERRUPTED}:
+                actions.append({"command": "run retry", "run_id": view["run"].id, "task_id": task.id})
+        return actions
+
+    def _planning_actions(self, run_id: str, view: dict[str, Any]) -> list[dict[str, Any]]:
+        if not self._storage(self.store.list_findings, run_id, [FindingStatus.CONFIRMED]):
+            return [{"command": "run resume", "run_id": run_id}]
+        actions = []
+        if view["patch_ids"]:
+            patch = self._storage(self.store.get_patch, view["patch_ids"][-1])
+            if patch.status == PatchStatus.REJECTED:
+                # The rejection reason is in the patch's decisions; the lead changes the plan with the author.
+                actions.append({"command": "patch show", "patch_id": patch.id})
+        actions.append({"command": "plan approve", "run_id": run_id, "requires_human_decision": True})
+        return actions
+
+    def _resumable(self, run_id: str) -> bool:
+        try:
+            self.armarius._status_before_failure(run_id)
+        except StateError:
+            return False
+        return True
+
+    def check_plan(self, run_id: str, directory: str | Path) -> dict[str, Any]:
+        run = self._storage(self.store.get_run, run_id)
+        return self._storage(self.armarius.check_plan, run.id, directory)
+
+    async def approve_plan(self, run_id: str, directory: str | Path, reason: str) -> dict[str, Any]:
+        run = self._storage(self.store.get_run, run_id)
+        with self._run_operation(run.id, "plan approve"):
+            await self.armarius.approve_plan(run.id, directory, reason)
+            return self.get_run(run.id)
 
     def claim_task(
         self, task_id: str, client: str, model: str, effort: str, session_id: str, session_source: str
@@ -525,8 +548,28 @@ class ScriptoriumService:
     def task_view(context: dict[str, Any]) -> dict[str, Any]:
         return task_view(context)
 
+    def pack_writing_output(self, attempt_id: str, directory: str | Path) -> str:
+        """Pack a writing attempt's export directory into its stored output: the passage files and task/note.md."""
+        attempt = self._storage(self.store.get_attempt, attempt_id)
+        task = self._storage(self.store.get_task, attempt.task_id)
+        if task.stage != "writing":
+            raise ConfigurationError("--dir is accepted only for writing attempts; submit this output with --file")
+        _, assignment = self.armarius.task_assignment(task)
+        root = Path(directory)
+        passages = []
+        for index, target in enumerate(assignment["targets"], start=1):
+            name = f"{TASK_INPUT_DIRECTORY}/passages/{passage_file(index, target['path'])}"
+            passages.append({"index": index, "text": _submitted_text(root, name)})
+        note = None
+        note_name = f"{TASK_INPUT_DIRECTORY}/note.md"
+        if os.path.lexists(root / note_name):
+            note = _submitted_text(root, note_name)
+            if len(note) > WRITING_NOTE_LIMIT:
+                raise ConfigurationError(f"{note_name} exceeds {WRITING_NOTE_LIMIT} characters")
+        return canonical_json({"passages": passages, "note": note if note and note.strip() else None})
+
     async def submit_task(self, attempt_id: str, input_digest: str, output_text: str) -> dict[str, Any]:
-        if len(output_text.encode("utf-8")) > 2_000_000:
+        if len(output_text.encode("utf-8")) > SUBMISSION_LIMIT_BYTES:
             raise ConfigurationError("submission exceeds the 2 MB limit")
         attempt = self._storage(self.store.get_attempt, attempt_id)
         task = self._storage(self.store.get_task, attempt.task_id)
@@ -550,7 +593,7 @@ class ScriptoriumService:
             }
 
     def check_submission(self, attempt_id: str, input_digest: str, output_text: str) -> dict[str, Any]:
-        if len(output_text.encode("utf-8")) > 2_000_000:
+        if len(output_text.encode("utf-8")) > SUBMISSION_LIMIT_BYTES:
             raise ConfigurationError("submission exceeds the 2 MB limit")
         with self._retrieval_operation(attempt_id, "task submit --check"):
             attempt = self._storage(self.store.get_attempt, attempt_id)
@@ -709,7 +752,7 @@ class ScriptoriumService:
         collisions = [name for name in names if name.split("/")[0] == TASK_INPUT_DIRECTORY]
         if collisions:
             raise StateError(f"frozen bundle path collides with the exported task inputs: {collisions[0]}")
-        inputs = self._task_inputs(run, attempt, metadata)
+        inputs = self._task_inputs(run, attempt, task, metadata)
         listing = sorted(
             [
                 *({"path": name, "digest": files[name]["digest"]} for name in names),
@@ -725,7 +768,9 @@ class ScriptoriumService:
             payload = {"directory": str(root), "bundle_digest": attempt.bundle_digest, "files": listing}
             self._record_access(task.run_id, attempt.id, "export", payload)
 
-        export_files(root, [item["path"] for item in listing], read, record)
+        # A writer rewrites its passage files in place; every other exported file is read-only.
+        writable = frozenset(name for name in inputs if name.startswith(f"{TASK_INPUT_DIRECTORY}/passages/"))
+        export_files(root, [item["path"] for item in listing], read, record, writable)
         return {
             "attempt_id": attempt.id,
             "directory": str(root),
@@ -735,7 +780,7 @@ class ScriptoriumService:
             "task_inputs": [{"path": name, "digest": digest} for name, (_, digest) in inputs.items()],
         }
 
-    def _task_inputs(self, run: Run, attempt: Attempt, metadata: dict[str, Any]) -> dict[str, tuple[bytes, str]]:
+    def _task_inputs(self, run: Run, attempt: Attempt, task, metadata: dict[str, Any]) -> dict[str, tuple[bytes, str]]:
         """Return this attempt's frozen task inputs by export path, each checked against its recorded digest."""
         schema = self.armarius._load_schema_artifact(run, metadata["schema_kind"], attempt.schema_digest)
         inputs = {
@@ -743,17 +788,43 @@ class ScriptoriumService:
                 self.armarius._load_prompt_artifact(attempt.prompt_digest).encode("utf-8"),
                 attempt.prompt_digest,
             ),
-            f"{TASK_INPUT_DIRECTORY}/schema.json": (canonical_json(schema).encode("utf-8"), attempt.schema_digest),
         }
-        brief = self.armarius.review_brief(run)
-        if brief is not None:
-            inputs[f"{TASK_INPUT_DIRECTORY}/brief.json"] = (brief["text"].encode("utf-8"), brief["digest"])
-        example = self.armarius.frozen_output_example(metadata)
-        if example is not None:
-            inputs[f"{TASK_INPUT_DIRECTORY}/example.json"] = (example.encode("utf-8"), metadata["example_digest"])
+        if task.stage == "writing":
+            inputs.update(self._writing_inputs(run, task))
+        else:
+            inputs[f"{TASK_INPUT_DIRECTORY}/schema.json"] = (
+                canonical_json(schema).encode("utf-8"),
+                attempt.schema_digest,
+            )
+            brief = self.armarius.review_brief(run)
+            if brief is not None:
+                inputs[f"{TASK_INPUT_DIRECTORY}/brief.json"] = (brief["text"].encode("utf-8"), brief["digest"])
+            example = self.armarius.frozen_output_example(metadata)
+            if example is not None:
+                inputs[f"{TASK_INPUT_DIRECTORY}/example.json"] = (example.encode("utf-8"), metadata["example_digest"])
         for name, (data, digest) in inputs.items():
             if ArtifactStore.digest_bytes(data) != digest:
                 raise InfrastructureError(f"frozen task input does not match its recorded digest: {name}")
+        return inputs
+
+    def _writing_inputs(self, run: Run, task) -> dict[str, tuple[bytes, str]]:
+        """The approved plan, the assignment, and one passage file per target with its exact frozen bytes."""
+        plan_text_digest, assignment = self.armarius.task_assignment(task)
+        inputs = {
+            f"{TASK_INPUT_DIRECTORY}/plan.md": (self.armarius.plan_material(plan_text_digest), plan_text_digest),
+            f"{TASK_INPUT_DIRECTORY}/assignment.md": (
+                self.armarius.plan_material(assignment["artifact_digest"]),
+                assignment["artifact_digest"],
+            ),
+        }
+        # The passages come from snapshot sources checked against their frozen source digests.
+        passages = self.armarius.writing_passages(run, assignment)
+        for index, (target, text) in enumerate(zip(assignment["targets"], passages), start=1):
+            data = text.encode("utf-8")
+            inputs[f"{TASK_INPUT_DIRECTORY}/passages/{passage_file(index, target['path'])}"] = (
+                data,
+                ArtifactStore.digest_bytes(data),
+            )
         return inputs
 
     @staticmethod
@@ -911,13 +982,10 @@ class ScriptoriumService:
         validation_reports = []
         review_limitations = []
         review_claim_checks = []
+        self._name_assignments(run_view["tasks"])
         for item in run_view["tasks"]:
             task = item["task"]
-            schema_kind = {
-                "review": "review",
-                "revision": "revision",
-                "verification": "verification",
-            }.get(task.stage)
+            schema_kind = task.stage if task.stage in {"writing", "verification"} else None
             if task.stage == "review":
                 metadata = self._storage(self.store.get_external_task, task.id)
                 schema_kind = metadata["schema_kind"]
@@ -989,6 +1057,10 @@ class ScriptoriumService:
                 self.armarius._navigation_for_run(run_view["run"]),
             ),
             "decision_stats": decision_stats((item["finding"], item["decisions"]) for item in finding_records),
+            "plans": [
+                {"plan": plan, "decisions": self._storage(self.store.list_decisions, "plan", plan.id)}
+                for plan in self._storage(self.store.list_plans, run_id)
+            ],
             "patches": [
                 {
                     "patch": patch,
@@ -1006,6 +1078,13 @@ class ScriptoriumService:
         if format == "json":
             return _plain(payload)
         return self._markdown_report(payload)
+
+    def _name_assignments(self, tasks: list[dict[str, Any]]) -> None:
+        """Name the assignment of each writing task in the report; one task can serve several plans."""
+        for item in tasks:
+            if item["task"].stage == "writing":
+                metadata = self._storage(self.store.get_external_task, item["task"].id)
+                item["assignment_id"] = metadata["assignment_id"]
 
     def _report_run(self, run: Run) -> Run | dict[str, Any]:
         brief = self.armarius.review_brief(run)
@@ -1331,6 +1410,26 @@ class ScriptoriumService:
         return lines
 
     @staticmethod
+    def _markdown_plans(items: list[dict[str, Any]]) -> list[str]:
+        lines = ["", "## Plans", ""]
+        if not items:
+            return [*lines, "- None"]
+        for item in items:
+            plan = item["plan"]
+            approvals = "; ".join(
+                ScriptoriumService._markdown_text(decision["reason"]) for decision in item["decisions"]
+            )
+            lines.append(f"- `{plan['id']}` — digest `{plan['digest']}`; approved: {approvals}")
+            for assignment in plan["assignments"]:
+                targets = ", ".join(
+                    f"`{target['path']}:{target['start_line']}-{target['end_line']}`"
+                    for target in assignment["targets"]
+                )
+                findings = ", ".join(f"`{finding_id}`" for finding_id in assignment["finding_ids"]) or "none"
+                lines.append(f"  - `{assignment['id']}`: {targets}; findings: {findings}")
+        return lines
+
+    @staticmethod
     def _markdown_brief(brief: dict[str, Any] | None) -> list[str]:
         if brief is None:
             return []
@@ -1359,9 +1458,10 @@ class ScriptoriumService:
         ]
         for item in plain["tasks"]:
             task = item["task"]
+            assignment = f"assignment `{item['assignment_id']}`, " if "assignment_id" in item else ""
             lines.append(
                 f"- `{task['id']}` — {task['stage']} / {task['role']} / {task['status']} "
-                f"({len(item['attempts'])} attempts)"
+                f"({assignment}{len(item['attempts'])} attempts)"
             )
         lines.extend(["", "## Reviewer limitations", ""])
         if plain["review_limitations"]:
@@ -1386,11 +1486,15 @@ class ScriptoriumService:
         lines.extend(markdown_finding_groups(plain["findings_grouped"]))
         lines.extend(ScriptoriumService._markdown_findings(plain["findings"]))
         lines.extend(markdown_decision_stats(plain["decision_stats"]))
+        lines.extend(ScriptoriumService._markdown_plans(plain["plans"]))
         lines.extend(["", "## Patches", ""])
         if plain["patches"]:
+            text = ScriptoriumService._markdown_text
             for item in plain["patches"]:
                 patch = item["patch"]
-                lines.append(f"- `{patch['id']}` — {patch['status']}: {patch['summary']}")
+                lines.append(
+                    f"- `{patch['id']}` — {patch['status']} (plan `{patch['plan_id']}`): {text(patch['summary'])}"
+                )
         else:
             lines.append("- None")
         if plain["gate"]["reasons"]:
@@ -1406,6 +1510,25 @@ PAGE_TEXT_NOTE = (
     "The PDF text layer is a reading aid and never evidence: extraction can reorder or drop text. "
     "Quote manuscript text from the frozen sources and cite pages of manuscript.pdf."
 )
+
+
+def _submitted_text(root: Path, name: str) -> str:
+    """Read one file a writer returns: a regular UTF-8 file inside the export directory."""
+    path = root / name
+    try:
+        metadata = path.lstat()
+    except OSError as exc:
+        raise ConfigurationError(f"{name} is missing from {root}") from exc
+    if not stat.S_ISREG(metadata.st_mode):
+        raise ConfigurationError(f"{name} is not a regular file")
+    with path.open("rb") as handle:
+        data = handle.read(SUBMISSION_LIMIT_BYTES + 1)
+    if len(data) > SUBMISSION_LIMIT_BYTES:
+        raise ConfigurationError("submission exceeds the 2 MB limit")
+    try:
+        return data.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise ConfigurationError(f"{name} is not UTF-8") from exc
 
 
 def _validate_page_view(scale, crop, text: bool) -> None:

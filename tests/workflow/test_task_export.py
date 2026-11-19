@@ -2,6 +2,7 @@ import asyncio
 import json
 import os
 from pathlib import Path
+import subprocess
 
 import pytest
 
@@ -12,8 +13,10 @@ from scriptorium.service import ScriptoriumService
 
 from ._support import (
     PdfBuildingManuscriptManager,
+    approve_plan,
     claim,
     complete_reviews,
+    export_writing,
     make_repository,
     prepare_verification,
     submit,
@@ -211,22 +214,39 @@ def test_a_used_destination_is_refused_without_recording(exporting):
     assert [path.name for path in out.iterdir()] == ["mine.txt"] and _exports(service, run) == []
 
 
-def test_a_revision_attempt_exports_its_own_task_inputs(tmp_path):
+def test_a_writing_attempt_exports_its_plan_assignment_and_writable_passages(tmp_path):
     repo = make_repository(tmp_path)
+    (repo / "main.tex").write_bytes(
+        b"\\documentclass{article}\r\n\\begin{document}\r\nThe result is teh clear.\r\nEnd."
+    )
+    subprocess.run(["git", "-C", str(repo), "commit", "-qam", "CRLF lines"], check=True)
     with ScriptoriumService(repo, manuscript_manager=PdfBuildingManuscriptManager(repo)) as service:
         run = asyncio.run(service.start_run("HEAD", "quick"))["run"]
         complete_reviews(service, run.id)
-        service.decide_finding(service.list_findings(run.id)[0].id, "confirm", "Correct it.")
+        finding_id = service.list_findings(run.id)[0].id
+        service.decide_finding(finding_id, "confirm", "Correct it.")
         asyncio.run(service.resume_run(run.id))
-        revision = claim(service, run.id, AgentRole.REVISION, session="revision-session")
-        response = service.export_task(revision["attempt"].id, tmp_path / "revision-out")
-        assert _files(tmp_path / "revision-out") == BUNDLE | {"task/prompt.md", "task/schema.json"}
-        assert [item["digest"] for item in response["task_inputs"]] == [
-            revision["attempt"].prompt_digest,
-            revision["attempt"].schema_digest,
-        ]
-        assert "Confirmed findings" in (tmp_path / "revision-out/task/prompt.md").read_text(encoding="utf-8")
-        assert len(_exports(service, run)) == 1
+        approve_plan(
+            service,
+            run.id,
+            {"result": (["main.tex:3-3", "main.tex:4-4"], [finding_id], "Correct the typo.")},
+            plan_text="# Story\n\nThe result is clear.\n",
+        )
+        writing, out = export_writing(service, run.id)
+        passages = {"task/passages/1.tex", "task/passages/2.tex"}
+        assert _files(out) == BUNDLE | {"task/prompt.md", "task/plan.md", "task/assignment.md"} | passages
+        # The passage holds the exact frozen bytes, its CRLF included; the last line of the file has none.
+        assert (out / "task/passages/1.tex").read_bytes() == b"The result is teh clear.\r\n"
+        assert (out / "task/passages/2.tex").read_bytes() == b"End."
+        assert (out / "task/plan.md").read_text(encoding="utf-8") == "# Story\n\nThe result is clear.\n"
+        assert "Correct the typo." in (out / "task/assignment.md").read_text(encoding="utf-8")
+        modes = {name: (out / name).stat().st_mode & 0o777 for name in _files(out)}
+        assert {name for name, mode in modes.items() if mode == 0o644} == passages
+        assert all(mode == 0o444 for name, mode in modes.items() if name not in passages)
+        prompt = (out / "task/prompt.md").read_text(encoding="utf-8")
+        assert "The result is clear." in prompt and finding_id in prompt and "task/passages/1.tex" in prompt
+        recorded = _exports(service, run)[-1].payload["files"]
+        assert {item["path"] for item in recorded} == _files(out)
 
 
 def test_a_verification_attempt_exports_the_patched_bundle(tmp_path):

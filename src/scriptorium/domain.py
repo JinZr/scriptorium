@@ -29,7 +29,8 @@ class RunStatus(str, Enum):
     PREPARING = "preparing"
     REVIEWING = "reviewing"
     AWAITING_DECISION = "awaiting_decision"
-    REVISING = "revising"
+    PLANNING = "planning"
+    WRITING = "writing"
     AWAITING_PATCH_APPROVAL = "awaiting_patch_approval"
     VERIFYING = "verifying"
     READY_TO_APPLY = "ready_to_apply"
@@ -102,7 +103,7 @@ class AgentRole(str, Enum):
     COPYEDIT = "copyedit"
     CONSISTENCY = "consistency"
     FIGURE_REVIEW = "figure_review"
-    REVISION = "revision"
+    WRITING = "writing"
     VERIFICATION = "verification"
 
 
@@ -141,10 +142,10 @@ ROLE_CATALOG: Mapping[AgentRole, RoleSpec] = {
         display_name="Figure Reviewer",
         description="Figure, table, caption, and manuscript correspondence",
     ),
-    AgentRole.REVISION: RoleSpec(
-        key=AgentRole.REVISION,
+    AgentRole.WRITING: RoleSpec(
+        key=AgentRole.WRITING,
         display_name="Scribe",
-        description="Exact revisions for confirmed findings",
+        description="Rewrites the passages one assignment of an approved plan names",
     ),
     AgentRole.VERIFICATION: RoleSpec(
         key=AgentRole.VERIFICATION,
@@ -158,18 +159,20 @@ RUN_TRANSITIONS: Mapping[RunStatus, frozenset[RunStatus]] = {
     RunStatus.PREPARING: frozenset({RunStatus.REVIEWING, RunStatus.FAILED, RunStatus.CANCELLED}),
     RunStatus.REVIEWING: frozenset({RunStatus.AWAITING_DECISION, RunStatus.FAILED, RunStatus.CANCELLED}),
     RunStatus.AWAITING_DECISION: frozenset(
-        {RunStatus.REVIEWING, RunStatus.REVISING, RunStatus.COMPLETED, RunStatus.CANCELLED}
+        {RunStatus.REVIEWING, RunStatus.PLANNING, RunStatus.COMPLETED, RunStatus.CANCELLED}
     ),
-    RunStatus.REVISING: frozenset(
+    RunStatus.PLANNING: frozenset({RunStatus.WRITING, RunStatus.COMPLETED, RunStatus.CANCELLED}),
+    RunStatus.WRITING: frozenset(
         {
             RunStatus.AWAITING_PATCH_APPROVAL,
+            RunStatus.PLANNING,
             RunStatus.COMPLETED,
             RunStatus.FAILED,
             RunStatus.CANCELLED,
         }
     ),
     RunStatus.AWAITING_PATCH_APPROVAL: frozenset(
-        {RunStatus.REVISING, RunStatus.VERIFYING, RunStatus.COMPLETED, RunStatus.CANCELLED}
+        {RunStatus.PLANNING, RunStatus.VERIFYING, RunStatus.COMPLETED, RunStatus.CANCELLED}
     ),
     RunStatus.VERIFYING: frozenset(
         {
@@ -182,7 +185,7 @@ RUN_TRANSITIONS: Mapping[RunStatus, frozenset[RunStatus]] = {
     ),
     RunStatus.READY_TO_APPLY: frozenset({RunStatus.COMPLETED, RunStatus.FAILED, RunStatus.CANCELLED}),
     RunStatus.COMPLETED: frozenset(),
-    RunStatus.FAILED: frozenset({RunStatus.PREPARING, RunStatus.REVIEWING, RunStatus.REVISING, RunStatus.VERIFYING}),
+    RunStatus.FAILED: frozenset({RunStatus.PREPARING, RunStatus.REVIEWING, RunStatus.WRITING, RunStatus.VERIFYING}),
     RunStatus.CANCELLED: frozenset(),
 }
 
@@ -305,6 +308,22 @@ class Decision:
 
 
 @dataclass(frozen=True)
+class Plan:
+    """An author-approved plan: the plan text and one assignment per writing task, each bound by artifact digest.
+
+    Each assignment is ``{"id", "artifact_digest", "targets": [{"path", "start_line", "end_line"}], "finding_ids"}``.
+    A run's latest plan is its current one.
+    """
+
+    run_id: str
+    digest: str
+    plan_artifact_digest: str
+    assignments: tuple[Mapping[str, Any], ...]
+    id: str = field(default_factory=lambda: new_id("plan"))
+    created_at: str = field(default_factory=utc_now)
+
+
+@dataclass(frozen=True)
 class Patch:
     run_id: str
     base_commit: str
@@ -317,7 +336,8 @@ class Patch:
     created_at: str = field(default_factory=utc_now)
     updated_at: str = field(default_factory=utc_now)
     applied_at: str | None = None
-    attempt_id: str | None = None
+    # The plan whose accepted writing outputs this patch was built from.
+    plan_id: str | None = None
 
 
 @dataclass(frozen=True)

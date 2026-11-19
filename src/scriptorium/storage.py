@@ -24,6 +24,7 @@ from scriptorium.domain import (
     FindingStatus,
     Patch,
     PatchStatus,
+    Plan,
     Run,
     RunStatus,
     Task,
@@ -63,8 +64,13 @@ _EXTERNAL_TASK_KEYS = (
     "bundle_digest",
     "bundle_path",
     "schema_kind",
+    "plan_text_digest",
+    "assignment_id",
+    "assignment_digest",
     "example_digest",
 )
+# Every key but the task ID and the example digest is frozen task material and must never change.
+_FROZEN_EXTERNAL_TASK_KEYS = _EXTERNAL_TASK_KEYS[1:-1]
 _ORPHANED_ATTEMPT_ERROR = "process exited before attempt completion"
 
 
@@ -83,7 +89,18 @@ class ConflictError(StorageError):
 class _RunState:
     """One run's complete durable record, read from and replaced as a single state file."""
 
-    KEYS = ("run", "tasks", "external_tasks", "attempts", "findings", "decisions", "patches", "verifications", "events")
+    KEYS = (
+        "run",
+        "tasks",
+        "external_tasks",
+        "attempts",
+        "findings",
+        "decisions",
+        "plans",
+        "patches",
+        "verifications",
+        "events",
+    )
 
     def __init__(self, run: Run) -> None:
         self.run = run
@@ -92,6 +109,7 @@ class _RunState:
         self.attempts: dict[str, Attempt] = {}
         self.findings: dict[str, Finding] = {}
         self.decisions: list[Decision] = []
+        self.plans: dict[str, Plan] = {}
         self.patches: dict[str, Patch] = {}
         self.verifications: dict[str, Verification] = {}
         self.events: list[Event] = []
@@ -109,6 +127,7 @@ class _RunState:
             state.attempts = {item.id: item for item in map(_attempt_from, raw["attempts"])}
             state.findings = {item.id: item for item in map(_finding_from, raw["findings"])}
             state.decisions = [Decision(**item) for item in raw["decisions"]]
+            state.plans = {item.id: item for item in map(_plan_from, raw["plans"])}
             state.patches = {item.id: item for item in map(_patch_from, raw["patches"])}
             state.verifications = {item.id: item for item in map(_verification_from, raw["verifications"])}
             state.events = [Event(**item) for item in raw["events"]]
@@ -126,6 +145,7 @@ class _RunState:
             "attempts": [vars(item) for item in self.attempts.values()],
             "findings": [vars(item) for item in self.findings.values()],
             "decisions": [vars(item) for item in self.decisions],
+            "plans": [vars(item) for item in self.plans.values()],
             "patches": [vars(item) for item in self.patches.values()],
             "verifications": [vars(item) for item in self.verifications.values()],
             "events": [vars(item) for item in self.events],
@@ -223,6 +243,11 @@ class _RunState:
         self.set_patch(replace(patch, status=status, updated_at=decision.created_at))
         self.add_decision(decision)
         self.add_event(self._decision_event("patch", decision))
+
+    def record_plan_approval(self, plan: Plan, decision: Decision) -> None:
+        self.plans[plan.id] = plan
+        self.add_decision(decision)
+        self.add_event(self._decision_event("plan", decision))
 
     def _decision_event(self, kind: str, decision: Decision) -> Event:
         return Event(
@@ -380,8 +405,12 @@ class RunStore:
         with self._mutation(task.run_id) as state:
             if task.id in state.tasks:
                 raise ConflictError(f"task already exists: {task.id}")
+            # A cancelled task no longer holds its inputs: an identical later task replaces it.
             key = (task.stage, task.role, task.input_digest)
-            if any((item.stage, item.role, item.input_digest) == key for item in state.tasks.values()):
+            if any(
+                (item.stage, item.role, item.input_digest) == key and item.status != TaskStatus.CANCELLED
+                for item in state.tasks.values()
+            ):
                 raise ConflictError("task already exists for run, stage, role, and input digest")
             state.set_task(task)
             state.add_event(
@@ -403,7 +432,14 @@ class RunStore:
         if state is None:
             return None
         key = (stage, role, input_digest)
-        return next((item for item in state.tasks.values() if (item.stage, item.role, item.input_digest) == key), None)
+        return next(
+            (
+                item
+                for item in state.tasks.values()
+                if (item.stage, item.role, item.input_digest) == key and item.status != TaskStatus.CANCELLED
+            ),
+            None,
+        )
 
     def list_tasks(self, run_id: str) -> list[Task]:
         state = self._load_if_present(run_id)
@@ -428,12 +464,28 @@ class RunStore:
         bundle_path: str,
         schema_kind: str,
         example_digest: str | None = None,
+        *,
+        plan_text_digest: str | None = None,
+        assignment_id: str | None = None,
+        assignment_digest: str | None = None,
     ) -> None:
         # The example digest is written only with the first record; it is not part of the frozen-input identity.
+        # A writing task names the plan text and the assignment file it was prepared from, not a plan record.
         record = dict(
             zip(
                 _EXTERNAL_TASK_KEYS,
-                (task_id, prompt_digest, schema_digest, bundle_digest, bundle_path, schema_kind, example_digest),
+                (
+                    task_id,
+                    prompt_digest,
+                    schema_digest,
+                    bundle_digest,
+                    bundle_path,
+                    schema_kind,
+                    plan_text_digest,
+                    assignment_id,
+                    assignment_digest,
+                    example_digest,
+                ),
             )
         )
         with self._mutation(self._owner(task_id, "task", _tasks).run.id) as state:
@@ -444,7 +496,7 @@ class RunStore:
                         self._require_artifact(digest)
                 state.external_tasks[task_id] = existing = record
                 state.dirty = True
-            if any(existing[key] != record[key] for key in _EXTERNAL_TASK_KEYS[1:6]):
+            if any(existing[key] != record[key] for key in _FROZEN_EXTERNAL_TASK_KEYS):
                 raise ConflictError(f"external task material changed: {task_id}")
 
     def has_external_task(self, task_id: str) -> bool:
@@ -653,18 +705,54 @@ class RunStore:
             return decision
         raise ValueError(f"decisions target a finding or a patch, not {decision.target_type}")
 
+    # Plans
+
+    def approve_plan(self, plan: Plan, reason: str, actor: str = "user") -> Decision:
+        """Record an approved plan, its approval decision and event, and move the run to writing, in one replacement."""
+        if not reason.strip():
+            raise ValueError("decision reason is required")
+        record = Decision(target_type="plan", target_id=plan.id, decision="approve", reason=reason, actor=actor)
+        with self._mutation(plan.run_id) as state:
+            current = state.run.status
+            if current != RunStatus.PLANNING:
+                raise ConflictError(f"a plan cannot be approved while the run is {current.value}")
+            if plan.id in state.plans:
+                raise ConflictError(f"plan already exists: {plan.id}")
+            for digest in (plan.plan_artifact_digest, *(item["artifact_digest"] for item in plan.assignments)):
+                self._require_artifact(digest)
+            state.record_plan_approval(plan, record)
+            validate_run_transition(current, RunStatus.WRITING)
+            state.set_run(replace(state.run, status=RunStatus.WRITING, error=None, updated_at=utc_now()))
+            state.add_event(
+                Event(
+                    run_id=plan.run_id,
+                    event_type="run.status_changed",
+                    entity_type="run",
+                    entity_id=plan.run_id,
+                    payload={"from": current.value, "to": RunStatus.WRITING.value, "error": None},
+                )
+            )
+        return record
+
+    def get_plan(self, plan_id: str) -> Plan:
+        return self._owner(plan_id, "plan", _plans).plans[plan_id]
+
+    def list_plans(self, run_id: str) -> list[Plan]:
+        state = self._load_if_present(run_id)
+        return [] if state is None else sorted(state.plans.values(), key=lambda item: (item.created_at, item.id))
+
     # Patches and verifications
 
     def create_patch(self, patch: Patch) -> Patch:
-        if patch.attempt_id is None:
-            raise ValueError("new patches require a generating attempt_id")
+        if patch.plan_id is None:
+            raise ValueError("new patches require the plan they were built from")
         with self._mutation(patch.run_id) as state:
             if patch.id in state.patches:
                 raise ConflictError(f"patch already exists: {patch.id}")
             key = (patch.base_commit, patch.diff_digest)
             if any((item.base_commit, item.diff_digest) == key for item in state.patches.values()):
                 raise ConflictError("patch already exists for run, base commit, and diff digest")
-            _require_attempt_in(state, patch.attempt_id)
+            _require_plan_in(state, patch.plan_id)
             self._require_artifact(patch.diff_digest)
             state.set_patch(patch)
             state.add_event(
@@ -676,7 +764,7 @@ class RunStore:
                     payload={
                         "status": patch.status.value,
                         "diff_digest": patch.diff_digest,
-                        "attempt_id": patch.attempt_id,
+                        "plan_id": patch.plan_id,
                     },
                 )
             )
@@ -693,7 +781,7 @@ class RunStore:
         self,
         patch_id: str,
         *,
-        attempt_id: str,
+        plan_id: str,
         summary: str,
         edits: Sequence[Mapping[str, Any]],
         build_succeeded: bool,
@@ -702,14 +790,14 @@ class RunStore:
             patch = state.patches[patch_id]
             if patch.status != PatchStatus.REJECTED:
                 raise ConflictError(f"patch cannot be reproposed in status {patch.status.value}")
-            _require_attempt_in(state, attempt_id)
+            _require_plan_in(state, plan_id)
             state.set_patch(
                 replace(
                     patch,
                     summary=summary,
                     # Stored edits are plain JSON; return them as a later read would.
                     edits=tuple(json.loads(canonical_json(list(edits)))),
-                    attempt_id=attempt_id,
+                    plan_id=plan_id,
                     status=PatchStatus.PROPOSED,
                     build_succeeded=bool(build_succeeded),
                     updated_at=utc_now(),
@@ -724,8 +812,8 @@ class RunStore:
                     payload={
                         "from": patch.status.value,
                         "to": PatchStatus.PROPOSED.value,
-                        "previous_attempt_id": patch.attempt_id,
-                        "attempt_id": attempt_id,
+                        "previous_plan_id": patch.plan_id,
+                        "plan_id": plan_id,
                         "diff_digest": patch.diff_digest,
                     },
                 )
@@ -984,6 +1072,10 @@ def _patches(state: _RunState) -> Mapping[str, Patch]:
     return state.patches
 
 
+def _plans(state: _RunState) -> Mapping[str, Plan]:
+    return state.plans
+
+
 def _decision_targets(state: _RunState) -> set[str]:
     return {item.target_id for item in state.decisions}
 
@@ -999,6 +1091,11 @@ def _next_ordinal(state: _RunState, task_id: str) -> int:
 def _require_attempt_in(state: _RunState, attempt_id: str) -> None:
     if attempt_id not in state.attempts:
         raise StorageError(f"attempt is not recorded for run {state.run.id}: {attempt_id}")
+
+
+def _require_plan_in(state: _RunState, plan_id: str) -> None:
+    if plan_id not in state.plans:
+        raise StorageError(f"plan is not recorded for run {state.run.id}: {plan_id}")
 
 
 def _add_finding(state: _RunState, finding: Finding) -> None:
@@ -1050,6 +1147,10 @@ def _finding_from(record: dict[str, Any]) -> Finding:
             "confidence": float(record["confidence"]),
         }
     )
+
+
+def _plan_from(record: dict[str, Any]) -> Plan:
+    return Plan(**{**record, "assignments": tuple(record["assignments"])})
 
 
 def _patch_from(record: dict[str, Any]) -> Patch:

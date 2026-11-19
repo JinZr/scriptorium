@@ -161,7 +161,7 @@ def test_cancel_rejects_late_submission(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize("stale", [False, True])
-def test_revision_requires_human_gates_and_independent_verification(tmp_path: Path, stale: bool) -> None:
+def test_writing_requires_human_gates_and_independent_verification(tmp_path: Path, stale: bool) -> None:
     repo = _repo(tmp_path / "paper")
     run_id, review_task_id = _start(repo)
     with ScriptoriumService(repo) as service:
@@ -197,26 +197,29 @@ def test_revision_requires_human_gates_and_independent_verification(tmp_path: Pa
         finding_id = service.list_findings(run_id)[0].id
         service.decide_finding(finding_id, "confirm", "Accept the scoped wording")
         asyncio.run(service.resume_run(run_id))
-        revision_task = next(task for task in service.store.list_tasks(run_id) if task.stage == "revision")
-        revision = service.claim_task(revision_task.id, "claude_code", "sonnet", "max", "revision-session", "host")
-        before = (repo / "main.tex").read_text(encoding="utf-8").splitlines()[2]
-        edit = {
-            "finding_ids": [finding_id],
-            "path": "main.tex",
-            "source_digest": source["source_digest"],
-            "start_line": 3,
-            "end_line": 3,
-            "before": before,
-            "after": before.replace("A result", "A scoped result"),
-            "rationale": "Qualify the claim.",
-        }
-        asyncio.run(
-            service.submit_task(
-                revision["attempt"].id,
-                revision["input_digest"],
-                json.dumps({"summary": "Qualified the result.", "edits": [edit]}),
-            )
+        plan = tmp_path / "plan"
+        (plan / "assignments").mkdir(parents=True)
+        (plan / "plan.md").write_text("# Story\n\nThe result holds in the scope the supplement states.\n")
+        (plan / "assignments" / "result.md").write_text(
+            f"---\ntarget: main.tex:3-3\nfindings: {finding_id}\n---\nQualify the result.\n", encoding="utf-8"
         )
+        assert service.check_plan(run_id, plan)["valid"]
+        asyncio.run(service.approve_plan(run_id, plan, "The author agreed to qualify the result."))
+        writing_task = next(task for task in service.store.list_tasks(run_id) if task.stage == "writing")
+        writing = service.claim_task(writing_task.id, "antigravity", "model", "max", "writing-session", "host")
+        export = tmp_path / "writing-export"
+        service.export_task(writing["attempt"].id, export)
+        passage = export / "task" / "passages" / "1.tex"
+        before = passage.read_text(encoding="utf-8")
+        # A real LaTeX error in the passage comes back to the writer as a validation issue.
+        passage.write_text("A scoped result \\undefinedmacro is described here.\\input{supplement}", encoding="utf-8")
+        output = service.pack_writing_output(writing["attempt"].id, export)
+        checked = service.check_submission(writing["attempt"].id, writing["input_digest"], output)
+        assert [issue["code"] for issue in checked["validation_report"]["issues"]] == ["writing.build_failed"]
+        assert "undefinedmacro" in checked["validation_report"]["issues"][0]["actual"]["log_tail"]
+        passage.write_text(before.replace("A result", "A scoped result"), encoding="utf-8")
+        output = service.pack_writing_output(writing["attempt"].id, export)
+        asyncio.run(service.submit_task(writing["attempt"].id, writing["input_digest"], output))
         patch = service.store.list_patches(run_id)[-1]
         assert service.store.get_run(run_id).status == RunStatus.AWAITING_PATCH_APPROVAL
         service.decide_patch(patch.id, "approve", "The edit matches the finding")

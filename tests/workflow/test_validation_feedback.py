@@ -10,7 +10,6 @@ from scriptorium.schemas import (
     Evidence,
     EvidenceAnchorMap,
     ReviewOutput,
-    RevisionOutput,
     SourceAnchorRecord,
     ValidationReport,
     VerificationOutput,
@@ -52,16 +51,16 @@ def _anchor_map(source: SourceFile, pages: int = 1) -> EvidenceAnchorMap:
 
 def test_frozen_template_does_not_reinterpret_dynamic_json_as_placeholders():
     findings_slot = "{{SCRIPTORIUM_CONFIRMED_FINDINGS_JSON}}"
-    feedback_slot = "{{SCRIPTORIUM_HUMAN_FEEDBACK_JSON}}"
+    plan_slot = "{{SCRIPTORIUM_PLAN_TEXT}}"
     rendered = Armarius._render_frozen_template(
-        f"findings={findings_slot}\nfeedback={feedback_slot}",
+        f"findings={findings_slot}\nplan={plan_slot}",
         {
-            findings_slot: feedback_slot,
-            feedback_slot: "null",
+            findings_slot: plan_slot,
+            plan_slot: "plain text",
         },
     )
 
-    assert rendered == f"findings={feedback_slot}\nfeedback=null"
+    assert rendered == f"findings={plan_slot}\nplan=plain text"
 
 
 def _service(tmp_path):
@@ -360,33 +359,9 @@ def test_non_text_source_paths_are_diagnostic_reads_not_durable_anchors(tmp_path
             }
         )
     )
-    revision = RevisionOutput.model_validate(
-        {
-            "summary": "Invalid figure edit",
-            "edits": [
-                {
-                    "finding_ids": ["finding_1"],
-                    "path": "Fig5.pdf",
-                    "source_digest": figure_digest,
-                    "start_line": 1,
-                    "end_line": 1,
-                    "before": "old",
-                    "after": "new",
-                    "rationale": "Reason",
-                }
-            ],
-        }
-    )
     with service:
         review_issues = service.armarius._validate_review_output(
             review,
-            anchor_map,
-            repo,
-            DEFAULT_EVIDENCE_ANCHOR_CONTRACT,
-        )
-        revision_issues = service.armarius._validate_revision_output(
-            revision,
-            [_finding("finding_1")],
             anchor_map,
             repo,
             DEFAULT_EVIDENCE_ANCHOR_CONTRACT,
@@ -397,7 +372,6 @@ def test_non_text_source_paths_are_diagnostic_reads_not_durable_anchors(tmp_path
         "evidence.source_path_unknown",
     ]
     assert review_issues[1].expected["canonical_path"] == "Fig5.pdf"
-    assert [issue.code for issue in revision_issues] == ["revision.edit_path_not_editable"]
 
 
 def test_verification_evidence_uses_the_patched_source_map_digest(tmp_path):
@@ -462,46 +436,9 @@ def test_pdf_page_anchor_does_not_depend_on_pdf_text_extraction(tmp_path):
     assert issues == []
 
 
-def test_revision_and_verification_validators_accumulate_issues(tmp_path):
+def test_verification_validator_accumulates_issues(tmp_path):
     repo, service = _service(tmp_path)
     source = SourceFile("main.tex", sha256((repo / "main.tex").read_bytes()).hexdigest(), 4)
-    revision = RevisionOutput.model_validate(
-        {
-            "summary": "Invalid edits",
-            "edits": [
-                {
-                    "finding_ids": ["finding_unknown"],
-                    "path": "sources/main.tex",
-                    "source_digest": "0" * 64,
-                    "start_line": 3,
-                    "end_line": 3,
-                    "before": "wrong",
-                    "after": "new",
-                    "rationale": "Reason",
-                },
-                {
-                    "finding_ids": ["finding_1"],
-                    "path": "main.tex",
-                    "source_digest": "0" * 64,
-                    "start_line": 3,
-                    "end_line": 3,
-                    "before": "wrong",
-                    "after": "new",
-                    "rationale": "Reason",
-                },
-                {
-                    "finding_ids": ["finding_1"],
-                    "path": "main.tex",
-                    "source_digest": source.digest,
-                    "start_line": 3,
-                    "end_line": 4,
-                    "before": "also wrong",
-                    "after": "newer",
-                    "rationale": "Reason",
-                },
-            ],
-        }
-    )
     verification = VerificationOutput.model_validate(
         {
             "verdict": "pass",
@@ -511,13 +448,6 @@ def test_revision_and_verification_validators_accumulate_issues(tmp_path):
         }
     )
     with service:
-        revision_issues = service.armarius._validate_revision_output(
-            revision,
-            [_finding("finding_1"), _finding("finding_2")],
-            _anchor_map(source),
-            repo,
-            DEFAULT_EVIDENCE_ANCHOR_CONTRACT,
-        )
         verification_issues = service.armarius._validate_verification_output(
             verification,
             [_finding("finding_1"), _finding("finding_2")],
@@ -526,13 +456,6 @@ def test_revision_and_verification_validators_accumulate_issues(tmp_path):
             DEFAULT_EVIDENCE_ANCHOR_CONTRACT,
         )
 
-    revision_codes = [issue.code for issue in revision_issues]
-    assert "revision.unknown_finding_ids" in revision_codes
-    assert "revision.edit_path_unknown" in revision_codes
-    assert "revision.source_digest_mismatch" in revision_codes
-    assert revision_codes.count("revision.before_mismatch") == 2
-    assert "revision.findings_uncovered" in revision_codes
-    assert "revision.edits_overlap" in revision_codes
     assert [issue.code for issue in verification_issues] == [
         "verification.unknown_finding_ids",
         "verification.pass_incomplete",

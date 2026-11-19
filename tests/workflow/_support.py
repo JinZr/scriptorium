@@ -2,10 +2,11 @@ import asyncio
 import json
 from pathlib import Path
 import subprocess
+import uuid
 
 import fitz
 
-from scriptorium.domain import AgentRole
+from scriptorium.domain import AgentRole, FindingStatus
 from scriptorium.manuscript import BuildResult, ManuscriptManager
 
 MANUSCRIPT = "\\documentclass{article}\n\\begin{document}\nThe result is teh clear.\n\\end{document}\n"
@@ -164,25 +165,67 @@ def complete_reviews(service, run_id, *, with_finding=True):
         assert receipt["attempt"].status.value == "completed"
 
 
+def write_plan(directory, assignments, plan_text="# Plan\n\nState the main result plainly.\n"):
+    """Write a plan directory; assignments maps NAME to (targets, finding IDs, instructions)."""
+    directory.mkdir(parents=True)
+    (directory / "plan.md").write_text(plan_text, encoding="utf-8")
+    (directory / "assignments").mkdir()
+    for name, (targets, finding_ids, body) in assignments.items():
+        lines = ["---", *(f"target: {target}" for target in targets)]
+        if finding_ids is not None:
+            lines.append(f"findings: {', '.join(finding_ids)}")
+        (directory / "assignments" / f"{name}.md").write_text("\n".join([*lines, "---", body, ""]), encoding="utf-8")
+    return directory
+
+
+def approve_plan(service, run_id, assignments=None, *, plan_text=None, reason="The author approved this plan."):
+    """Write and approve a plan; by default one assignment rewrites line 3 of main.tex for every confirmed finding."""
+    if assignments is None:
+        confirmed = [finding.id for finding in service.store.list_findings(run_id, [FindingStatus.CONFIRMED])]
+        assignments = {"result": (["main.tex:3-3"], confirmed, "Correct the typo in the result sentence.")}
+    directory = service.repo.parent / f"plan-{uuid.uuid4().hex[:8]}"
+    write_plan(directory, assignments, *(() if plan_text is None else (plan_text,)))
+    return asyncio.run(service.approve_plan(run_id, directory, reason))
+
+
+def writing_task(service, run_id, assignment_id=None):
+    for task in service.store.list_tasks(run_id):
+        if task.stage != "writing" or task.status.value != "pending":
+            continue
+        if assignment_id is None or service.store.get_external_task(task.id)["assignment_id"] == assignment_id:
+            return task
+    raise AssertionError(f"no pending writing task for {assignment_id}")
+
+
+def export_writing(service, run_id, assignment_id=None, *, session="writing-session"):
+    task = writing_task(service, run_id, assignment_id)
+    claim_data = service.claim_task(task.id, "codex", "test-model", "max", session, "host")
+    export = service.repo.parent / f"export-{claim_data['attempt'].id}"
+    service.export_task(claim_data["attempt"].id, export)
+    return claim_data, export
+
+
+def submit_writing(service, claim_data, export, passages, *, note=None, check=False):
+    """Write passage files (index to text) into an export, pack it, and check or submit it."""
+    for index, text in passages.items():
+        (next((export / "task" / "passages").glob(f"{index}.*"))).write_bytes(text.encode("utf-8"))
+    if note is not None:
+        (export / "task" / "note.md").write_text(note, encoding="utf-8")
+    output = service.pack_writing_output(claim_data["attempt"].id, export)
+    if check:
+        return service.check_submission(claim_data["attempt"].id, claim_data["input_digest"], output)
+    return asyncio.run(service.submit_task(claim_data["attempt"].id, claim_data["input_digest"], output))
+
+
 def prepare_patch(service, run_id, *, after="The result is clear."):
     complete_reviews(service, run_id)
     finding_id = service.list_findings(run_id)[0].id
     service.decide_finding(finding_id, "confirm", "Correct the typo.")
     asyncio.run(service.resume_run(run_id))
-    revision = claim(service, run_id, AgentRole.REVISION, session="revision-session")
-    source = next(item for item in revision["source_map"]["sources"] if item["source_path"] == "main.tex")
-    edit = {
-        "finding_ids": [finding_id],
-        "path": "main.tex",
-        "source_digest": source["source_digest"],
-        "start_line": 3,
-        "end_line": 3,
-        "before": "The result is teh clear.",
-        "after": after,
-        "rationale": "Fix the typo.",
-    }
-    receipt = submit(service, revision, {"summary": "Corrected the sentence.", "edits": [edit]})
-    assert receipt["attempt"].status.value == "completed"
+    approve_plan(service, run_id)
+    writing, export = export_writing(service, run_id)
+    receipt = submit_writing(service, writing, export, {1: after})
+    assert receipt["attempt"].status.value == "completed", receipt["validation_report"]
     return service.store.list_patches(run_id)[-1], finding_id
 
 

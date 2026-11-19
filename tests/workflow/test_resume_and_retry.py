@@ -10,7 +10,19 @@ from scriptorium.domain import AgentRole, AttemptStatus, RunStatus, TaskStatus
 from scriptorium.errors import InfrastructureError, StateError
 from scriptorium.service import ScriptoriumService
 
-from ._support import PdfBuildingManuscriptManager, claim, make_repository, prepare_verification, review_finding, submit
+from ._support import (
+    PdfBuildingManuscriptManager,
+    approve_plan,
+    claim,
+    complete_reviews,
+    export_writing,
+    make_repository,
+    prepare_verification,
+    review_finding,
+    submit,
+    submit_writing,
+    writing_task,
+)
 
 
 def test_running_attempt_is_durable_across_service_restarts(tmp_path):
@@ -258,7 +270,7 @@ def test_explicit_abandonment_retries_only_the_named_running_attempt(tmp_path):
         )
 
 
-def test_later_waiver_invalidates_active_revision_and_prepares_new_context(tmp_path):
+def test_a_waiver_during_writing_returns_the_run_to_planning(tmp_path):
     repo = make_repository(tmp_path, roles=("substantive_review",))
     with ScriptoriumService(repo, manuscript_manager=PdfBuildingManuscriptManager(repo)) as service:
         run = asyncio.run(service.start_run("HEAD", "quick"))["run"]
@@ -268,24 +280,49 @@ def test_later_waiver_invalidates_active_revision_and_prepares_new_context(tmp_p
         submit(service, review, {"summary": "Two issues.", "findings": [first, second]})
         findings = service.list_findings(run.id)
         assert len(findings) == 2
-        for finding in findings:
-            service.decide_finding(finding.id, "confirm", "Requires a revision")
+        service.decide_findings([finding.id for finding in findings], "confirm", "Both need writing.")
         asyncio.run(service.resume_run(run.id))
-        original = claim(service, run.id, AgentRole.REVISION)
+        approve_plan(
+            service,
+            run.id,
+            {
+                "result": (["main.tex:3-3"], [findings[0].id], "Correct the typo."),
+                "setup": (["main.tex:1-1"], [findings[1].id], "Keep the document class."),
+            },
+        )
+        original, export = export_writing(service, run.id, "result")
+        pending = writing_task(service, run.id, "setup")
         service.decide_finding(findings[0].id, "waive", "No longer required")
         assert service.store.get_attempt(original["attempt"].id).status == AttemptStatus.INTERRUPTED
+        assert service.store.get_task(pending.id).status == TaskStatus.CANCELLED
+        assert service.store.get_run(run.id).status == RunStatus.PLANNING
         with pytest.raises(StateError, match="superseded"):
-            submit(service, original, {"summary": "Old scope.", "edits": []})
-        with pytest.raises(StateError, match="context changed"):
+            submit_writing(service, original, export, {1: "The result is clear."})
+        with pytest.raises(StateError, match="cannot be retried while run is planning"):
             asyncio.run(service.retry_task(run.id, original["task"].id))
-        asyncio.run(service.resume_run(run.id))
-        tasks = [task for task in service.store.list_tasks(run.id) if task.stage == "revision"]
-        assert len(tasks) == 2
-        replacement = next(task for task in tasks if task.id != original["task"].id)
-        assert replacement.status == TaskStatus.PENDING
-        fresh = service.claim_task(replacement.id, "codex", "test-model", "max", "new-session", "host")
+        assert asyncio.run(service.resume_run(run.id))["run"].status == RunStatus.PLANNING
+        assert service.list_tasks(run.id)["next_actions"] == [
+            {"command": "plan approve", "run_id": run.id, "requires_human_decision": True}
+        ]
+        approve_plan(service, run.id, {"setup": (["main.tex:1-1"], [findings[1].id], "Keep the document class.")})
+        fresh, _ = export_writing(service, run.id, "setup", session="new-session")
         assert findings[0].id not in fresh["prompt"]
         assert findings[1].id in fresh["prompt"]
+
+
+def test_waiving_the_last_confirmed_finding_during_writing_completes_the_run(tmp_path):
+    repo = make_repository(tmp_path)
+    with ScriptoriumService(repo, manuscript_manager=PdfBuildingManuscriptManager(repo)) as service:
+        run = asyncio.run(service.start_run("HEAD", "quick"))["run"]
+        complete_reviews(service, run.id)
+        finding_id = service.list_findings(run.id)[0].id
+        service.decide_finding(finding_id, "confirm", "Correct the typo.")
+        asyncio.run(service.resume_run(run.id))
+        approve_plan(service, run.id)
+        service.decide_finding(finding_id, "waive", "The author keeps the sentence.")
+        assert service.store.get_run(run.id).status == RunStatus.PLANNING
+        assert service.list_tasks(run.id)["next_actions"] == [{"command": "run resume", "run_id": run.id}]
+        assert asyncio.run(service.resume_run(run.id))["run"].status == RunStatus.COMPLETED
 
 
 def test_later_waiver_invalidates_active_verification(tmp_path):

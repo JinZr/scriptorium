@@ -19,7 +19,7 @@ def test_role_catalog_uses_stable_keys_and_display_names() -> None:
     assert ROLE_CATALOG[AgentRole.COPYEDIT].display_name == "Corrector"
     assert ROLE_CATALOG[AgentRole.CONSISTENCY].display_name == "Collator"
     assert ROLE_CATALOG[AgentRole.FIGURE_REVIEW].display_name == "Figure Reviewer"
-    assert ROLE_CATALOG[AgentRole.REVISION].display_name == "Scribe"
+    assert ROLE_CATALOG[AgentRole.WRITING].display_name == "Scribe"
     assert ROLE_CATALOG[AgentRole.VERIFICATION].display_name == "Verifier"
 
 
@@ -34,6 +34,25 @@ def test_run_status_transitions_are_explicit() -> None:
 
     with pytest.raises(ValueError, match="invalid run status transition"):
         validate_run_transition(RunStatus.PREPARING, RunStatus.COMPLETED)
+
+
+def test_planning_and_writing_sit_between_the_decisions_and_patch_approval() -> None:
+    for current, target in (
+        (RunStatus.AWAITING_DECISION, RunStatus.PLANNING),
+        (RunStatus.PLANNING, RunStatus.WRITING),
+        (RunStatus.WRITING, RunStatus.AWAITING_PATCH_APPROVAL),
+        (RunStatus.WRITING, RunStatus.PLANNING),
+        (RunStatus.AWAITING_PATCH_APPROVAL, RunStatus.PLANNING),
+        (RunStatus.FAILED, RunStatus.WRITING),
+    ):
+        validate_run_transition(current, target)
+    for current, target in (
+        (RunStatus.AWAITING_DECISION, RunStatus.WRITING),
+        (RunStatus.PLANNING, RunStatus.AWAITING_PATCH_APPROVAL),
+        (RunStatus.FAILED, RunStatus.PLANNING),
+    ):
+        with pytest.raises(ValueError, match="invalid run status transition"):
+            validate_run_transition(current, target)
 
 
 def test_task_can_retry_only_after_failure_or_interruption() -> None:

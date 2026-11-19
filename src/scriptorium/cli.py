@@ -27,9 +27,10 @@ class _ArgumentParser(argparse.ArgumentParser):
 _BRIEF_LIMIT_BYTES = 256_000
 _TASK_DESCRIPTION = """Use a frozen task from the current host model session.
 
-Typical order: claim, export (frozen sources, navigation, source map, PDF, and this attempt's prompt, schema,
-brief, and example under task/), page for rendered pages, then submit --check and submit. Read the exported
-files with the host's own tools; evidence anchors cite frozen source paths, digests, and lines."""
+Typical order: claim, export (frozen sources, navigation, source map, PDF, and this attempt's inputs under task/),
+page for rendered pages, then submit --check and submit. Read the exported files with the host's own tools;
+evidence anchors cite frozen source paths, digests, and lines. A writing task rewrites the exported
+task/passages/ files and submits the export directory with --dir."""
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -115,10 +116,14 @@ def build_parser() -> argparse.ArgumentParser:
     )
     show_parser = task_commands.add_parser("show", help="show a compact attempt overview")
     show_parser.add_argument("attempt_id", help="attempt ID from claim")
-    submit_parser = task_commands.add_parser("submit", help="submit one complete JSON output for validation")
+    submit_parser = task_commands.add_parser("submit", help="submit one complete output for validation")
     submit_parser.add_argument("attempt_id", help="active attempt ID")
     submit_parser.add_argument("--input-digest", required=True, help="input_digest returned by claim or show")
-    submit_parser.add_argument("--file", required=True, help="UTF-8 JSON file up to 2 MB, or - for stdin")
+    submit_source = submit_parser.add_mutually_exclusive_group(required=True)
+    submit_source.add_argument("--file", help="UTF-8 JSON file up to 2 MB, or - for stdin")
+    submit_source.add_argument(
+        "--dir", help="writing attempts: the export directory whose task/passages/ files and task/note.md to submit"
+    )
     submit_parser.add_argument(
         "--check",
         action="store_true",
@@ -164,7 +169,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     finding_decisions = finding_decide_parser.add_mutually_exclusive_group(required=True)
     finding_decisions.add_argument(
-        "--confirm", action="store_const", const="confirm", dest="decision", help="confirm for revision"
+        "--confirm", action="store_const", const="confirm", dest="decision", help="confirm it for the plan"
     )
     finding_decisions.add_argument(
         "--reject", action="store_const", const="reject", dest="decision", help="reject the finding"
@@ -173,6 +178,18 @@ def build_parser() -> argparse.ArgumentParser:
         "--waive", action="store_const", const="waive", dest="decision", help="accept it without revision"
     )
     finding_decide_parser.add_argument("--reason", required=True, type=_nonempty, help="non-empty decision reason")
+
+    plan_parser = commands.add_parser("plan", help="check and approve the author's plan for the writing tasks")
+    plan_commands = plan_parser.add_subparsers(dest="plan_command", required=True)
+    plan_check_parser = plan_commands.add_parser("check", help="validate a plan directory, recording nothing")
+    plan_check_parser.add_argument("run_id", help="run ID")
+    plan_check_parser.add_argument("--dir", required=True, help="plan directory with plan.md and assignments/")
+    plan_approve_parser = plan_commands.add_parser(
+        "approve", help="record the author's approval of a plan and prepare one writing task per assignment"
+    )
+    plan_approve_parser.add_argument("run_id", help="run ID")
+    plan_approve_parser.add_argument("--dir", required=True, help="plan directory with plan.md and assignments/")
+    plan_approve_parser.add_argument("--reason", required=True, type=_nonempty, help="the author's approval, in words")
 
     patch_parser = commands.add_parser("patch", help="inspect, decide, and apply patches")
     patch_commands = patch_parser.add_subparsers(dest="patch_command", required=True)
@@ -250,6 +267,8 @@ def _dispatch(arguments: argparse.Namespace) -> tuple[Any, int, str | None]:
         return _dispatch_task(service, arguments)
     if arguments.command == "finding":
         return _dispatch_finding(service, arguments)
+    if arguments.command == "plan":
+        return _dispatch_plan(service, arguments)
     if arguments.command == "patch":
         return _dispatch_patch(service, arguments)
 
@@ -314,17 +333,10 @@ def _dispatch_task(service: Any, arguments: argparse.Namespace) -> tuple[Any, in
     if arguments.task_command == "show":
         return service.task_view(service.show_task(arguments.attempt_id)), 0, None
     if arguments.task_command == "submit":
-        if arguments.file == "-":
-            raw = sys.stdin.buffer.read(2_000_001)
+        if arguments.dir is not None:
+            contents = service.pack_writing_output(arguments.attempt_id, arguments.dir)
         else:
-            with Path(arguments.file).open("rb") as submitted:
-                raw = submitted.read(2_000_001)
-        if len(raw) > 2_000_000:
-            raise ConfigurationError("submission exceeds the 2 MB limit")
-        try:
-            contents = raw.decode("utf-8")
-        except UnicodeDecodeError as exc:
-            raise ConfigurationError("submission must be UTF-8") from exc
+            contents = _read_submission(arguments.file)
         if arguments.check:
             return service.check_submission(arguments.attempt_id, arguments.input_digest, contents), 0, None
         return _run_async(service.submit_task(arguments.attempt_id, arguments.input_digest, contents)), 0, None
@@ -357,6 +369,16 @@ def _dispatch_finding(service: Any, arguments: argparse.Namespace) -> tuple[Any,
         return result, 0, None
 
     raise _UsageError("missing finding command")
+
+
+def _dispatch_plan(service: Any, arguments: argparse.Namespace) -> tuple[Any, int, str | None]:
+    if arguments.plan_command == "check":
+        return service.check_plan(arguments.run_id, arguments.dir), 0, None
+    if arguments.plan_command == "approve":
+        result = _run_async(service.approve_plan(arguments.run_id, arguments.dir, arguments.reason))
+        return run_overview(result), 0, None
+
+    raise _UsageError("missing plan command")
 
 
 def _dispatch_patch(service: Any, arguments: argparse.Namespace) -> tuple[Any, int, str | None]:
@@ -460,6 +482,20 @@ def _jsonable(value: Any) -> Any:
     if isinstance(value, Path):
         return str(value)
     return value
+
+
+def _read_submission(path: str) -> str:
+    if path == "-":
+        raw = sys.stdin.buffer.read(2_000_001)
+    else:
+        with Path(path).open("rb") as submitted:
+            raw = submitted.read(2_000_001)
+    if len(raw) > 2_000_000:
+        raise ConfigurationError("submission exceeds the 2 MB limit")
+    try:
+        return raw.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise ConfigurationError("submission must be UTF-8") from exc
 
 
 def _read_brief(path: str) -> str:

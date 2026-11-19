@@ -21,7 +21,18 @@ def test_a_run_is_one_state_file_that_reopens_unchanged(tmp_path) -> None:
     state_file = tmp_path / "runs" / run.id / "state.json"
     document = json.loads(state_file.read_bytes())
     assert list(document) == sorted(
-        ["run", "tasks", "external_tasks", "attempts", "findings", "decisions", "patches", "verifications", "events"]
+        [
+            "run",
+            "tasks",
+            "external_tasks",
+            "attempts",
+            "findings",
+            "decisions",
+            "plans",
+            "patches",
+            "verifications",
+            "events",
+        ]
     )
     assert document["run"]["id"] == run.id
     assert [item["id"] for item in document["tasks"]] == [task.id]

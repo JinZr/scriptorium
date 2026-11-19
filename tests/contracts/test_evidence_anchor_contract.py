@@ -69,10 +69,6 @@ def test_anchor_contract_is_content_addressed_without_a_version_field() -> None:
     assert evidence_anchor_contract_digest(restored) == evidence_anchor_contract_digest()
     assert EvidenceAnchorContract not in SCHEMA_MODELS.values()
     assert "evidence_anchor_contract" not in SCHEMA_MODELS
-    assert (
-        "final line terminator"
-        in output_schema("revision")["$defs"]["ExactEdit"]["properties"]["before"]["description"]
-    )
 
 
 def test_anchor_contract_digest_changes_only_when_contract_content_changes() -> None:
@@ -146,14 +142,11 @@ def test_provider_and_local_evidence_shapes_are_mutually_exclusive() -> None:
 def test_provider_schema_uses_the_supplied_contract_content() -> None:
     content = evidence_anchor_contract_content()
     content["pdf_page"]["matching_rule"] = "frozen PDF matching rule"
-    content["revision_edit"]["source_path_rule"] = "frozen editable paths"
     contract = EvidenceAnchorContract.model_validate(content)
 
     review = output_schema("review", contract)["$defs"]["Evidence"]
-    revision = output_schema("revision", contract)["$defs"]["ExactEdit"]
 
     assert review["oneOf"][1]["properties"]["source_path"] == {"const": "manuscript.pdf"}
     assert "frozen PDF matching rule" not in review["properties"]["quoted_text"]["description"]
     assert review["oneOf"][1]["not"]["anyOf"][-1] == {"required": ["quoted_text"]}
-    assert revision["properties"]["path"]["description"] == "frozen editable paths"
     assert DEFAULT_EVIDENCE_ANCHOR_CONTRACT.pdf_page.source_path == "manuscript.pdf"
