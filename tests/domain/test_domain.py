@@ -20,7 +20,7 @@ def test_role_catalog_uses_stable_keys_and_display_names() -> None:
     assert ROLE_CATALOG[AgentRole.CONSISTENCY].display_name == "Collator"
     assert ROLE_CATALOG[AgentRole.FIGURE_REVIEW].display_name == "Figure Reviewer"
     assert ROLE_CATALOG[AgentRole.WRITING].display_name == "Scribe"
-    assert ROLE_CATALOG[AgentRole.VERIFICATION].display_name == "Verifier"
+    assert ROLE_CATALOG[AgentRole.CHECK].display_name == "Checker"
 
 
 def test_canonical_json_digest_is_order_independent() -> None:
@@ -36,19 +36,27 @@ def test_run_status_transitions_are_explicit() -> None:
         validate_run_transition(RunStatus.PREPARING, RunStatus.COMPLETED)
 
 
-def test_planning_and_writing_sit_between_the_decisions_and_patch_approval() -> None:
+def test_planning_writing_and_the_check_sit_between_the_decisions_and_patch_approval() -> None:
     for current, target in (
         (RunStatus.AWAITING_DECISION, RunStatus.PLANNING),
         (RunStatus.PLANNING, RunStatus.WRITING),
-        (RunStatus.WRITING, RunStatus.AWAITING_PATCH_APPROVAL),
+        (RunStatus.WRITING, RunStatus.CHECKING),
         (RunStatus.WRITING, RunStatus.PLANNING),
+        (RunStatus.CHECKING, RunStatus.AWAITING_PATCH_APPROVAL),
+        (RunStatus.CHECKING, RunStatus.WRITING),
+        (RunStatus.CHECKING, RunStatus.PLANNING),
+        (RunStatus.AWAITING_PATCH_APPROVAL, RunStatus.READY_TO_APPLY),
         (RunStatus.AWAITING_PATCH_APPROVAL, RunStatus.PLANNING),
         (RunStatus.FAILED, RunStatus.WRITING),
+        (RunStatus.FAILED, RunStatus.CHECKING),
     ):
         validate_run_transition(current, target)
     for current, target in (
         (RunStatus.AWAITING_DECISION, RunStatus.WRITING),
         (RunStatus.PLANNING, RunStatus.AWAITING_PATCH_APPROVAL),
+        (RunStatus.WRITING, RunStatus.AWAITING_PATCH_APPROVAL),
+        (RunStatus.AWAITING_PATCH_APPROVAL, RunStatus.CHECKING),
+        (RunStatus.CHECKING, RunStatus.READY_TO_APPLY),
         (RunStatus.FAILED, RunStatus.PLANNING),
     ):
         with pytest.raises(ValueError, match="invalid run status transition"):

@@ -380,8 +380,19 @@ def replacement_text(frozen: str, submitted: str) -> str:
     return submitted + ending
 
 
-def writing_issues(output: WritingOutput, frozen: Sequence[str]) -> list[ValidationIssue]:
-    """Require exactly one passage per target and at least one passage that changes its target."""
+def effective_passages(output: WritingOutput, frozen: Sequence[str]) -> list[str]:
+    """Return the text each target of an accepted output takes, after the line-terminator rule, in target order."""
+    texts = {passage.index: passage.text for passage in output.passages}
+    return [replacement_text(before, texts[index]) for index, before in enumerate(frozen, start=1)]
+
+
+def writing_issues(
+    output: WritingOutput, frozen: Sequence[str], returned: Sequence[str] | None = None
+) -> list[ValidationIssue]:
+    """Require one passage per target and a change to at least one target.
+
+    ``returned`` is the effective text of the output a check returned, for a redo task: the redo must differ from it.
+    """
     expected = list(range(1, len(frozen) + 1))
     indexes = [passage.index for passage in output.passages]
     if sorted(indexes) != expected:
@@ -394,13 +405,21 @@ def writing_issues(output: WritingOutput, frozen: Sequence[str]) -> list[Validat
                 actual={"indexes": indexes},
             )
         ]
-    texts = {passage.index: passage.text for passage in output.passages}
-    if all(replacement_text(before, texts[index]) == before for index, before in enumerate(frozen, start=1)):
+    effective = effective_passages(output, frozen)
+    if effective == list(frozen):
         return [
             _issue(
                 "writing.no_change",
                 "/passages",
                 "Every passage equals its frozen text; change at least one target.",
+            )
+        ]
+    if returned is not None and effective == list(returned):
+        return [
+            _issue(
+                "writing.unchanged_after_return",
+                "/passages",
+                "Every passage equals the text the check returned; revise it as the feedback asks.",
             )
         ]
     return []

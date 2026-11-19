@@ -121,7 +121,7 @@ def test_provider_and_local_evidence_shapes_are_mutually_exclusive() -> None:
         with pytest.raises(ValidationError):
             Evidence.model_validate(payload)
 
-    for kind in ("review", "verification"):
+    for kind in ("review", "scientific_review"):
         schema = output_schema(kind)["$defs"]["Evidence"]
         source_branch, pdf_branch = schema["oneOf"]
 

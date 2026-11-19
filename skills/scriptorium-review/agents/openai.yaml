@@ -1,4 +1,4 @@
 interface:
   display_name: "Scriptorium Review"
-  short_description: "Claim and submit one frozen manuscript review, writing, or verification task"
+  short_description: "Claim and submit one frozen manuscript review, writing, or check task"
   default_prompt: "Use $scriptorium-review to claim the next pending Scriptorium task, work the frozen task, and check then submit its output."

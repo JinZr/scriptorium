@@ -9,12 +9,15 @@ from scriptorium.service import ScriptoriumService
 
 from ._support import (
     PdfBuildingManuscriptManager,
+    check_output,
     claim,
+    claim_check,
     link_claims,
     make_repository,
-    prepare_verification,
+    prepare_patch,
     review_finding,
     submit,
+    submit_check,
 )
 
 
@@ -114,14 +117,13 @@ def test_check_requires_the_attempt_digest_and_an_active_attempt(tmp_path):
         assert all(task.status == TaskStatus.COMPLETED for task in service.store.list_tasks(run.id))
 
 
-def test_check_reports_a_reused_verifier_session(tmp_path):
+def test_check_reports_a_check_from_a_writer_session(tmp_path):
     repo = make_repository(tmp_path)
     with ScriptoriumService(repo, manuscript_manager=PdfBuildingManuscriptManager(repo)) as service:
         run = asyncio.run(service.start_run("HEAD", "quick"))["run"]
-        _, finding_id = prepare_verification(service, run.id)
-        task = next(task for task in service.store.list_tasks(run.id) if task.role == AgentRole.VERIFICATION)
-        verification = service.claim_task(task.id, "codex", "test-model", "max", "writing-session", "host")
-        output = {"verdict": "pass", "summary": "Checked.", "resolved_finding_ids": [finding_id], "issues": []}
-        checked = service.check_submission(verification["attempt"].id, verification["input_digest"], json.dumps(output))
-        assert "verification.session_unconfirmed" in {issue["code"] for issue in checked["validation_report"]["issues"]}
-        assert service.store.get_attempt(verification["attempt"].id).status == AttemptStatus.RUNNING
+        prepare_patch(service, run.id)
+        # prepare_patch wrote from codex session writing-session.
+        lead = claim_check(service, run.id, session="writing-session", client="codex")
+        checked = submit_check(service, lead, check_output(service, run.id), check=True)
+        assert [issue["code"] for issue in checked["validation_report"]["issues"]] == ["check.session_unconfirmed"]
+        assert service.store.get_attempt(lead["attempt"].id).status == AttemptStatus.RUNNING

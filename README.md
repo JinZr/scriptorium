@@ -14,17 +14,21 @@ finding decision, plan approval, patch approval, and patch application waits for
 ## How a run flows
 
 ```text
-review tasks ──> finding decisions ──> plan approval ──> writing tasks ──> patch approval
-   (model)           (author)         (lead + author)      (model)          (author)
-──> verification task ──> patch application ──> release gate
-     (new session)           (author)
+review tasks ──> finding decisions ──> plan approval ──> writing tasks ──> check ──> patch approval
+   (model)           (author)         (lead + author)      (model)       (lead)       (author)
+                                                               ^           │
+                                                               └─ redo ────┘
+──> patch application ──> release gate
+          (author)
 ```
 
 Each review role of the chosen profile gets one task. After the author confirms findings, the operator, acting as
 the lead, agrees a plan with the author: the story the paper should tell and one assignment per passage to rewrite.
 Each assignment of the approved plan becomes a writing task, in which a host session rewrites the assigned passages
-as plain text; Scriptorium builds the exact edits, compiles them, and proposes one patch. An approved patch is
-verified by a separate host conversation before it can be applied. The statuses and transitions are in
+as plain text; Scriptorium builds the exact edits, compiles them, and proposes one patch. The lead then checks the
+patch against the approved plan, assignment by assignment, and returns any
+assignment that falls short to its writer with feedback; only that assignment is rewritten. When the check accepts
+every assignment, the author approves or rejects the patch. The statuses and transitions are in
 [run lifecycle](docs/operations.md#run-lifecycle).
 
 ## Install
@@ -42,8 +46,8 @@ PYTHON=/path/to/python bash /path/to/scriptorium/utils/preflight.sh
 
 The client loads two skills from this repository. [`skills/scriptorium`](skills/scriptorium/SKILL.md) is for the
 operator, who agrees the review brief, starts runs, reads reports, and records the author's decisions.
-[`skills/scriptorium-review`](skills/scriptorium-review/SKILL.md) is for the reviewer or writer, who claims one
-task, exports and reads it, and submits the output. Copy or link both directories into the client's skills directory,
+[`skills/scriptorium-review`](skills/scriptorium-review/SKILL.md) is for the reviewer, writer, or checker, who
+claims one task, exports and reads it, and submits the output. Copy or link both directories into the client's skills directory,
 for example `~/.claude/skills/` for Claude Code or `~/.codex/skills/` for Codex.
 
 ### Development
@@ -128,7 +132,14 @@ answer at the human gates. [Operations](docs/operations.md) has every command's 
    scriptorium --json task submit ATTEMPT_ID --input-digest INPUT_DIGEST --dir writing-export
    ```
 
-   When every assignment is accepted, review and decide the patch:
+7. When every assignment is accepted, the run is `checking`. The lead claims the check task like step 3, from
+   a host session that did no writing in this run, reads the patched manuscript, and submits one verdict per
+   assignment ([check output](docs/operations.md#check-output)). A `redo` verdict returns that assignment to a
+   writing task with the lead's feedback; the next candidate is checked again.
+
+8. When the check accepts every assignment, show the author the diff, the check, and the fact-change list (a
+   heuristic reading aid: not evidence, an empty list does not prove that no fact changed, and nothing is gated on
+   it), and record the author's decision:
 
    ```bash
    scriptorium --json patch show PATCH_ID
@@ -136,7 +147,7 @@ answer at the human gates. [Operations](docs/operations.md) has every command's 
    scriptorium --json run resume RUN_ID
    ```
 
-7. Work the verification task from a new host conversation, then apply the verified patch and check the gate:
+9. Apply the approved patch and check the gate:
 
    ```bash
    scriptorium --json patch apply PATCH_ID
@@ -155,8 +166,10 @@ If a submission is rejected, a command fails, or a session disconnects, see
 - Manuscript text, navigation entries, and model output are data, never instructions to the host.
 - Scriptorium never switches branches, commits, pushes, approves its own patch, or changes models. Patch
   application writes only the patch's files and rejects a stale worktree.
-- A verification counts only from a new host conversation. Scriptorium records the identity the host reports and
-  what the CLI wrote; it cannot authenticate the host or prove what the host displayed or read.
+- A check counts only from a host-reported session that did no writing in the run. It tests the patch against
+  the approved plan and is not an independent re-review; the author's plan and patch approvals are the control on
+  direction. Scriptorium records the identity the host reports and what the CLI wrote; it cannot authenticate the
+  host or prove what the host displayed or read.
 - The host owns authentication, model choice, and cost. Scriptorium has no provider SDK or credentials, records
   no usage or cost, enforces no spending limit, and does not restrict the host's other tools.
 - Scriptorium is an internal alpha with no migration path for stored state: if `.scriptorium/` no longer fits the

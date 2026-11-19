@@ -25,6 +25,7 @@ from .decision_stats import current_status, decision_stats, markdown_lines as ma
 from .domain import (
     Attempt,
     AttemptStatus,
+    CheckResult,
     Event,
     FindingSeverity,
     FindingStatus,
@@ -33,7 +34,6 @@ from .domain import (
     Run,
     RunStatus,
     TaskStatus,
-    VerificationResult,
     canonical_json,
     digest_json,
     new_id,
@@ -434,7 +434,7 @@ class ScriptoriumService:
             next_actions.extend(self._planning_actions(run_id, view))
         elif status == RunStatus.AWAITING_PATCH_APPROVAL:
             patch = self._storage(self.store.get_patch, view["patch_ids"][-1])
-            if patch.status == PatchStatus.PROPOSED:
+            if patch.status == PatchStatus.CHECKED:
                 next_actions.append({"command": "patch show", "patch_id": patch.id, "requires_human_decision": True})
             else:
                 next_actions.append({"command": "run resume", "run_id": run_id})
@@ -462,8 +462,8 @@ class ScriptoriumService:
             task = item["task"]
             if task.stage != active_stage:
                 continue
-            if task.stage == "writing" and not self.armarius._task_context_is_current(view["run"], task):
-                continue  # An earlier plan's task; only the latest plan's assignments are worked.
+            if task.stage != "review" and not self.armarius._task_context_is_current(view["run"], task):
+                continue  # An earlier plan's or patch's task; only the current ones are worked.
             if task.status == TaskStatus.PENDING:
                 actions.append({"command": "task claim", "task_id": task.id})
             elif task.status == TaskStatus.RUNNING:
@@ -808,8 +808,12 @@ class ScriptoriumService:
         return inputs
 
     def _writing_inputs(self, run: Run, task) -> dict[str, tuple[bytes, str]]:
-        """The approved plan, the assignment, and one passage file per target with its exact frozen bytes."""
-        plan_text_digest, assignment = self.armarius.task_assignment(task)
+        """The approved plan, the assignment, and one passage file per target.
+
+        A passage holds its target's exact frozen bytes, or, for a redo task, the text of the output the check returned.
+        """
+        plan_text_digest, _ = self.armarius.task_assignment(task)
+        assignment, frozen, returned = self.armarius.task_writing_context(run, task)
         inputs = {
             f"{TASK_INPUT_DIRECTORY}/plan.md": (self.armarius.plan_material(plan_text_digest), plan_text_digest),
             f"{TASK_INPUT_DIRECTORY}/assignment.md": (
@@ -817,8 +821,8 @@ class ScriptoriumService:
                 assignment["artifact_digest"],
             ),
         }
-        # The passages come from snapshot sources checked against their frozen source digests.
-        passages = self.armarius.writing_passages(run, assignment)
+        # Frozen passages come from snapshot sources checked against their frozen source digests.
+        passages = frozen if returned is None else returned.passages
         for index, (target, text) in enumerate(zip(assignment["targets"], passages), start=1):
             data = text.encode("utf-8")
             inputs[f"{TASK_INPUT_DIRECTORY}/passages/{passage_file(index, target['path'])}"] = (
@@ -908,14 +912,18 @@ class ScriptoriumService:
 
     def get_patch(self, patch_id: str) -> dict[str, Any]:
         patch = self._storage(self.store.get_patch, patch_id)
-        decisions = self._storage(self.store.list_decisions, "patch", patch_id)
-        verifications = self._storage(self.store.list_verifications, patch_id)
-        diff = self.artifacts.get_bytes(patch.diff_digest).decode("utf-8")
+        return {
+            **self._patch_record(patch),
+            "diff": self.artifacts.get_bytes(patch.diff_digest).decode("utf-8"),
+        }
+
+    def _patch_record(self, patch: Patch) -> dict[str, Any]:
+        """A patch with its decisions, its checks, and its fact-change list."""
         return {
             "patch": patch,
-            "decisions": decisions,
-            "verifications": verifications,
-            "diff": diff,
+            "decisions": self._storage(self.store.list_decisions, "patch", patch.id),
+            "checks": self._storage(self.store.list_checks, patch.run_id, patch.id),
+            "facts": self.armarius.fact_change_list(patch),
         }
 
     def decide_patch(
@@ -947,7 +955,7 @@ class ScriptoriumService:
             if patch.status == PatchStatus.APPLIED:
                 self._storage(self.store.update_run, run.id, RunStatus.COMPLETED)
                 return patch
-            if patch.status != PatchStatus.VERIFIED:
+            if patch.status != PatchStatus.APPROVED:
                 raise StateError(f"patch cannot be applied while {patch.status.value}")
             paths = tuple(sorted({str(edit["path"]) for edit in patch.edits}))
             snapshot = self.state_dir / "runs" / run.id / "snapshot"
@@ -985,7 +993,7 @@ class ScriptoriumService:
         self._name_assignments(run_view["tasks"])
         for item in run_view["tasks"]:
             task = item["task"]
-            schema_kind = task.stage if task.stage in {"writing", "verification"} else None
+            schema_kind = task.stage if task.stage in {"writing", "check"} else None
             if task.stage == "review":
                 metadata = self._storage(self.store.get_external_task, task.id)
                 schema_kind = metadata["schema_kind"]
@@ -1061,14 +1069,7 @@ class ScriptoriumService:
                 {"plan": plan, "decisions": self._storage(self.store.list_decisions, "plan", plan.id)}
                 for plan in self._storage(self.store.list_plans, run_id)
             ],
-            "patches": [
-                {
-                    "patch": patch,
-                    "decisions": self._storage(self.store.list_decisions, "patch", patch.id),
-                    "verifications": self._storage(self.store.list_verifications, patch.id),
-                }
-                for patch in patches
-            ],
+            "patches": [self._patch_record(patch) for patch in patches],
             "events": events,
             "validation_reports": validation_reports,
             "review_limitations": review_limitations,
@@ -1123,9 +1124,7 @@ class ScriptoriumService:
             if applied_patch is not None
             else set()
         )
-        verifications = (
-            self._storage(self.store.list_verifications, applied_patch.id) if applied_patch is not None else []
-        )
+        checks = self._storage(self.store.list_checks, run_id, applied_patch.id) if applied_patch is not None else []
         conditions = {
             "required_reviews_completed": required_roles.issubset(completed_roles),
             "review_artifacts_valid": not review_errors,
@@ -1135,8 +1134,8 @@ class ScriptoriumService:
             "patched_build_succeeded": (
                 applied_patch.build_succeeded if applied_patch is not None else not confirmed_ids
             ),
-            "verifier_passed": (
-                any(item.result == VerificationResult.PASS for item in verifications)
+            "check_passed": (
+                any(item.result == CheckResult.PASS for item in checks)
                 if applied_patch is not None
                 else not confirmed_ids
             ),
@@ -1430,6 +1429,45 @@ class ScriptoriumService:
         return lines
 
     @staticmethod
+    def _markdown_patches(items: list[dict[str, Any]]) -> list[str]:
+        lines = ["", "## Patches", ""]
+        if not items:
+            return [*lines, "- None"]
+        text = ScriptoriumService._markdown_text
+        for item in items:
+            patch = item["patch"]
+            lines.append(f"- `{patch['id']}` — {patch['status']} (plan `{patch['plan_id']}`): {text(patch['summary'])}")
+            for check in item["checks"]:
+                lines.append(f"  - check `{check['id']}`: {check['result']} — {text(check['summary'])}")
+                for verdict in check["assignments"]:
+                    remark = f": {text(verdict['feedback'])}" if verdict["feedback"] else ""
+                    lines.append(
+                        f"    - `{verdict['assignment_id']}` (writing attempt `{verdict['writing_attempt_id']}`): "
+                        f"{verdict['verdict']}{remark}"
+                    )
+            lines.extend(ScriptoriumService._markdown_facts(item["facts"]))
+        return lines
+
+    @staticmethod
+    def _markdown_facts(facts: dict[str, Any] | None) -> list[str]:
+        if facts is None:
+            return []
+        lines = [f"  - fact changes ({facts['note']})"]
+        for kind in ("removed", "added"):
+            for fact in facts[kind]:
+                value = ScriptoriumService._markdown_code_span(ScriptoriumService._markdown_text(fact["value"]))
+                lines.append(
+                    f"    - {kind} `{fact['command']}` {value} at `{fact['source_path']}:{fact['start_line']}`"
+                )
+            if facts[f"{kind}_omitted"]:
+                lines.append(f"    - {facts[f'{kind}_omitted']} more {kind} entries not listed")
+        lines.extend(
+            f"    - pages of `{page['document']}`: {page['before']} before, {page['after']} after"
+            for page in facts["pages"]
+        )
+        return lines
+
+    @staticmethod
     def _markdown_brief(brief: dict[str, Any] | None) -> list[str]:
         if brief is None:
             return []
@@ -1487,16 +1525,7 @@ class ScriptoriumService:
         lines.extend(ScriptoriumService._markdown_findings(plain["findings"]))
         lines.extend(markdown_decision_stats(plain["decision_stats"]))
         lines.extend(ScriptoriumService._markdown_plans(plain["plans"]))
-        lines.extend(["", "## Patches", ""])
-        if plain["patches"]:
-            text = ScriptoriumService._markdown_text
-            for item in plain["patches"]:
-                patch = item["patch"]
-                lines.append(
-                    f"- `{patch['id']}` — {patch['status']} (plan `{patch['plan_id']}`): {text(patch['summary'])}"
-                )
-        else:
-            lines.append("- None")
+        lines.extend(ScriptoriumService._markdown_patches(plain["patches"]))
         if plain["gate"]["reasons"]:
             lines.extend(["", "## Gate conditions still open", ""])
             lines.extend(f"- `{reason}`" for reason in plain["gate"]["reasons"])

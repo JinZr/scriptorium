@@ -30,8 +30,8 @@ class RecordedBuildManager(PdfBuildingManuscriptManager):
 
 
 # Builds in order: the frozen base (1), the writing submission's own compile check (2, which only needs to compile),
-# the combined candidate (3), and the patched manuscript for verification (4).
-@pytest.mark.parametrize("fail_at", [1, 3, 4, None])
+# and the combined candidate (3), whose build also gives the patched bundle the check reads.
+@pytest.mark.parametrize("fail_at", [1, 3, None])
 def test_compiler_coverage_gates_each_external_build_stage(tmp_path, fail_at):
     repo = make_repository(tmp_path)
     manager = RecordedBuildManager(repo, fail_at)
@@ -51,20 +51,13 @@ def test_compiler_coverage_gates_each_external_build_stage(tmp_path, fail_at):
             with pytest.raises(InfrastructureError, match="hidden.tex"):
                 prepare_patch(service, run.id)
             assert service.store.list_patches(run.id) == []
-        else:
-            patch, _ = prepare_patch(service, run.id)
-            service.decide_patch(patch.id, "approve", "Verify the exact edit.")
-            if fail_at == 4:
-                with pytest.raises(InfrastructureError, match="hidden.tex"):
-                    asyncio.run(service.resume_run(run.id))
-            else:
-                view = asyncio.run(service.resume_run(run.id))
-                assert view["run"].status == RunStatus.VERIFYING
-        if fail_at:
             assert service.get_run(run.id)["run"].status == RunStatus.FAILED
             assert service.list_tasks(run.id)["next_actions"] == [{"command": "run resume", "run_id": run.id}]
             manager.fail_at = None
-            recovered = asyncio.run(service.resume_run(run.id))
-            expected = RunStatus.AWAITING_PATCH_APPROVAL if fail_at == 3 else RunStatus.VERIFYING
-            assert recovered["run"].status == expected
+            assert asyncio.run(service.resume_run(run.id))["run"].status == RunStatus.CHECKING
+        else:
+            prepare_patch(service, run.id)
+            assert service.store.get_run(run.id).status == RunStatus.CHECKING
+        # A recovered candidate builds again; the check needs no build of its own.
+        assert manager.builds == (4 if fail_at == 3 else 3)
         assert (repo / "main.tex").read_text() == MANUSCRIPT

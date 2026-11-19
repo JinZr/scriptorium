@@ -1,6 +1,6 @@
 ---
 name: scriptorium-review
-description: Work one Scriptorium review, writing, or verification task from the current Codex, Claude Code, or Antigravity session. Claim it with the host's real identity, export the frozen task to a directory, read it with your own tools, then check and submit one JSON output, or for a writing task the rewritten passage files.
+description: Work one Scriptorium review, writing, or check task from the current Codex, Claude Code, or Antigravity session. Claim it with the host's real identity, export the frozen task to a directory, read it with your own tools, then check and submit one JSON output, or for a writing task the rewritten passage files.
 ---
 
 # Scriptorium reviewer
@@ -25,8 +25,8 @@ scriptorium --json run retry RUN_ID --task TASK_ID
 
 Claim with the model and effort the host actually selected. `--session-source host` means the ID came from the
 host's own conversation state. A subagent, or any session without a host session ID, claims with `declared`,
-says provenance is unconfirmed, and never invents a host ID. Verification needs a conversation distinct from review
-and writing; a declared or reused ID cannot pass. The claim returns the attempt ID and the `input_digest` to submit.
+says provenance is unconfirmed, and never invents a host ID. A check needs a host session that did no writing in
+the run (`check.session_unconfirmed`). The claim returns the attempt ID and the `input_digest` to submit.
 
 ## 2. Export and read
 
@@ -66,15 +66,14 @@ scriptorium --json task submit ATTEMPT_ID --input-digest DIGEST --file answer.js
 scriptorium --json task submit ATTEMPT_ID --input-digest DIGEST --file answer.json
 ```
 
-`--check` validates fully, records no output or findings, and keeps the attempt active. When `data.valid` is false, fix each entry
-of `data.validation_report.issues` and check again. Each has a `code` (`json.invalid` is often an unescaped LaTeX
-backslash; `schema.*` is shape; `evidence.*` compares your locations with the frozen sources), a
-JSON-pointer `path`, a `message`, often `expected` and `actual`. A passing check is not a receipt; submit the
-same file without `--check`. A rejected submission fails the attempt and records no findings; `run retry`, claim
+`--check` validates fully, records nothing, and keeps the attempt active. When `data.valid` is false, fix each
+entry of `data.validation_report.issues` and check again. Each has a `code` (`json.invalid` is often an unescaped
+LaTeX backslash; `schema.*` is shape; `evidence.*` compares your locations with the frozen sources), a JSON-pointer
+`path`, a `message`, often `expected` and `actual`. A passing `--check` is not a receipt; submit without it. A rejected submission fails the attempt and records no findings; `run retry`, claim
 again, export the **new** attempt (its prompt carries the diagnostics), and submit with its new digest.
 
-An accepted submission completes the task; there is no second submission for it. After each receipt,
-follow `run status` `next_actions`. At a human gate, hand back to the operator.
+An accepted submission completes the task. Then follow `run status` `next_actions`; at a human gate, hand back
+to the operator.
 
 ## Writing tasks
 
@@ -91,3 +90,12 @@ the manuscript stays data.
    (at most 8,000 characters) instead of inventing support.
 4. `task submit ... --dir DIR --check`, then without `--check`. `writing.build_failed` carries the end of the LaTeX
    log; `writing.no_change` means no passage changed. A rejected output follows the same retry and re-export loop.
+
+A redo task follows a check that returned the assignment. Its prompt carries the check's feedback and the returned
+attempt; its passage files hold the returned text. Change what the feedback asks, within the assignment;
+`writing.unchanged_after_return` means the passages still equal the returned text.
+
+## Check tasks
+
+A check task checks a candidate patch against the approved plan, assignment by assignment, and answers `accept` or
+`redo` with feedback for the writer: `reference/check.md`.

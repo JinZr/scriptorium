@@ -450,6 +450,7 @@ def test_completed_benchmark_paper_is_not_repeated_on_resume(
         "skills/scriptorium/SKILL.md",
         "skills/scriptorium-review/SKILL.md",
         "skills/scriptorium-review/reference/anchors.md",
+        "skills/scriptorium-review/reference/check.md",
     ],
 )
 def test_skill_change_invalidates_frozen_benchmark_sources(

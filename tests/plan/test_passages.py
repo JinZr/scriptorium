@@ -1,6 +1,6 @@
 import pytest
 
-from scriptorium.plan import passage_file, replacement_text, writing_edits, writing_issues
+from scriptorium.plan import effective_passages, passage_file, replacement_text, writing_edits, writing_issues
 from scriptorium.schemas import WritingOutput
 
 ASSIGNMENT = {
@@ -58,6 +58,17 @@ def test_an_output_that_changes_nothing_is_refused():
     unchanged = _output("Line two.\r\nLine three.", "Last line without a break")
     assert [issue.code for issue in writing_issues(unchanged, FROZEN)] == ["writing.no_change"]
     assert writing_issues(_output("Line two.\r\nLine 3.", "Last line without a break"), FROZEN) == []
+
+
+def test_a_redo_must_change_the_returned_text_and_still_differ_from_the_frozen_text():
+    returned = effective_passages(_output("Line two.\r\nLine 3.", "Last line without a break"), FROZEN)
+    assert returned == ["Line two.\r\nLine 3.\r\n", "Last line without a break"]
+    # The returned text with its final terminator dropped is the same text.
+    same = _output("Line two.\r\nLine 3.", "Last line without a break")
+    assert [issue.code for issue in writing_issues(same, FROZEN, returned)] == ["writing.unchanged_after_return"]
+    back_to_frozen = _output("Line two.\r\nLine three.\r\n", "Last line without a break")
+    assert [issue.code for issue in writing_issues(back_to_frozen, FROZEN, returned)] == ["writing.no_change"]
+    assert writing_issues(_output("Line two.\r\nLine 3, revised.", "Last line"), FROZEN, returned) == []
 
 
 def test_edits_are_built_only_for_changed_targets_with_the_frozen_text_as_before():

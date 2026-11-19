@@ -48,9 +48,9 @@ and gates are in [architecture](architecture.md).
 | `finding decide ID [ID ...] --confirm\|--reject\|--waive --reason TEXT` | Decide findings | `finding_ids`; `decision`, `finding` or `decisions`, `findings` |
 | `plan check RUN_ID --dir DIR` | Validate a plan directory, recording nothing | `valid`, `issues`, `plan_digest`, `assignments` |
 | `plan approve RUN_ID --dir DIR --reason TEXT` | Record the author's approval, prepare writing tasks | overview |
-| `patch show PATCH_ID` | A patch | `patch`, `decisions`, `verifications`, `diff` |
+| `patch show PATCH_ID` | A patch | `patch`, `decisions`, `checks`, `diff`, `facts` |
 | `patch decide PATCH_ID --approve\|--reject --reason TEXT` | Decide the patch | `decision`, `patch` |
-| `patch apply PATCH_ID` | Write a verified patch to the worktree | the patch |
+| `patch apply PATCH_ID` | Write an approved patch to the worktree | the patch |
 
 The overview has `run` (`id`, `status`, `commit_sha`), `task_counts`, `finding_count`, `patch_count`, `has_error`,
 `next_actions`, `report_parts` (one `run report --part` command per section), and, for a run with a brief,
@@ -84,8 +84,8 @@ to it. Reread it after every change. Each entry names a command and its IDs:
 | `run resume` | The run can advance or recover |
 | `finding list` | Findings await a decision |
 | `plan approve` | The run is `planning` and a finding is confirmed |
-| `patch show` | A patch awaits approval, or, while `planning`, the latest patch was rejected (its reason is in `decisions`) |
-| `patch apply` | A verified patch is ready |
+| `patch show` | A checked patch awaits the author's decision, or, while `planning`, the latest patch was rejected (its reason is in `decisions`) |
+| `patch apply` | An approved patch is ready |
 
 Entries marked `requires_human_decision` are human gates: stop and hand them to the author.
 
@@ -97,22 +97,23 @@ Entries marked `requires_human_decision` are human gates: stop and hand them to 
 | `reviewing` | Review tasks are open | Work each task |
 | `awaiting_decision` | Every profile role has an accepted review | `finding decide`, `run resume` |
 | `planning` | Findings are confirmed; the lead and the author agree a plan | `plan check`, `plan approve` |
-| `writing` | One writing task per assignment of the approved plan | Work each task |
-| `awaiting_patch_approval` | A patch was proposed, or its verification failed | `patch show`, `patch decide`, `run resume` |
-| `verifying` | A verification task is open | Work it from a new conversation |
-| `ready_to_apply` | Verification passed | `patch apply` |
+| `writing` | One writing task per assignment of the approved plan, or per assignment a check returned | Work each task |
+| `checking` | A candidate patch waits for the lead's check | Work the check task |
+| `awaiting_patch_approval` | The check accepted every assignment | `patch show`, `patch decide`, `run resume` |
+| `ready_to_apply` | The author approved the patch | `patch apply` |
 | `completed` | The patch was applied, or nothing was confirmed | `run gate`, `run report` |
 | `failed` | An operation failed; `has_error` is true | Repair, then `run resume` if offered |
 | `cancelled` | Ended by `run cancel` | None |
 
 After the decisions, `run resume` moves the run to `planning` if any finding is confirmed and completes it if none
-is. `plan approve` moves it to `writing`. When every assignment has an accepted writing output, Scriptorium applies
-all their edits to one copy of the snapshot, compiles it, and proposes the patch (`awaiting_patch_approval`). After
-the patch decision, `run resume` prepares a verification task for an approved patch, or returns a rejected one to
-`planning`, where the lead reads the reason with `patch show` and changes the plan with the author; no task is
-prepared until a new plan is approved. A failing verification returns the run to `awaiting_patch_approval`; reject
-the patch there to plan again. In `planning` with no confirmed finding left, `run resume` completes the run.
-`completed` and `cancelled` runs cannot be reopened.
+is. `plan approve` moves it to `writing`. When every assignment has a current accepted writing output, Scriptorium
+applies all their edits to one copy of the snapshot, compiles it, proposes the patch, and prepares its check task
+(`checking`). A check that accepts every assignment moves the run to `awaiting_patch_approval`; one that returns
+any assignment moves it back to `writing`, where only the returned assignments get a redo task. After the author's
+patch decision, `run resume` moves an approved patch to `ready_to_apply` and returns a rejected one to `planning`,
+where the lead reads the reason with `patch show` and changes the plan with the author; no task is prepared until a
+new plan is approved. In `planning` with no confirmed finding left, `run resume` completes the run. `completed` and
+`cancelled` runs cannot be reopened.
 
 ## Working a task
 
@@ -142,12 +143,12 @@ gives `input_digest` to submit with and `export_command`.
 | `navigation.json` | An index of literal source locations (below) |
 | `manuscript.pdf` | The review PDF |
 | `task/prompt.md` | This attempt's prompt, with correction feedback after a retry |
-| `task/schema.json` | Review and verification tasks: the output schema |
-| `task/brief.json` | Review and verification tasks: the review brief, when the run has one |
+| `task/schema.json` | Review and check tasks: the output schema |
+| `task/brief.json` | Review and check tasks: the review brief, when the run has one |
 | `task/example.json` | Review tasks: a complete output that passed this task's checks |
 | `task/plan.md` | Writing tasks: the approved plan |
 | `task/assignment.md` | Writing tasks: this task's assignment file |
-| `task/passages/N.EXT` | Writing tasks: the exact frozen bytes of target `N`'s line range (`N` is the 1-based target index, `.EXT` the source's suffix, such as `1.tex`), final line terminator included |
+| `task/passages/N.EXT` | Writing tasks: the exact frozen bytes of target `N`'s line range (`N` is the 1-based target index, `.EXT` the source's suffix, such as `1.tex`), final line terminator included; for a redo task, the text of the returned output instead |
 
 - Files hold the exact frozen bytes, checked against the bundle index or their recorded digest, and are written
   atomically and read-only (`0444`), except the passage files, which are writable (`0644`). A path that would leave `DIR` or collide with `task/` is refused before
@@ -198,7 +199,7 @@ location, not the page: find the page from the caption (the text layer helps), o
   ([writing output](#writing-output)). A missing or non-UTF-8 passage file, or a note over 8,000 characters, is a
   `configuration_error` naming the file. `--file` with the packed JSON is equivalent.
 - `--check` runs the full validation (schema, evidence, task context, a writing task's compile check, the
-  verification session rule) under the run lock, for an active attempt and its input digest. It stores nothing but one `tool.submit_check` event (input and
+  check's session rule) under the run lock, for an active attempt and its input digest. It stores nothing but one `tool.submit_check` event (input and
   output digests, outcome, issue codes) and leaves the attempt claimable. `valid: true` means the file would be
   accepted now; it is not a receipt, and the submission validates again.
 - A submission stores the raw output and validates it. A valid output completes the attempt and its task; an
@@ -210,7 +211,7 @@ location, not the page: find the page from the caption (the text layer helps), o
 
 ## Output rules
 
-For review and verification tasks `task/schema.json` is authoritative: supply every required field and nothing
+For review and check tasks `task/schema.json` is authoritative: supply every required field and nothing
 else. `task/example.json` shows the shape of a complete review output; do not copy its content. A writing task
 returns passages, not JSON ([writing output](#writing-output)).
 
@@ -346,9 +347,10 @@ artifacts, records the plan (its `digest` covers the plan text, every assignment
 IDs) with a `plan` decision, and prepares the plan's writing tasks. The run's latest plan is its current one, and it
 stays current only while every finding it lists is still confirmed.
 
-A writing task is identified by its content: the `plan.md` text, the assignment ID, and the assignment file. When a
-later plan has a byte-identical `plan.md` and an assignment with the same name and a byte-identical file, that
-assignment keeps its accepted writing output and gets no new task; only changed and new assignments are rewritten. A
+A writing task is identified by its content: the `plan.md` text, the assignment ID, the assignment file, and, for a
+redo task, the check and the returned attempt. When a later plan has a byte-identical `plan.md` and an assignment
+with the same name and a byte-identical file, that assignment keeps its current output (the end of its
+[chain](#writing-output)) and gets no new task; only changed and new assignments are rewritten. A
 changed `plan.md` rewrites every assignment. The candidate patch combines the kept and new outputs and records the
 latest plan. Pending and claimed tasks of assignments the latest plan no longer holds are cancelled or interrupted.
 
@@ -362,7 +364,8 @@ stores this as `{"passages": [{"index": 1, "text": "..."}], "note": ...}`.
 - `writing.passages_mismatch`: the indexes must be exactly the assignment's targets, each once.
 - When a target's frozen text ends with a line terminator and the submitted text is not empty and ends with none,
   the frozen terminator is kept.
-- `writing.no_change`: at least one target must change.
+- `writing.no_change`: at least one target must change from its frozen text.
+- `writing.unchanged_after_return`: a redo task's output must differ from the output the check returned.
 - `writing.build_failed`: at submission, and for `--check`, the assignment's edits alone are applied to a copy of
   the snapshot and compiled; a LaTeX error rejects the output with the end of the build log, so `run retry` returns
   the task to a writer with the log in its correction prompt. A missing tool or other infrastructure failure leaves
@@ -374,12 +377,28 @@ accepted, all edits are applied together and compiled. If the combined copy fail
 assignment compiled alone, the run returns to `planning` with the error in `run status` and a `plan.build_failed`
 event naming the build log artifact; change the plan.
 
-### Verification output
+A redo task is a writing task for an assignment a check returned. Its prompt adds the check's feedback and the
+returned attempt's ID, and its passage files hold the returned output's text (after the line-terminator rule), so
+the writer revises its previous draft; the frozen sources stay read-only in `sources/`. Each assignment's current
+output is the end of its chain: the first-round output, then each redo output, until one that no check returned. A
+later plan that keeps an assignment unchanged reuses that output.
 
-`verdict` (`pass` or `fail`), `summary`, `resolved_finding_ids`, and `issues` (`title`, `explanation`, optional
-`evidence` against the patched sources). A `pass` resolves every confirmed finding and has no issues. The attempt
-must be claimed with `--session-source host` from a session that did no review or writing work in this run;
-otherwise the submission is rejected with `verification.session_unconfirmed`.
+### Check output
+
+The check task reads the patched manuscript; its prompt holds the approved plan, each assignment (instructions,
+targets, finding IDs, the writer's note, and the writing attempt the patch carries), the confirmed findings, the
+diff, and the [fact-change list](#patches-the-check-and-application). It checks the patch against the plan, not
+the paper anew. The output has a non-blank `summary` and `assignments`, one
+`{"assignment_id", "verdict": "accept" | "redo", "feedback"}` per assignment; it cites no evidence.
+
+- `check.assignments_mismatch`: exactly the assignments of the patch's plan, each once.
+- `check.feedback_required`: `redo` needs non-blank feedback for the writer; `accept` may carry an optional remark.
+- `check.session_unconfirmed`: at submission, and for `--check`, the attempt must be claimed with
+  `--session-source host`, and no writing attempt of this run may have the same client and session. Review and
+  earlier check attempts from that session are allowed.
+
+A check that accepts every assignment makes the patch `checked`. Otherwise the patch becomes `returned` and each
+`redo` assignment gets a redo task; accepted assignments keep their outputs and get no task.
 
 ### Validation report
 
@@ -387,7 +406,7 @@ otherwise the submission is rejected with `verification.session_unconfirmed`.
 and `actual`, and a `diff` for a `before` mismatch. Code prefixes: `json.` (invalid JSON, often an unescaped LaTeX
 backslash), `schema.` (shape), `evidence.` (for example `evidence.source_quote_mismatch`,
 `evidence.source_digest_mismatch`, `evidence.range_out_of_bounds`, `evidence.page_out_of_bounds`), `verdict.`,
-`writing.`, and `verification.`.
+`writing.`, and `check.`.
 
 ## Deciding findings
 
@@ -446,13 +465,28 @@ characters, newest first, at most 50). A finding decided twice counts once, unde
 lists, sorted by name and from `blocker` to `suggestion`. Use it to calibrate the next brief's `severity_notes`; it
 is not a quality metric and does not affect the gate.
 
-## Patches, verification, and application
+## Patches, the check, and application
 
-1. After the writing tasks, read the patch with `patch show` (its `plan_id` names the plan it came from, and its
-   `summary` carries the writers' notes), record the author's decision with `patch decide` (only the latest patch
-   can be decided), and `run resume`.
-2. Work the verification task from a new host session ([verification output](#verification-output)).
-3. Apply the verified patch with `patch apply`. It writes only the files the patch edits, after checking that each
+A patch is `proposed` when built and waiting for its check, `returned` when the check sent at least one assignment
+back, `checked` when the check accepted every assignment, then `approved` or `rejected` by the author, `applied`,
+or `stale`. The patch records the plan it came from (`plan_id`), the writing attempt each assignment's edits came
+from (`sources`), and its fact-change list (`facts_digest`); its `summary` carries the writers' notes. A new
+candidate whose diff equals an earlier `returned` or `rejected` patch proposes that patch again with the new plan
+and attempts.
+
+The fact-change list compares the run's frozen navigation index with the patched bundle's: the quantities, citation
+commands, reference commands, labels, and `includegraphics` entries removed and added, as multisets of
+`(command, value)`, each with its source path and start line (before the patch for a removed entry, after it for an
+added one), and each document's page count before and after. Each list keeps at most 100 entries and counts the rest
+in `removed_omitted` and `added_omitted`. The navigation index is heuristic, so the list is a reading aid for the
+lead and the author: it is not evidence, an empty list does not prove that no fact changed, and nothing is gated on
+it.
+
+1. Work the check task ([check output](#check-output)) and any redo tasks until the check accepts every assignment.
+2. Show the author the patch with `patch show` (`patch`, `decisions`, `checks`, `diff`, `facts`), record the
+   author's decision with `patch decide`, and `run resume`. Only the latest patch can be decided, while it is
+   `checked` or already decided and the run is `awaiting_patch_approval`.
+3. Apply the approved patch with `patch apply`. It writes only the files the patch edits, after checking that each
    still matches the frozen revision; if one does not, the patch becomes `stale`, the run fails, and nothing is
    written.
 4. Read `run gate` ([conditions](architecture.md#gates)) and `run report`.
@@ -477,7 +511,7 @@ scriptorium run report RUN_ID --format markdown > report.md
 | `findings_grouped` | [Groups](#how-findings-are-grouped) |
 | `decision_stats` | [Decision counts](#decision-statistics) |
 | `plans` | Each approved plan (digests, assignments with targets and finding IDs) with its approval decision |
-| `patches` | Each patch, with the plan it came from, its decisions, and verifications |
+| `patches` | Each patch, with the plan it came from, its decisions, its checks with their per-assignment verdicts, and its fact-change list |
 | `events` | The append-only event log, including `tool.*` events |
 | `validation_reports` | Every validation report, oldest first |
 | `review_limitations` | Each accepted review's `limitations`, with task, attempt, and role |
@@ -501,9 +535,9 @@ stored outputs again, so a corrupt artifact fails the report. When `has_error` i
   only the running attempt and reopens the task; a late submission to it is rejected. Only abandonment, retry, or
   cancellation ends a claim.
 - **Accepted work not replayed.** If a process stopped after accepting an output, `run status` offers `run resume`.
-- **Waiver after confirmation.** Waiving a finding the current plan lists while the run is `writing` interrupts or
-  cancels the open writing tasks and returns the run to `planning`; approve a plan without it. Later, a waiver
-  interrupts an open verification task whose prompt no longer matches, and `run resume` prepares its replacement.
+- **Waiver after confirmation.** Waiving a finding the current plan lists while the run is `writing` or `checking`
+  interrupts or cancels the open writing and check tasks and returns the run to `planning`; approve a plan without
+  it. In `awaiting_patch_approval` and `ready_to_apply` a waiver changes nothing in the flow.
 - **Rejected patch or a plan that does not compile.** The run is `planning`: read the reason (`patch show`, or the
   `run status` error and the `plan.build_failed` event), change the plan with the author, `plan check`, and
   `plan approve`.

@@ -15,10 +15,11 @@ from ._support import (
     PdfBuildingManuscriptManager,
     approve_plan,
     claim,
+    claim_check,
     complete_reviews,
     export_writing,
     make_repository,
-    prepare_verification,
+    prepare_patch,
     submit,
 )
 
@@ -249,19 +250,20 @@ def test_a_writing_attempt_exports_its_plan_assignment_and_writable_passages(tmp
         assert {item["path"] for item in recorded} == _files(out)
 
 
-def test_a_verification_attempt_exports_the_patched_bundle(tmp_path):
+def test_a_check_attempt_exports_the_patched_bundle(tmp_path):
     repo = make_repository(tmp_path)
     with ScriptoriumService(repo, manuscript_manager=PdfBuildingManuscriptManager(repo)) as service:
         run = asyncio.run(service.start_run("HEAD", "quick"))["run"]
-        prepare_verification(service, run.id)
-        verification = claim(service, run.id, AgentRole.VERIFICATION, session="verification-session")
-        out = tmp_path / "verification-out"
-        service.export_task(verification["attempt"].id, out)
-        assert (out / "sources/main.tex").read_bytes() == (
-            Path(verification["bundle_path"]) / "sources/main.tex"
-        ).read_bytes()
+        patch, _ = prepare_patch(service, run.id)
+        lead = claim_check(service, run.id)
+        out = tmp_path / "check-out"
+        service.export_task(lead["attempt"].id, out)
+        assert Path(lead["bundle_path"]) == service.state_dir / "runs" / run.id / "checks" / patch.id / "bundle"
+        assert (out / "sources/main.tex").read_bytes() == (Path(lead["bundle_path"]) / "sources/main.tex").read_bytes()
         assert "The result is clear." in (out / "sources/main.tex").read_text(encoding="utf-8")
-        assert "Approved diff" in (out / "task/prompt.md").read_text(encoding="utf-8")
+        assert _files(out) == BUNDLE | {"task/prompt.md", "task/schema.json"}
+        prompt = (out / "task/prompt.md").read_text(encoding="utf-8")
+        assert "Candidate diff" in prompt and "Fact-change list" in prompt and "Correct the typo" in prompt
 
 
 def test_claim_and_show_return_a_compact_overview_that_points_to_export(exporting):

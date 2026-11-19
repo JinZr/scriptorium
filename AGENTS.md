@@ -26,20 +26,23 @@ and `docs/operations.md` for lifecycle, recovery, or CLI work.
 - Never repair a run by editing `.scriptorium/`, run state files, artifacts,
   snapshots, bundles, or generated patches manually. Repair the external
   prerequisite and resume or retry through the CLI.
-- External host models review, write, and verify through the same JSON CLI. Scriptorium does not
+- External host models review, write, and check through the same JSON CLI. Scriptorium does not
   select, launch, or silently substitute a model. Its task tools read only the
   frozen bundle; do not claim they isolate all tools available to the host.
 - A run freezes its Git revision, source digests, navigation, prompts, schemas,
   and evidence contract. Attempts record the client's reported model, effort,
   and session identity without presenting them as verified provider billing.
-- Review, finding decisions, plan approval, writing, patch approval, verification, application, and the
+- Review, finding decisions, plan approval, writing, the check, patch approval, application, and the
   release gate are separate stages. Finding decisions, plan approval, patch approval, and application are
-  human gates; do not infer approval from severity, and do not bypass a gate.
+  human gates; do not infer approval from severity or from a passing check, and do not bypass a gate.
+- A check counts only from a host-reported session that did no writing in the run. It tests the patch against
+  the approved plan and is not an independent re-review; the author's plan and patch approvals are the control
+  on direction.
 - A writer changes only the line ranges the approved plan assigns. Scriptorium builds the exact edits from
   the returned passages; it never accepts a writer's own line numbers or diff.
 - Exact edits must match the approved base, path, digest, line range, and
   `before` text. Reject stale worktrees; do not add automatic three-way merging.
-- Infrastructure failures are inconclusive, not successful verification. They
+- Infrastructure failures are inconclusive, not a passing check. They
   must remain visible and must not allow the release gate to pass.
 - Scriptorium does not switch branches, merge, commit, or push manuscript work.
   Patch application may touch only explicitly approved files.
