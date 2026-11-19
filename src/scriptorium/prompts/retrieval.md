@@ -17,7 +17,7 @@ captions, and supplements. Raw text can hold comments or inactive variants; chec
 compiled manuscript. For visual claims, open the rendered page and compare the figure or table with its caption,
 legend, and discussion; source text or an index entry alone does not establish a visual finding. An empty search
 is not evidence that an issue is absent. If the manuscript mentions material absent from the frozen sources,
-describe the missing link in `limitations` for a review output or in `summary` for a revision or verification
+describe the missing link in `limitations` for a review output or in `summary` for a verification
 output; do not infer its contents. Use the summary to state what you inspected and any material left unchecked or
 unreadable. Report only supported issues; a clean manuscript may have no findings. Do not claim exhaustive
 coverage, and do not impose a minimum number of searches or findings.

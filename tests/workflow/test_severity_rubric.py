@@ -30,7 +30,7 @@ def test_every_review_role_freezes_the_rubric_once_into_its_task_input(tmp_path,
             assert prompt.count("Severity rubric") == 1, role
         assert all(
             "Severity rubric" not in run.frozen_config["evidence_anchor_contract"]["prompt_templates"][role]["content"]
-            for role in ("revision", "verification")
+            for role in ("writing", "verification")
         )
         current = _role_inputs(service, run.id)
 

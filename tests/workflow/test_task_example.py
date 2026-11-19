@@ -120,15 +120,15 @@ def test_an_example_that_fails_validation_is_not_frozen(tmp_path, monkeypatch):
         assert service.store.get_external_task(context["task"].id)["example_digest"] is None
 
 
-def test_revision_attempts_export_no_example(tmp_path):
+def test_writing_attempts_export_no_example(tmp_path):
     repo = make_repository(tmp_path)
     with ScriptoriumService(repo, manuscript_manager=PdfBuildingManuscriptManager(repo)) as service:
         run = asyncio.run(service.start_run("HEAD", "quick"))["run"]
         prepare_patch(service, run.id)
-        revision = next(task for task in service.store.list_tasks(run.id) if task.role == AgentRole.REVISION)
-        attempt_id = service.store.list_attempts(revision.id)[-1].id
+        writing = next(task for task in service.store.list_tasks(run.id) if task.role == AgentRole.WRITING)
+        attempt_id = service.store.list_attempts(writing.id)[-1].id
         assert _example(service, attempt_id, tmp_path / "export") is None
-        assert service.store.get_external_task(revision.id)["example_digest"] is None
+        assert service.store.get_external_task(writing.id)["example_digest"] is None
 
 
 def test_a_tampered_snapshot_fails_example_preparation_as_infrastructure(tmp_path):

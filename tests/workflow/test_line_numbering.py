@@ -11,7 +11,15 @@ from scriptorium.errors import InfrastructureError
 from scriptorium.service import ScriptoriumService
 from scriptorium.workflow import Armarius
 
-from ._support import PdfBuildingManuscriptManager, claim, make_repository, submit
+from ._support import (
+    PdfBuildingManuscriptManager,
+    approve_plan,
+    claim,
+    export_writing,
+    make_repository,
+    submit,
+    submit_writing,
+)
 
 FORM_FEED_SOURCE = "\\documentclass{article}\n\\begin{document}\nalpha\fbeta\ngamma delta\n\\end{document}\n"
 
@@ -47,7 +55,7 @@ def _finding(source, line, quote):
     }
 
 
-def _revise_verify_apply(service, run, source, line, before, after):
+def _write_verify_apply(service, run, line, before, after):
     findings = service.list_findings(run.id)
     finding = next(item for item in findings if item.evidence[0]["start_line"] == line)
     for other in findings:
@@ -55,18 +63,11 @@ def _revise_verify_apply(service, run, source, line, before, after):
             service.decide_finding(other.id, "reject", "Out of scope for this edit.")
     service.decide_finding(finding.id, "confirm", "Capitalize it.")
     asyncio.run(service.resume_run(run.id))
-    revision = claim(service, run.id, AgentRole.REVISION, session="revision-session")
-    edit = {
-        "finding_ids": [finding.id],
-        "path": "main.tex",
-        "source_digest": source["source_digest"],
-        "start_line": line,
-        "end_line": line,
-        "before": before,
-        "after": after,
-        "rationale": "Capitalize the quoted word.",
-    }
-    receipt = submit(service, revision, {"summary": "Capitalized.", "edits": [edit]})
+    approve_plan(service, run.id, {"word": ([f"main.tex:{line}-{line}"], [finding.id], "Capitalize the quoted word.")})
+    writing, export = export_writing(service, run.id)
+    # The passage holds the exact frozen line, its terminator included; the form feed stays inside it.
+    assert (export / "task" / "passages" / "1.tex").read_bytes().decode("utf-8") == before + "\n"
+    receipt = submit_writing(service, writing, export, {1: after})
     assert receipt["validation_report"] is None
     patch = service.store.list_patches(run.id)[-1]
     diff = service.artifacts.get_bytes(patch.diff_digest).decode("utf-8")
@@ -103,7 +104,7 @@ def test_exported_line_numbers_produce_accepted_evidence(tmp_path):
         )
         assert receipt["validation_report"] is None
         assert receipt["attempt"].status.value == "completed"
-        diff, applied = _revise_verify_apply(service, run, source, 3, "alpha\fbeta", "alpha\fBETA")
+        diff, applied = _write_verify_apply(service, run, 3, "alpha\fbeta", "alpha\fBETA")
         # Each hunk line starts on its own physical line; the form feed stays inside the changed line.
         assert "-alpha\fbeta\n+alpha\fBETA\n" in diff
         assert all(line[:1] in {" ", "-", "+", "@"} for line in diff.split("\n")[2:] if line)

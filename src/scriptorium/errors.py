@@ -25,3 +25,11 @@ class InfrastructureError(ScriptoriumError):
 class NotFoundError(ScriptoriumError):
     code = "not_found"
     exit_code = 2
+
+
+class BuildFailedError(InfrastructureError):
+    """LaTeX ran and failed, or produced no PDF; unlike a missing tool, the manuscript text is the cause."""
+
+    def __init__(self, message: str, log: str = "") -> None:
+        super().__init__(message)
+        self.log = log

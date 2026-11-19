@@ -13,7 +13,7 @@ from scriptorium.errors import ConfigurationError, InfrastructureError
 from scriptorium.manuscript import BuildResult, CompilerInput, ManuscriptManager
 from scriptorium.service import ScriptoriumService
 
-from ._support import claim, make_repository, review_finding, submit
+from ._support import approve_plan, claim, export_writing, make_repository, review_finding, submit, submit_writing
 
 SUPPLEMENT = "\\documentclass{article}\n\\begin{document}\nThe result is limited to adults.\n\\end{document}\n"
 
@@ -182,31 +182,15 @@ def test_verification_rebuilds_supplement_and_keeps_human_and_stale_worktree_gat
         finding_id = service.list_findings(run.id)[0].id
         service.decide_finding(finding_id, "confirm", "Test authorization to clarify.")
         asyncio.run(service.resume_run(run.id))
-        revision = claim(service, run.id, AgentRole.REVISION, session="revision")
-        submit(
-            service,
-            revision,
-            {
-                "summary": "Clarified the supplement.",
-                "edits": [
-                    {
-                        "finding_ids": [finding_id],
-                        "path": "supplement.tex",
-                        "source_digest": source["source_digest"],
-                        "start_line": 3,
-                        "end_line": 3,
-                        "before": "The result is limited to adults.",
-                        "after": "The result is limited to adults aged 18 years or older.",
-                        "rationale": "Clarify eligibility.",
-                    }
-                ],
-            },
-        )
+        approve_plan(service, run.id, {"eligibility": (["supplement.tex:3-3"], [finding_id], "State the age limit.")})
+        writing, export = export_writing(service, run.id)
+        submit_writing(service, writing, export, {1: "The result is limited to adults aged 18 years or older."})
         patch = service.store.list_patches(run.id)[-1]
         assert service.store.get_run(run.id).status == RunStatus.AWAITING_PATCH_APPROVAL
-        assert manager.built == ["main.tex", "supplement.tex"] * 2
+        # The base, the writing submission's compile check, and the combined candidate each build both documents.
+        assert manager.built == ["main.tex", "supplement.tex"] * 3
         service.decide_patch(patch.id, "approve", "Test authorization to verify.")
-        manager.fail_at = 6
+        manager.fail_at = 8
         with pytest.raises(InfrastructureError, match="supplement.tex"):
             asyncio.run(service.resume_run(run.id))
         assert not service.evaluate_gate(run.id)["passed"]

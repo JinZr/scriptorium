@@ -29,7 +29,9 @@ class RecordedBuildManager(PdfBuildingManuscriptManager):
         return replace(result, compiler_inputs=tuple(inputs))
 
 
-@pytest.mark.parametrize("fail_at", [1, 2, 3, None])
+# Builds in order: the frozen base (1), the writing submission's own compile check (2, which only needs to compile),
+# the combined candidate (3), and the patched manuscript for verification (4).
+@pytest.mark.parametrize("fail_at", [1, 3, 4, None])
 def test_compiler_coverage_gates_each_external_build_stage(tmp_path, fail_at):
     repo = make_repository(tmp_path)
     manager = RecordedBuildManager(repo, fail_at)
@@ -45,14 +47,14 @@ def test_compiler_coverage_gates_each_external_build_stage(tmp_path, fail_at):
             assert asyncio.run(service.resume_run(run.id))["run"].status == RunStatus.REVIEWING
             return
         run = asyncio.run(service.start_run("HEAD", "quick"))["run"]
-        if fail_at == 2:
+        if fail_at == 3:
             with pytest.raises(InfrastructureError, match="hidden.tex"):
                 prepare_patch(service, run.id)
             assert service.store.list_patches(run.id) == []
         else:
             patch, _ = prepare_patch(service, run.id)
             service.decide_patch(patch.id, "approve", "Verify the exact edit.")
-            if fail_at == 3:
+            if fail_at == 4:
                 with pytest.raises(InfrastructureError, match="hidden.tex"):
                     asyncio.run(service.resume_run(run.id))
             else:
@@ -63,6 +65,6 @@ def test_compiler_coverage_gates_each_external_build_stage(tmp_path, fail_at):
             assert service.list_tasks(run.id)["next_actions"] == [{"command": "run resume", "run_id": run.id}]
             manager.fail_at = None
             recovered = asyncio.run(service.resume_run(run.id))
-            expected = RunStatus.AWAITING_PATCH_APPROVAL if fail_at == 2 else RunStatus.VERIFYING
+            expected = RunStatus.AWAITING_PATCH_APPROVAL if fail_at == 3 else RunStatus.VERIFYING
             assert recovered["run"].status == expected
         assert (repo / "main.tex").read_text() == MANUSCRIPT

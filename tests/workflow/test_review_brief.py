@@ -56,7 +56,7 @@ def test_the_brief_is_frozen_into_every_review_prompt_and_binds_its_input_digest
         assert prompts[role].count(section) == 1
         assert prompts[role].index(section) < prompts[role].index(SEVERITY_RUBRIC)
         assert prompts[role].count(SEVERITY_RUBRIC) == 1
-    for role in ("revision", "verification"):
+    for role in ("writing", "verification"):
         assert "Review brief" not in _templates(briefed)[role]
     assert plain.brief_digest is None
     assert briefed.brief_digest is not None and briefed.brief_digest != changed.brief_digest

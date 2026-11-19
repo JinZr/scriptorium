@@ -12,6 +12,7 @@ REPORT_PARTS = (
     "findings",
     "findings_grouped",
     "decision_stats",
+    "plans",
     "patches",
     "events",
     "validation_reports",

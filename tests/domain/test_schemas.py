@@ -124,14 +124,11 @@ def test_limitations_items_must_not_be_blank() -> None:
 def test_output_schema_uses_the_supplied_frozen_contract() -> None:
     content = evidence_anchor_contract_content()
     content["source_line"]["matching_rule"] = "frozen source match"
-    content["revision_edit"]["source_path_rule"] = "frozen edit path"
     contract = EvidenceAnchorContract.model_validate(content)
 
     evidence = output_schema("review", contract)["$defs"]["Evidence"]
-    edit = output_schema("revision", contract)["$defs"]["ExactEdit"]
 
     assert "frozen source match" in evidence["properties"]["quoted_text"]["description"]
-    assert edit["properties"]["path"]["description"] == "frozen edit path"
 
 
 def test_source_map_models_enforce_canonical_paths_and_page_order() -> None:

@@ -120,7 +120,7 @@ def test_check_reports_a_reused_verifier_session(tmp_path):
         run = asyncio.run(service.start_run("HEAD", "quick"))["run"]
         _, finding_id = prepare_verification(service, run.id)
         task = next(task for task in service.store.list_tasks(run.id) if task.role == AgentRole.VERIFICATION)
-        verification = service.claim_task(task.id, "codex", "test-model", "max", "revision-session", "host")
+        verification = service.claim_task(task.id, "codex", "test-model", "max", "writing-session", "host")
         output = {"verdict": "pass", "summary": "Checked.", "resolved_finding_ids": [finding_id], "issues": []}
         checked = service.check_submission(verification["attempt"].id, verification["input_digest"], json.dumps(output))
         assert "verification.session_unconfirmed" in {issue["code"] for issue in checked["validation_report"]["issues"]}

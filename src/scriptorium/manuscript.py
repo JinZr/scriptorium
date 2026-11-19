@@ -18,7 +18,7 @@ import tempfile
 from typing import Callable, Iterable, Iterator, Sequence
 
 from .config import ManuscriptConfig
-from .errors import ConfigurationError, InfrastructureError, StateError
+from .errors import BuildFailedError, ConfigurationError, InfrastructureError, StateError
 from .schemas import (
     DEFAULT_EVIDENCE_ANCHOR_CONTRACT,
     CompiledPdfAnchor,
@@ -380,7 +380,7 @@ def _export_target(root: Path, relative: PurePosixPath) -> Path:
     return target
 
 
-def _write_read_only(target: Path, data: bytes) -> None:
+def _write_export_file(target: Path, data: bytes, mode: int) -> None:
     target.parent.mkdir(parents=True, exist_ok=True)
     descriptor, temporary = tempfile.mkstemp(dir=target.parent, prefix=".export-")
     try:
@@ -388,7 +388,7 @@ def _write_read_only(target: Path, data: bytes) -> None:
             stream.write(data)
             stream.flush()
             os.fsync(stream.fileno())
-        os.chmod(temporary, 0o444)
+        os.chmod(temporary, mode)
         os.replace(temporary, target)
     finally:
         Path(temporary).unlink(missing_ok=True)
@@ -411,11 +411,16 @@ def _discard_export(root: Path, written: list[Path], created_root: bool) -> None
 
 
 def export_files(
-    directory: str | Path, names: Sequence[str], read: Callable[[str], bytes], record: Callable[[], None]
+    directory: str | Path,
+    names: Sequence[str],
+    read: Callable[[str], bytes],
+    record: Callable[[], None],
+    writable: frozenset[str] = frozenset(),
 ) -> Path:
-    """Write read(name) for each relative name into a new or empty directory, read-only, one atomic file at a time.
+    """Write read(name) for each relative name into a new or empty directory, one atomic file at a time.
 
-    record runs after every file is in place; if any step fails, everything written here is removed again.
+    Files are read-only (0444) except the names in writable (0644). record runs after every file is in place; if
+    any step fails, everything written here is removed again.
     """
     root = export_root(directory)
     relatives = [_export_relative(name) for name in names]
@@ -426,7 +431,7 @@ def export_files(
         for name, relative in zip(names, relatives):
             data = read(name)
             target = _export_target(root, relative)
-            _write_read_only(target, data)
+            _write_export_file(target, data, 0o644 if name in writable else 0o444)
             written.append(target)
         record()
     except BaseException:
@@ -1060,6 +1065,8 @@ class ManuscriptManager:
                             )
                         )
                         combined.insert_pdf(document)
+                except BuildFailedError as exc:
+                    raise BuildFailedError(f"Cannot compile review document {entrypoint}: {exc}", exc.log) from exc
                 except (InfrastructureError, RuntimeError, ValueError) as exc:
                     raise InfrastructureError(f"Cannot compile review document {entrypoint}: {exc}") from exc
                 builds.append(build)
@@ -1120,10 +1127,10 @@ class ManuscriptManager:
             raise InfrastructureError("latexmk is required but was not found") from exc
         log = f"{result.stdout}\n{result.stderr}".strip()
         if result.returncode != 0:
-            raise InfrastructureError(f"LaTeX build failed:\n{log}")
+            raise BuildFailedError(f"LaTeX build failed:\n{log}", log)
         pdf_path = workspace / Path(manuscript.main).with_suffix(".pdf")
         if not pdf_path.is_file():
-            raise InfrastructureError(f"LaTeX build did not create {pdf_path.name}")
+            raise BuildFailedError(f"LaTeX build did not create {pdf_path.name}", log)
         texmf_roots = self._texmf_roots()
         inputs, outputs = self._read_recorder(workspace, main, texmf_roots)
         output_suffix = ".xdv" if manuscript.engine == "xelatex" else ".pdf"

@@ -632,7 +632,8 @@ class ScientificReviewOutput(StrictModel):
 
 
 class ExactEdit(StrictModel):
-    finding_ids: list[str] = Field(min_length=1)
+    # An assignment may carry no findings: a narrative change the author asked for.
+    finding_ids: list[str]
     path: str = Field(
         min_length=1,
         description=DEFAULT_EVIDENCE_ANCHOR_CONTRACT.revision_edit.source_path_rule,
@@ -659,9 +660,19 @@ class ExactEdit(StrictModel):
         return self
 
 
-class RevisionOutput(StrictModel):
-    summary: str = Field(min_length=1)
-    edits: list[ExactEdit]
+WRITING_NOTE_LIMIT = 8_000
+
+
+class WritingPassage(StrictModel):
+    index: int = Field(ge=1, description="1-based target index within the assignment")
+    text: str = Field(description="The replacement text for the target's whole line range; empty deletes the lines.")
+
+
+class WritingOutput(StrictModel):
+    """The stored form of a writing submission: one passage per target, packed from the export directory."""
+
+    passages: list[WritingPassage]
+    note: str | None = Field(default=None, max_length=WRITING_NOTE_LIMIT)
 
 
 class VerificationIssue(StrictModel):
@@ -693,7 +704,7 @@ class ValidationIssue(StrictModel):
 
 
 class ValidationReport(StrictModel):
-    schema_kind: Literal["review", "scientific_review", "revision", "verification"]
+    schema_kind: Literal["review", "scientific_review", "writing", "verification"]
     schema_digest: str = Field(pattern="^[0-9a-f]{64}$")
     bundle_digest: str = Field(pattern="^[0-9a-f]{64}$")
     output_artifact_digest: str | None = Field(default=None, pattern="^[0-9a-f]{64}$")
@@ -703,7 +714,7 @@ class ValidationReport(StrictModel):
 SCHEMA_MODELS: dict[str, type[StrictModel]] = {
     "review": ReviewOutput,
     "scientific_review": ScientificReviewOutput,
-    "revision": RevisionOutput,
+    "writing": WritingOutput,
     "verification": VerificationOutput,
 }
 
@@ -721,10 +732,6 @@ def output_schema(
         )
         evidence["properties"]["quoted_text"]["description"] = contract.source_line.matching_rule
         evidence["oneOf"] = _evidence_anchor_schema(contract)
-    elif kind == "revision":
-        properties = schema["$defs"]["ExactEdit"]["properties"]
-        properties["path"]["description"] = contract.revision_edit.source_path_rule
-        properties["before"]["description"] = contract.revision_edit.matching_rule
     return schema
 
 

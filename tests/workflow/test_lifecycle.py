@@ -7,8 +7,10 @@ from scriptorium.service import ScriptoriumService
 from ._support import (
     MANUSCRIPT,
     PdfBuildingManuscriptManager,
+    approve_plan,
     claim,
     complete_reviews,
+    export_writing,
     make_repository,
     prepare_patch,
     prepare_verification,
@@ -103,7 +105,7 @@ def test_task_list_handoffs_patch_approval_and_replays_verification(tmp_path):
         ]
 
 
-def test_task_list_replays_accepted_revision(tmp_path):
+def test_run_resume_replays_accepted_writing_into_a_patch(tmp_path):
     repo = make_repository(tmp_path)
     with ScriptoriumService(repo, manuscript_manager=PdfBuildingManuscriptManager(repo)) as service:
         run = asyncio.run(service.start_run("HEAD", "quick"))["run"]
@@ -111,30 +113,17 @@ def test_task_list_replays_accepted_revision(tmp_path):
         finding_id = service.list_findings(run.id)[0].id
         service.decide_finding(finding_id, "confirm", "Correct the typo.")
         asyncio.run(service.resume_run(run.id))
-        revision = claim(service, run.id, AgentRole.REVISION, session="revision-session")
-        source = next(item for item in revision["source_map"]["sources"] if item["source_path"] == "main.tex")
-        service.armarius.submit_task(
-            revision["attempt"].id,
-            revision["input_digest"],
-            json.dumps(
-                {
-                    "summary": "Corrected the sentence.",
-                    "edits": [
-                        {
-                            "finding_ids": [finding_id],
-                            "path": "main.tex",
-                            "source_digest": source["source_digest"],
-                            "start_line": 3,
-                            "end_line": 3,
-                            "before": "The result is teh clear.",
-                            "after": "The result is clear.",
-                            "rationale": "Fix the typo.",
-                        }
-                    ],
-                }
-            ),
-        )
-        assert service.store.get_run(run.id).status == RunStatus.REVISING
+        assert service.store.get_run(run.id).status == RunStatus.PLANNING
+        approve_plan(service, run.id)
+        writing, export = export_writing(service, run.id)
+        (export / "task" / "passages" / "1.tex").write_text("The result is clear.", encoding="utf-8")
+        output = service.pack_writing_output(writing["attempt"].id, export)
+        # Accepted without advancing the run, as when a process stops after accepting an output.
+        service.armarius.submit_task(writing["attempt"].id, writing["input_digest"], output)
+        assert service.store.get_run(run.id).status == RunStatus.WRITING
         assert service.list_tasks(run.id)["next_actions"] == [{"command": "run resume", "run_id": run.id}]
         asyncio.run(service.resume_run(run.id))
         assert service.store.get_run(run.id).status == RunStatus.AWAITING_PATCH_APPROVAL
+        patch = service.store.list_patches(run.id)[-1]
+        assert patch.edits[0]["after"] == "The result is clear.\n"
+        assert patch.edits[0]["finding_ids"] == [finding_id]

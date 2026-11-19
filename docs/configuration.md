@@ -29,8 +29,9 @@ roles = ["substantive_review", "copyedit", "consistency", "figure_review"]
 | `manuscript.supplements` | Optional list of further repository-relative `.tex` entrypoints |
 | `profiles.NAME.roles` | One or more distinct roles from `substantive_review`, `copyedit`, `consistency`, `figure_review` |
 
-`run start` and `doctor` use the profile named by `--profile`. Revision and verification tasks are not configured;
-the workflow prepares them when findings are confirmed and a patch is approved.
+`run start` and `doctor` use the profile named by `--profile`. Writing and verification tasks are not configured:
+the workflow prepares one writing task per assignment of an approved plan, and a verification task when a patch is
+approved.
 
 ## Supplements
 

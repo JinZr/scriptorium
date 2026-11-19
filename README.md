@@ -5,24 +5,27 @@
 Scriptorium is a local, Git-native command-line tool for reviewing and revising LaTeX manuscripts with the model
 you already use in Codex, Claude Code, or Antigravity. It freezes one commit of the manuscript, prepares review
 tasks, exports each task for the host session to read, validates the structured output the host submits, and
-records the author's decisions about findings and patches.
+records the author's decisions about findings, the revision plan, and patches.
 
 Scriptorium does not select, start, or pay for a model: the host session does the reviewing through the same JSON
 commands. It is a single-user tool for one lab member's clone, not a service, and not an automatic editor: every
-finding decision, patch approval, and patch application waits for a human.
+finding decision, plan approval, patch approval, and patch application waits for a human.
 
 ## How a run flows
 
 ```text
-review tasks ──> finding decisions ──> revision task ──> patch approval
-   (model)           (author)              (model)           (author)
+review tasks ──> finding decisions ──> plan approval ──> writing tasks ──> patch approval
+   (model)           (author)         (lead + author)      (model)          (author)
 ──> verification task ──> patch application ──> release gate
      (new session)           (author)
 ```
 
-Each review role of the chosen profile gets one task. Confirmed findings go to one revision task, which proposes
-exact edits as a patch; an approved patch is verified by a separate host conversation before it can be applied. The
-statuses and transitions are in [run lifecycle](docs/operations.md#run-lifecycle).
+Each review role of the chosen profile gets one task. After the author confirms findings, the operator, acting as
+the lead, agrees a plan with the author: the story the paper should tell and one assignment per passage to rewrite.
+Each assignment of the approved plan becomes a writing task, in which a host session rewrites the assigned passages
+as plain text; Scriptorium builds the exact edits, compiles them, and proposes one patch. An approved patch is
+verified by a separate host conversation before it can be applied. The statuses and transitions are in
+[run lifecycle](docs/operations.md#run-lifecycle).
 
 ## Install
 
@@ -39,8 +42,8 @@ PYTHON=/path/to/python bash /path/to/scriptorium/utils/preflight.sh
 
 The client loads two skills from this repository. [`skills/scriptorium`](skills/scriptorium/SKILL.md) is for the
 operator, who agrees the review brief, starts runs, reads reports, and records the author's decisions.
-[`skills/scriptorium-review`](skills/scriptorium-review/SKILL.md) is for the reviewer, who claims one task,
-exports and reads it, and submits the output. Copy or link both directories into the client's skills directory,
+[`skills/scriptorium-review`](skills/scriptorium-review/SKILL.md) is for the reviewer or writer, who claims one
+task, exports and reads it, and submits the output. Copy or link both directories into the client's skills directory,
 for example `~/.claude/skills/` for Claude Code or `~/.codex/skills/` for Codex.
 
 ### Development
@@ -109,7 +112,23 @@ answer at the human gates. [Operations](docs/operations.md) has every command's 
    scriptorium --json run resume RUN_ID
    ```
 
-5. If a finding was confirmed, a revision task appears; work it like step 3. Then review and decide the patch:
+5. If a finding was confirmed, the run is `planning`. Agree the plan with the author, write it as a directory
+   ([plan directory](docs/operations.md#the-plan-directory)), check it, and record the author's approval:
+
+   ```bash
+   scriptorium --json plan check RUN_ID --dir plan
+   scriptorium --json plan approve RUN_ID --dir plan --reason "..."
+   ```
+
+6. Each assignment becomes a writing task. A writer session claims and exports it like step 3, rewrites the files
+   under `task/passages/`, and submits the export directory:
+
+   ```bash
+   scriptorium --json task submit ATTEMPT_ID --input-digest INPUT_DIGEST --dir writing-export --check
+   scriptorium --json task submit ATTEMPT_ID --input-digest INPUT_DIGEST --dir writing-export
+   ```
+
+   When every assignment is accepted, review and decide the patch:
 
    ```bash
    scriptorium --json patch show PATCH_ID
@@ -117,7 +136,7 @@ answer at the human gates. [Operations](docs/operations.md) has every command's 
    scriptorium --json run resume RUN_ID
    ```
 
-6. Work the verification task from a new host conversation, then apply the verified patch and check the gate:
+7. Work the verification task from a new host conversation, then apply the verified patch and check the gate:
 
    ```bash
    scriptorium --json patch apply PATCH_ID
@@ -146,8 +165,8 @@ If a submission is rejected, a command fails, or a session disconnects, see
 ## Documentation
 
 - [Configuration](docs/configuration.md): `scriptorium.toml`, supplements, the review brief, `doctor`.
-- [Operations](docs/operations.md): commands, the run lifecycle, output rules, deciding findings, reports,
-  recovery.
+- [Operations](docs/operations.md): commands, the run lifecycle, the plan directory, output rules, deciding
+  findings, reports, recovery.
 - [Architecture](docs/architecture.md): modules, state layout and locking, what a run freezes, evidence, gates.
 - [Lab onboarding guide (Chinese)](docs/onboarding.md).
 - [`egs/peerreviewbench/`](egs/peerreviewbench/README.md): an optional example that prepares external review
