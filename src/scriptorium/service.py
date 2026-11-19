@@ -455,14 +455,15 @@ class ScriptoriumService:
             "next_actions": next_actions,
         }
 
-    @staticmethod
-    def _task_actions(view: dict[str, Any]) -> list[dict[str, Any]]:
+    def _task_actions(self, view: dict[str, Any]) -> list[dict[str, Any]]:
         active_stage = next((stage for stage, status in STAGE_STATUS.items() if status == view["run"].status), None)
         actions = []
         for item in view["tasks"]:
             task = item["task"]
             if task.stage != active_stage:
                 continue
+            if task.stage == "writing" and not self.armarius._task_context_is_current(view["run"], task):
+                continue  # An earlier plan's task; only the latest plan's assignments are worked.
             if task.status == TaskStatus.PENDING:
                 actions.append({"command": "task claim", "task_id": task.id})
             elif task.status == TaskStatus.RUNNING:
@@ -808,12 +809,9 @@ class ScriptoriumService:
 
     def _writing_inputs(self, run: Run, task) -> dict[str, tuple[bytes, str]]:
         """The approved plan, the assignment, and one passage file per target with its exact frozen bytes."""
-        plan, assignment = self.armarius.task_assignment(task)
+        plan_text_digest, assignment = self.armarius.task_assignment(task)
         inputs = {
-            f"{TASK_INPUT_DIRECTORY}/plan.md": (
-                self.armarius.plan_material(plan.plan_artifact_digest),
-                plan.plan_artifact_digest,
-            ),
+            f"{TASK_INPUT_DIRECTORY}/plan.md": (self.armarius.plan_material(plan_text_digest), plan_text_digest),
             f"{TASK_INPUT_DIRECTORY}/assignment.md": (
                 self.armarius.plan_material(assignment["artifact_digest"]),
                 assignment["artifact_digest"],
@@ -1082,11 +1080,11 @@ class ScriptoriumService:
         return self._markdown_report(payload)
 
     def _name_assignments(self, tasks: list[dict[str, Any]]) -> None:
-        """Name the plan and assignment of each writing task in the report."""
+        """Name the assignment of each writing task in the report; one task can serve several plans."""
         for item in tasks:
             if item["task"].stage == "writing":
                 metadata = self._storage(self.store.get_external_task, item["task"].id)
-                item.update(plan_id=metadata["plan_id"], assignment_id=metadata["assignment_id"])
+                item["assignment_id"] = metadata["assignment_id"]
 
     def _report_run(self, run: Run) -> Run | dict[str, Any]:
         brief = self.armarius.review_brief(run)

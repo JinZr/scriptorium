@@ -335,15 +335,22 @@ nothing: `plan.missing` (`plan.md` is missing, blank, not UTF-8, or too large), 
 `plan.too_many_assignments`, `plan.assignment_name_invalid`, `plan.front_matter_invalid` (also an assignment file
 that is not UTF-8 or too large), `plan.assignment_empty`, `plan.target_path_unknown`, `plan.target_not_editable`,
 `plan.target_out_of_bounds`, `plan.targets_overlap`, `plan.unknown_finding_ids` (not a confirmed finding of this
-run), `plan.findings_unassigned`, and `plan.unchanged_after_rejection` (the plan equals the latest approved plan and
-the latest patch was rejected). `plan check` echoes each assignment's `id`, `finding_ids`, and `targets` with
+run), `plan.findings_unassigned`, and `plan.unchanged` (the plan's digest equals the latest approved plan's; the
+run is planning again because that plan's patch was rejected, its outputs failed to compile together, or a waiver
+voided it, and approving the same plan would reproduce that result). `plan check` echoes each assignment's `id`, `finding_ids`, and `targets` with
 `index`, `path`, `start_line`, `end_line`, and the frozen text of the range's `first_line` and `last_line`, so the
 author can confirm each range.
 
 `plan approve` is the author's approval, a human gate. It publishes `plan.md` and every assignment file as
 artifacts, records the plan (its `digest` covers the plan text, every assignment file, its targets, and its finding
-IDs) with a `plan` decision, and prepares one writing task per assignment. The run's latest plan is its current one;
-a writing task stays current only while its plan is current and every finding that plan lists is still confirmed.
+IDs) with a `plan` decision, and prepares the plan's writing tasks. The run's latest plan is its current one, and it
+stays current only while every finding it lists is still confirmed.
+
+A writing task is identified by its content: the `plan.md` text, the assignment ID, and the assignment file. When a
+later plan has a byte-identical `plan.md` and an assignment with the same name and a byte-identical file, that
+assignment keeps its accepted writing output and gets no new task; only changed and new assignments are rewritten. A
+changed `plan.md` rewrites every assignment. The candidate patch combines the kept and new outputs and records the
+latest plan. Pending and claimed tasks of assignments the latest plan no longer holds are cancelled or interrupted.
 
 ### Writing output
 
@@ -464,7 +471,7 @@ scriptorium run report RUN_ID --format markdown > report.md
 | Part | Content |
 | --- | --- |
 | `run` | The run record: frozen configuration, error, and the full brief |
-| `tasks` | Each task with its attempts; a writing task also names its `plan_id` and `assignment_id` |
+| `tasks` | Each task with its attempts; a writing task also names its `assignment_id` |
 | `finding_ids`, `patch_ids` | IDs in order |
 | `findings` | Each finding with its decisions; status follows the latest decision |
 | `findings_grouped` | [Groups](#how-findings-are-grouped) |

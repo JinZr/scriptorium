@@ -49,8 +49,8 @@ def test_a_rejected_patch_returns_the_run_to_planning_and_an_unchanged_plan_is_r
 
         check = service.check_plan(run.id, first)
         assert not check["valid"]
-        assert [issue["code"] for issue in check["issues"]] == ["plan.unchanged_after_rejection"]
-        with pytest.raises(ConfigurationError, match="plan.unchanged_after_rejection"):
+        assert [issue["code"] for issue in check["issues"]] == ["plan.unchanged"]
+        with pytest.raises(ConfigurationError, match="plan.unchanged"):
             asyncio.run(service.approve_plan(run.id, first, "Approve it again."))
         assert len(service.store.list_plans(run.id)) == 1
 

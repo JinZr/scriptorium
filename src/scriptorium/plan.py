@@ -270,11 +270,11 @@ def validate_plan(
     plan: PlanDirectory,
     sources: Sequence[SourceAnchorRecord],
     confirmed_ids: set[str],
-    rejected_digest: str | None,
+    latest_digest: str | None,
 ) -> list[ValidationIssue]:
     """Check targets against the frozen source map and the assignments against the confirmed findings.
 
-    ``rejected_digest`` is the latest approved plan's digest when the latest patch was rejected, otherwise None.
+    ``latest_digest`` is the digest of the run's latest approved plan, or None before the first approval.
     """
     index = {source.source_path: source for source in sources}
     issues: list[ValidationIssue] = []
@@ -309,12 +309,13 @@ def validate_plan(
                 actual={"unassigned_finding_ids": unassigned},
             )
         )
-    if rejected_digest is not None and plan.digest == rejected_digest:
+    if latest_digest is not None and plan.digest == latest_digest:
+        # The run is planning again because that plan's patch was rejected, failed to compile, or lost a finding.
         issues.append(
             _issue(
-                "plan.unchanged_after_rejection",
+                "plan.unchanged",
                 "",
-                "The latest patch was rejected; change the plan before approving it again.",
+                "The plan is identical to the latest approved plan and would reproduce its result; change it.",
                 actual={"plan_digest": plan.digest},
             )
         )

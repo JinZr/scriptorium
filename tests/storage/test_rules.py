@@ -59,6 +59,22 @@ def test_one_task_per_run_stage_role_and_input_digest(tmp_path) -> None:
         assert len(store.list_tasks(run.id)) == 2
 
 
+def test_a_cancelled_task_gives_way_to_a_task_with_the_same_inputs(tmp_path) -> None:
+    with RunStore(tmp_path) as store:
+        run = store.create_run(make_run())
+        cancelled = store.create_task(Task(run_id=run.id, stage="writing", role=AgentRole.WRITING, input_digest="d"))
+        store.update_task_status(cancelled.id, TaskStatus.CANCELLED)
+        assert store.find_task(run.id, "writing", AgentRole.WRITING, "d") is None
+
+        replacement = store.create_task(Task(run_id=run.id, stage="writing", role=AgentRole.WRITING, input_digest="d"))
+        assert store.find_task(run.id, "writing", AgentRole.WRITING, "d") == replacement
+        assert store.get_task(cancelled.id).status == TaskStatus.CANCELLED
+        with pytest.raises(ConflictError, match="stage, role, and input digest"):
+            store.create_task(Task(run_id=run.id, stage="writing", role=AgentRole.WRITING, input_digest="d"))
+    with RunStore(tmp_path) as reopened:
+        assert reopened.find_task(run.id, "writing", AgentRole.WRITING, "d") == replacement
+
+
 def test_one_attempt_per_task_ordinal_and_an_attempt_names_its_task(tmp_path) -> None:
     with RunStore(tmp_path) as store:
         run = store.create_run(make_run())

@@ -64,8 +64,9 @@ _EXTERNAL_TASK_KEYS = (
     "bundle_digest",
     "bundle_path",
     "schema_kind",
-    "plan_id",
+    "plan_text_digest",
     "assignment_id",
+    "assignment_digest",
     "example_digest",
 )
 # Every key but the task ID and the example digest is frozen task material and must never change.
@@ -404,8 +405,12 @@ class RunStore:
         with self._mutation(task.run_id) as state:
             if task.id in state.tasks:
                 raise ConflictError(f"task already exists: {task.id}")
+            # A cancelled task no longer holds its inputs: an identical later task replaces it.
             key = (task.stage, task.role, task.input_digest)
-            if any((item.stage, item.role, item.input_digest) == key for item in state.tasks.values()):
+            if any(
+                (item.stage, item.role, item.input_digest) == key and item.status != TaskStatus.CANCELLED
+                for item in state.tasks.values()
+            ):
                 raise ConflictError("task already exists for run, stage, role, and input digest")
             state.set_task(task)
             state.add_event(
@@ -427,7 +432,14 @@ class RunStore:
         if state is None:
             return None
         key = (stage, role, input_digest)
-        return next((item for item in state.tasks.values() if (item.stage, item.role, item.input_digest) == key), None)
+        return next(
+            (
+                item
+                for item in state.tasks.values()
+                if (item.stage, item.role, item.input_digest) == key and item.status != TaskStatus.CANCELLED
+            ),
+            None,
+        )
 
     def list_tasks(self, run_id: str) -> list[Task]:
         state = self._load_if_present(run_id)
@@ -453,11 +465,12 @@ class RunStore:
         schema_kind: str,
         example_digest: str | None = None,
         *,
-        plan_id: str | None = None,
+        plan_text_digest: str | None = None,
         assignment_id: str | None = None,
+        assignment_digest: str | None = None,
     ) -> None:
         # The example digest is written only with the first record; it is not part of the frozen-input identity.
-        # A writing task names the plan and assignment it was prepared from.
+        # A writing task names the plan text and the assignment file it was prepared from, not a plan record.
         record = dict(
             zip(
                 _EXTERNAL_TASK_KEYS,
@@ -468,8 +481,9 @@ class RunStore:
                     bundle_digest,
                     bundle_path,
                     schema_kind,
-                    plan_id,
+                    plan_text_digest,
                     assignment_id,
+                    assignment_digest,
                     example_digest,
                 ),
             )

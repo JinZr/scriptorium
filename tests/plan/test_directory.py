@@ -205,9 +205,9 @@ def test_findings_must_be_confirmed_and_every_confirmed_finding_assigned(tmp_pat
     assert codes == ["plan.unknown_finding_ids", "plan.findings_unassigned"]
 
 
-def test_an_unchanged_plan_is_refused_after_a_rejected_patch(tmp_path):
+def test_a_plan_equal_to_the_latest_approved_plan_is_refused(tmp_path):
     text = "---\ntarget: main.tex:1-1\nfindings: finding_a\n---\nDo it.\n"
     codes, plan = _validated(tmp_path, {"part.md": text})
     assert codes == []
-    assert _codes(validate_plan(plan, SOURCES, {"finding_a"}, plan.digest)) == ["plan.unchanged_after_rejection"]
+    assert _codes(validate_plan(plan, SOURCES, {"finding_a"}, plan.digest)) == ["plan.unchanged"]
     assert _codes(validate_plan(plan, SOURCES, {"finding_a"}, "0" * 64)) == []

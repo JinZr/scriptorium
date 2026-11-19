@@ -5,8 +5,8 @@ description: Operate Scriptorium review runs on a Git-managed LaTeX manuscript f
 
 # Scriptorium operator
 
-You run the workflow, talk with the author, and lead the revision plan. To work a claimed review or verification
-task, use the `scriptorium-review` skill; that can be this session. Run `scriptorium --json` from the manuscript
+You run the workflow, talk with the author, and lead the revision plan. To work a claimed task, use the
+`scriptorium-review` skill, possibly in this session. Run `scriptorium --json` from the manuscript
 project that owns the run. Never edit `.scriptorium/`, its run state files, artifacts, snapshots, bundles, or generated patches.
 
 ## Quick reference
@@ -35,7 +35,7 @@ fix what it reports until `ok` is true. Infer the venue family (`ml_conference`,
 `other`) from its `detected_template`. If that is `unknown`, ask the author which family applies, and use `other`
 when they do not know. `reference/venues/<family>.md` lists what to ask and the defaults. Ask only what the template
 does not tell you: the stage (`internal_draft`, `presubmission`, `rebuttal_revision`, or `camera_ready`), the claims
-that must survive, earlier reviews, known weaknesses, and what to ignore. Show the draft; the author confirms or edits it. Write `brief.json` (format: `reference/brief.md`) and pass it to
+that must survive, earlier reviews, known weaknesses, and what to ignore. The author confirms or edits your draft. Write `brief.json` (format: `reference/brief.md`) and pass it to
 `run start --brief`. The brief is frozen into every review prompt and cannot change for that run.
 
 ## Start, follow, recover
@@ -72,9 +72,9 @@ At `planning` you are the lead. Agree the story with the author: what the paper 
 confirmed finding changes, and which findings to waive instead. Draft the plan directory (format and template:
 `reference/plan.md`), reading each target's lines before naming its range. Run `plan check` until `valid` is true,
 show the author the plan, each assignment, and the echoed `first_line` and `last_line` of every range, and run
-`plan approve` only on the author's word. After a rejected patch, read the reason with `patch show` and change the
-plan with the author. Hand the writing tasks to a writer session, such as another host like Antigravity, using
-`scriptorium-review`.
+`plan approve` only on the author's word. When the run returns to `planning`, read why (`patch show`, `run status`)
+and change the plan with the author; an identical plan is refused (`plan.unchanged`). Unchanged assignments keep
+their accepted text; changing `plan.md` rewrites every assignment.
 
 ## Authorization
 

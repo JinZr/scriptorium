@@ -4,8 +4,8 @@ import json
 import pytest
 
 from scriptorium import cli
-from scriptorium.domain import AgentRole, AttemptStatus, RunStatus
-from scriptorium.errors import BuildFailedError, InfrastructureError
+from scriptorium.domain import AgentRole, AttemptStatus, RunStatus, TaskStatus
+from scriptorium.errors import BuildFailedError, InfrastructureError, StateError
 from scriptorium.service import ScriptoriumService
 
 from ._support import (
@@ -16,9 +16,11 @@ from ._support import (
     complete_reviews,
     export_writing,
     make_repository,
+    review_finding,
     submit,
     submit_writing,
     write_plan,
+    writing_task,
 )
 
 
@@ -106,7 +108,11 @@ def test_plan_check_and_approve_through_the_cli(tmp_path, monkeypatch, capsys):
         assert "plan.decided" in {event.event_type for event in service.store.list_events(run.id)}
         writing = next(task for task in service.store.list_tasks(run.id) if task.stage == "writing")
         metadata = service.store.get_external_task(writing.id)
-        assert (metadata["plan_id"], metadata["assignment_id"]) == (recorded.id, "result")
+        assert (metadata["plan_text_digest"], metadata["assignment_id"], metadata["assignment_digest"]) == (
+            recorded.plan_artifact_digest,
+            "result",
+            recorded.assignments[0]["artifact_digest"],
+        )
 
         code, refused = _cli(capsys, "plan", "check", run.id, "--dir", str(plan))
         assert code == 1 and refused["error"]["code"] == "invalid_state"
@@ -334,3 +340,154 @@ def test_assignments_that_compile_alone_but_not_together_return_the_run_to_plann
         writing, export = export_writing(service, run.id, "result", session="writer-3")
         receipt = submit_writing(service, writing, export, {1: "The result is clear."})
         assert receipt["run_status"] == RunStatus.AWAITING_PATCH_APPROVAL
+
+
+def _two_finding_run(service):
+    run = asyncio.run(service.start_run("HEAD", "quick"))["run"]
+    review = claim(service, run.id, AgentRole.SUBSTANTIVE_REVIEW)
+    first = review_finding(review)
+    second = {**first, "title": "Second issue", "claim": "The opening needs a sentence."}
+    submit(service, review, {"summary": "Two issues.", "findings": [first, second]})
+    findings = [finding.id for finding in service.list_findings(run.id)]
+    service.decide_findings(findings, "confirm", "Both need writing.")
+    asyncio.run(service.resume_run(run.id))
+    return run, findings
+
+
+def _two_assignments(findings, *, opening="Open with one sentence that states the topic."):
+    return {
+        "result": (["main.tex:3-3"], [findings[0]], "Correct the typo."),
+        "opening": (["main.tex:2-2"], [findings[1]], opening),
+    }
+
+
+def _writing_tasks(service, run_id):
+    return {
+        service.store.get_external_task(task.id)["assignment_id"]: task
+        for task in service.store.list_tasks(run_id)
+        if task.stage == "writing" and task.status != TaskStatus.CANCELLED
+    }
+
+
+OPENING = "\\begin{document}\nThis note states one result."
+
+
+def _rejected_two_assignment_run(service, tmp_path):
+    run, findings = _two_finding_run(service)
+    first = write_plan(tmp_path / "plan-1", _two_assignments(findings))
+    asyncio.run(service.approve_plan(run.id, first, "The author approved both assignments."))
+    writing, export = export_writing(service, run.id, "opening", session="writer-opening")
+    submit_writing(service, writing, export, {1: OPENING})
+    opening_attempt = writing["attempt"]
+    writing, export = export_writing(service, run.id, "result", session="writer-result")
+    receipt = submit_writing(service, writing, export, {1: "The result is clear."})
+    assert receipt["run_status"] == RunStatus.AWAITING_PATCH_APPROVAL
+    patch = service.store.list_patches(run.id)[-1]
+    service.decide_patch(patch.id, "reject", "The opening is right; the result sentence is too vague.")
+    asyncio.run(service.resume_run(run.id))
+    assert service.store.get_run(run.id).status == RunStatus.PLANNING
+    return run, findings, opening_attempt, writing["attempt"]
+
+
+def test_a_changed_plan_rewrites_only_its_changed_assignments(tmp_path):
+    repo = make_repository(tmp_path, roles=("substantive_review",))
+    with ScriptoriumService(repo, manuscript_manager=PdfBuildingManuscriptManager(repo)) as service:
+        run, findings, opening_attempt, result_attempt = _rejected_two_assignment_run(service, tmp_path)
+        before = _writing_tasks(service, run.id)
+        assignments = _two_assignments(findings)
+        assignments["result"] = (["main.tex:3-3"], [findings[0]], "Correct the typo and state what is clear.")
+        second = write_plan(tmp_path / "plan-2", assignments)
+        asyncio.run(service.approve_plan(run.id, second, "The author approved the new result wording."))
+
+        tasks = _writing_tasks(service, run.id)
+        assert tasks["opening"].id == before["opening"].id and tasks["opening"].status == TaskStatus.COMPLETED
+        assert tasks["result"].id != before["result"].id and tasks["result"].status == TaskStatus.PENDING
+        assert service.list_tasks(run.id)["next_actions"] == [{"command": "task claim", "task_id": tasks["result"].id}]
+        writing, export = export_writing(service, run.id, "result", session="writer-result-2")
+        receipt = submit_writing(service, writing, export, {1: "The result is clear in every setting."})
+        assert receipt["run_status"] == RunStatus.AWAITING_PATCH_APPROVAL
+        patch = service.store.list_patches(run.id)[-1]
+        assert patch.plan_id == service.store.list_plans(run.id)[-1].id
+        assert sorted((edit["start_line"], edit["after"]) for edit in patch.edits) == [
+            (2, OPENING + "\n"),
+            (3, "The result is clear in every setting.\n"),
+        ]
+
+        # An attempt of a plan that is no longer the latest still exports its own plan, assignment, and passages.
+        old = tmp_path / "old-export"
+        service.export_task(result_attempt.id, old)
+        assert (old / "task" / "plan.md").read_bytes() == (tmp_path / "plan-1" / "plan.md").read_bytes()
+        assert (old / "task" / "assignment.md").read_bytes() == (
+            tmp_path / "plan-1" / "assignments" / "result.md"
+        ).read_bytes()
+        assert (old / "task" / "passages" / "1.tex").read_text(encoding="utf-8") == "The result is teh clear.\n"
+        reused = tmp_path / "reused-export"
+        service.export_task(opening_attempt.id, reused)
+        assert (reused / "task" / "assignment.md").read_bytes() == (
+            tmp_path / "plan-2" / "assignments" / "opening.md"
+        ).read_bytes()
+
+        report = service.render_report(run.id, "json")
+        assert sorted(task["assignment_id"] for task in report["tasks"] if "assignment_id" in task) == [
+            "opening",
+            "result",
+            "result",
+        ]
+
+
+def test_a_changed_plan_text_rewrites_every_assignment(tmp_path):
+    repo = make_repository(tmp_path, roles=("substantive_review",))
+    with ScriptoriumService(repo, manuscript_manager=PdfBuildingManuscriptManager(repo)) as service:
+        run, findings, _, _ = _rejected_two_assignment_run(service, tmp_path)
+        before = _writing_tasks(service, run.id)
+        second = write_plan(tmp_path / "plan-2", _two_assignments(findings), "# Plan\n\nState the result exactly.\n")
+        asyncio.run(service.approve_plan(run.id, second, "The author changed the story."))
+        tasks = _writing_tasks(service, run.id)
+        assert {name: task.status for name, task in tasks.items()} == {
+            "opening": TaskStatus.PENDING,
+            "result": TaskStatus.PENDING,
+        }
+        assert not {task.id for task in tasks.values()} & {task.id for task in before.values()}
+
+
+def test_a_cancelled_task_does_not_block_the_same_assignment_in_a_later_plan(tmp_path):
+    repo = make_repository(tmp_path, roles=("substantive_review",))
+    with ScriptoriumService(repo, manuscript_manager=PdfBuildingManuscriptManager(repo)) as service:
+        run, findings = _two_finding_run(service)
+        approve_plan(service, run.id, _two_assignments(findings))
+        writing, export = export_writing(service, run.id, "result", session="writer-result")
+        assert submit_writing(service, writing, export, {1: "The result is clear."})["run_status"] == RunStatus.WRITING
+        pending = writing_task(service, run.id, "opening")
+        service.decide_finding(findings[0], "waive", "The author keeps the result sentence.")
+        assert service.store.get_task(pending.id).status == TaskStatus.CANCELLED
+        assert service.store.get_run(run.id).status == RunStatus.PLANNING
+
+        # The plan text and the opening assignment are unchanged; only the waived finding's assignment is dropped.
+        approve_plan(service, run.id, {"opening": _two_assignments(findings)["opening"]})
+        assert service.store.get_run(run.id).status == RunStatus.WRITING
+        replacement = writing_task(service, run.id, "opening")
+        assert replacement.id != pending.id
+        assert service.list_tasks(run.id)["next_actions"] == [{"command": "task claim", "task_id": replacement.id}]
+        writing, export = export_writing(service, run.id, "opening", session="writer-opening")
+        receipt = submit_writing(service, writing, export, {1: OPENING})
+        assert receipt["run_status"] == RunStatus.AWAITING_PATCH_APPROVAL
+        (edit,) = service.store.list_patches(run.id)[-1].edits
+        assert edit["start_line"] == 2
+
+
+def test_task_list_offers_only_the_latest_plans_writing_tasks(tmp_path):
+    repo = make_repository(tmp_path, roles=("substantive_review",))
+    with ScriptoriumService(repo, manuscript_manager=PdfBuildingManuscriptManager(repo)) as service:
+        run, findings = _two_finding_run(service)
+        approve_plan(service, run.id, _two_assignments(findings))
+        writing, export = export_writing(service, run.id, "opening", session="writer-opening")
+        receipt = submit_writing(service, writing, export, {1: "\\begin{document}"})
+        assert receipt["attempt"].status == AttemptStatus.FAILED
+        service.decide_finding(findings[0], "waive", "The author keeps the result sentence.")
+        assert service.store.get_run(run.id).status == RunStatus.PLANNING
+        changed = _two_assignments(findings, opening="Add one plain sentence.")["opening"]
+        approve_plan(service, run.id, {"opening": changed})
+        replacement = writing_task(service, run.id, "opening")
+        assert service.list_tasks(run.id)["next_actions"] == [{"command": "task claim", "task_id": replacement.id}]
+        with pytest.raises(StateError, match="task context changed"):
+            asyncio.run(service.retry_task(run.id, writing["task"].id))

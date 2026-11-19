@@ -102,8 +102,12 @@ brief fields that are not rendered are bound too. Every attempt binds its own pr
 rejected submission is a new prompt with a new input digest. A review task also freezes an example output, built
 from its schema and the first non-blank line of a text source (an entrypoint first) whose bundle and snapshot
 copies both match its digest, and kept only if it passes the task's output model and anchor checks. Its digest is
-stored outside the input digest. Writing and verification tasks have no example. A writing task also records the
-plan and assignment it was prepared from; its prompt names both, so each approved plan gets its own tasks.
+stored outside the input digest. Writing and verification tasks have no example. A writing task records the digests
+of the plan text and the assignment file it was prepared from and the assignment ID, not a plan record; its prompt
+holds exactly that content, so a later plan with the same plan text and assignment file finds the same task and
+keeps its accepted output ([reuse rule](operations.md#the-plan-directory)). A task is current while the latest plan
+is current and holds that content. A cancelled task does not count toward the one-task-per-input rule, so an
+identical task can be prepared again after a waiver cancelled it.
 
 Export and page rendering check every file they use against the bundle index and the document mapping;
 submission validates the whole bundle. Accepted outputs are replayed into findings, a candidate patch, or a

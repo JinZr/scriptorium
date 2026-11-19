@@ -86,5 +86,5 @@ def test_quick_reference_commands_match_the_parser(name: str) -> None:
 
 def test_the_skills_cover_planning_and_writing() -> None:
     operator = _skill("scriptorium")
-    assert "plan approve" in operator and "reference/plan.md" in operator
+    assert "plan approve" in operator and "reference/plan.md" in operator and "plan.unchanged" in operator
     assert "--dir DIR" in _skill("scriptorium-review") and "task/passages/" in _skill("scriptorium-review")
