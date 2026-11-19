@@ -50,3 +50,5 @@ Limit the main conclusion to benchmark one. Keep the table numbers, citations, a
   Every confirmed finding appears in some assignment; waive one the author does not want changed.
 - The body is the writer's instruction. Say what to change and what to keep; the writer sees `plan.md` too.
 - Check each range against the echoed `first_line` and `last_line` before asking the author to approve.
+- When you revise a plan, unchanged assignments keep their current text; changing `plan.md` rewrites every
+  assignment.

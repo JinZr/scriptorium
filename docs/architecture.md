@@ -15,6 +15,7 @@ contract, and the gates. Commands and output rules are in [operations](operation
 | `artifacts.py` | Atomic, SHA-256-addressed artifact publication |
 | `manuscript.py` | Git snapshots, LaTeX dependency scanning and builds, bundles, navigation, source anchors, exact edits, patch application |
 | `plan.py` | Reading and validating the plan directory; turning a writer's returned passages into exact edits |
+| `fact_changes.py` | The fact-change list: comparing two navigation indexes and two document indexes |
 | `domain.py` | Entities, enums, invariants, and state transitions |
 | `schemas.py`, `prompts/` | Output schemas, the evidence contract, the severity rubric, the brief model, and role prompts |
 | `config.py` | `scriptorium.toml` loading and `init` |
@@ -27,7 +28,7 @@ contract, and the gates. Commands and output rules are in [operations](operation
 ```text
 .scriptorium/
   runs/RUN_ID/
-    state.json            run, tasks, attempts, findings, decisions, plans, patches, verifications, events
+    state.json            run, tasks, attempts, findings, decisions, plans, patches, checks, events
     state.lock            the store's per-run lock
     snapshot/             the frozen commit's files
     bundle/               the frozen review bundle a task reads from
@@ -35,7 +36,7 @@ contract, and the gates. Commands and output rules are in [operations](operation
     manifest.json         the frozen inputs and the bundle digest
     patched/PATCH_ID/     the snapshot with a patch applied
     patches/PATCH_ID.json the patch's edits and changed paths
-    verifications/PATCH_ID/bundle/   the patched bundle the verifier reads
+    checks/PATCH_ID/bundle/          the patched bundle a check reads
     page-views/           zoomed page views and text layers, named by digest
   artifacts/sha256/AB/CDEF...        immutable content, with CDEF....json metadata beside it
   locks/RUN_ID.lock       the service's per-run operation lock
@@ -44,7 +45,7 @@ contract, and the gates. Commands and output rules are in [operations](operation
 A run exists exactly when its `state.json` exists. Decisions and events are append-only within it, and so are
 approved plans: the latest is the current one, and a patch records the plan it was built from. The artifact store
 keeps prompts, schemas, briefs, approved plan and assignment files, bundle indexes, submitted outputs, validation
-reports, examples, diffs, and build evidence under their SHA-256 digest.
+reports, examples, diffs, fact-change lists, and build evidence under their SHA-256 digest.
 
 ## Atomicity and locking
 
@@ -76,23 +77,25 @@ With supplements, each entrypoint's closure is scanned separately, so its graphi
 kept, and the bundle freezes their union. Each document compiles in its own disposable copy, so generated files
 cannot leak between documents. The PDFs are concatenated in configured order into `manuscript.pdf`, and the
 manifest and source map freeze a document index (entrypoint, first global page, page count) whose ranges partition
-the PDF and name distinct text sources. A writing submission's compile check, the combined candidate, and
-verification rebuild every document; any failed build blocks that stage.
+the PDF and name distinct text sources. A writing submission's compile check and the combined candidate rebuild
+every document, and the check's patched bundle comes from the candidate's build; any failed build blocks that
+stage.
 
 The run freezes:
 
 - the project configuration and `scriptorium.toml` text;
 - the source identities (path, digest, line count) and the navigation index;
-- one prompt template per role: for review and verification roles the role prompt, the shared export-reading
-  instructions, the evidence contract, and, for review roles, the limitations instruction and the severity rubric,
-  added once by the workflow (the role prompts do not repeat it); for the writing role the writer prompt and its
-  passage rules, with slots for the plan, the assignment, its targets, and its findings, filled when a writing task
-  is prepared;
+- one prompt template per role: for review roles the role prompt, the shared export-reading instructions, the
+  evidence contract, the limitations instruction, and the severity rubric, added once by the workflow (the role
+  prompts do not repeat it); for the writing role the writer prompt and its passage rules, with slots for the plan,
+  the assignment, its targets, its findings, and, for a redo task, what the check returned; for the check role the
+  check prompt, with slots for the plan, the assignments with the writers' notes and attempts, the confirmed
+  findings, the diff, and the fact-change list. Slots are filled when a task is prepared;
 - the output schemas, which repeat the severity levels on `severity`;
 - the evidence contract;
 - the review brief, when one is given: validated against a strict model, published as an artifact, recorded by
   digest on the run, and rendered deterministically before the severity rubric in every review prompt template.
-  Writing and verification prompts do not include it.
+  Writing and check prompts do not include it.
 
 A run keeps the prompts it froze; a changed prompt applies only to new runs.
 
@@ -102,16 +105,19 @@ brief fields that are not rendered are bound too. Every attempt binds its own pr
 rejected submission is a new prompt with a new input digest. A review task also freezes an example output, built
 from its schema and the first non-blank line of a text source (an entrypoint first) whose bundle and snapshot
 copies both match its digest, and kept only if it passes the task's output model and anchor checks. Its digest is
-stored outside the input digest. Writing and verification tasks have no example. A writing task records the digests
-of the plan text and the assignment file it was prepared from and the assignment ID, not a plan record; its prompt
-holds exactly that content, so a later plan with the same plan text and assignment file finds the same task and
-keeps its accepted output ([reuse rule](operations.md#the-plan-directory)). A task is current while the latest plan
-is current and holds that content. A cancelled task does not count toward the one-task-per-input rule, so an
+stored outside the input digest. Writing and check tasks have no example. A writing task records the digests of
+the plan text and the assignment file it was prepared from and the assignment ID, not a plan record, and a redo task
+also the check and the returned attempt; its prompt holds exactly that content, so a later plan with the same plan
+text and assignment file finds the same tasks and keeps the assignment's current output
+([reuse rule](operations.md#the-plan-directory)). A writing task is current while the latest plan is current and
+holds that content; a check task is current while it matches the latest patch, still `proposed`, of that plan. A cancelled task does not count toward the one-task-per-input rule, so an
 identical task can be prepared again after a waiver cancelled it.
 
 Export and page rendering check every file they use against the bundle index and the document mapping;
-submission validates the whole bundle. Accepted outputs are replayed into findings, a candidate patch, or a
-verification record; a writing output is validated again on replay but compiled only when it is submitted.
+submission validates the whole bundle. Accepted outputs are replayed into findings, a candidate patch, or a check
+record; a writing output is validated again on replay but compiled only when it is submitted. Each assignment's
+current output is derived on replay from stored state alone: a check records, per assignment, the writing attempt
+it accepted or returned.
 
 ## Evidence contract
 
@@ -130,9 +136,10 @@ verification record; a writing output is validated again on replay but compiled 
 
 ## Gates
 
-Finding decisions, plan approval, writing, patch approval, verification, patch application, and the release gate
-are separate stages, each with its own command ([plan](operations.md#the-plan-directory),
-[procedure](operations.md#patches-verification-and-application)). Scriptorium never infers approval from severity.
+Finding decisions, plan approval, writing, the check, patch approval, patch application, and the release gate are
+separate stages, each with its own command ([plan](operations.md#the-plan-directory),
+[procedure](operations.md#patches-the-check-and-application)). Scriptorium never infers approval from severity or
+from a passing check.
 
 - On replay, a stored output is read from the artifact store and validated again before its records are created.
   Missing or corrupt frozen material is an infrastructure failure: it fails the operation visibly and never counts
@@ -148,6 +155,6 @@ are separate stages, each with its own command ([plan](operations.md#the-plan-di
 | `no_unhandled_blocker_or_major` | No pending finding is `blocker` or `major` |
 | `confirmed_findings_covered` | The applied patch covers every confirmed finding |
 | `patched_build_succeeded` | The applied patch built, when a patch is required |
-| `verifier_passed` | The applied patch has a passing verification, when a patch is required |
+| `check_passed` | The applied patch has a passing check, when a patch is required |
 | `patch_applied_when_required` | A patch is applied whenever a finding is confirmed |
 | `run_completed` | The run is `completed` |

@@ -7,7 +7,8 @@
 ## 它是什么，不是什么
 
 - 一个本机命令行工具：把 LaTeX 稿件的某个 Git commit 冻结下来，交给你自己的 Codex、Claude Code 或
-  Antigravity 会话做结构化审稿，再由你决定发现、批准修改计划、批准补丁、独立验证、显式应用。每一步都有人工关卡。
+  Antigravity 会话做结构化审稿，再由你决定发现、批准修改计划；主笔按计划核对补丁后，由你批准补丁并显式应用。
+  每个决定都有人工关卡。
 - 它不选模型、不调模型、不付费。模型和费用都在你自己的 CLI 订阅或账户上。
 - 它不是自动改稿机。模型声明的 claim check 和 limitations 是供人检查的记录，不等于科学正确。
 - 它只读已提交的内容，未提交的改动不会进入审稿。
@@ -42,9 +43,9 @@ PYTHON=/path/to/python bash /path/to/scriptorium/utils/preflight.sh
 模型按两份 skill 操作 CLI：
 
 - [skills/scriptorium](../skills/scriptorium/SKILL.md)：操作者，负责和你商定审稿 brief、开始运行、读报告、按你的指示记录决定，
-  并作为主笔和你商定修改计划；
-- [skills/scriptorium-review](../skills/scriptorium-review/SKILL.md)：审稿者或写作者，负责 claim 任务、导出并阅读冻结的任务、
-  引用证据或改写段落、提交结果。
+  并作为主笔和你商定修改计划、核对补丁；
+- [skills/scriptorium-review](../skills/scriptorium-review/SKILL.md)：审稿者、写作者或核对者，负责 claim 任务、导出并阅读冻结的
+  任务、引用证据、改写段落或给出核对结论、提交结果。
 
 把这两个目录复制或软链接到客户端的 skills 目录：
 
@@ -98,11 +99,16 @@ scriptorium --json run status RUN_ID
   `plan approve`。
 - 写作任务：每项分配生成一个写作任务，可以交给另一个模型会话（例如 Antigravity）。写作者只改写导出目录里
   `task/passages/` 下的段落文件，用 `task submit --dir` 提交；它不写 JSON，也不写行号，Scriptorium 自己生成精确修改
-  并编译。所有任务都通过后，运行合成一个候选补丁。
-- `patch decide`：批准或拒绝补丁，然后 `run resume`。批准会生成验证任务；拒绝会回到 `planning`，由主笔读你的理由
-  （`patch show`）并和你修改计划。
-- 验证任务必须在一个全新的对话里做。用做过审稿或写作的对话提交验证，或没有宿主会话 ID 时，提交会被拒绝。
-- `patch apply` 把验证通过的补丁写入工作区，`run gate` 查看放行结论。
+  并编译。所有任务都通过后，运行合成一个候选补丁，进入 `checking`。
+- 核对任务：主笔在一个没有做过本运行写作的宿主会话里 claim 核对任务，按批准的计划逐项检查补丁，每项分配给出
+  `accept` 或 `redo`，`redo` 必须附上写给写作者的反馈。被退回的分配会生成重写任务，导出的段落文件是上一稿的文字；
+  其余分配保留原稿。核对检查补丁是否执行了计划，不是重新审稿；方向由你对计划和补丁的批准把关。用做过本运行写作的
+  会话，或没有宿主会话 ID 时，核对提交会被拒绝。
+- `patch decide`：核对接受全部分配后，主笔把差异、核对结论和事实变更清单（`patch show` 的 `facts`）给你看，由你批准
+  或拒绝补丁，然后 `run resume`。事实变更清单比较修改前后导航索引中的数值、引用、交叉引用、标签和插图，以及各文档
+  页数；导航索引是启发式的，所以清单只是阅读辅助，不是证据，清单为空也不说明没有事实改变，任何关卡都不依赖它。
+  批准后进入 `ready_to_apply`；拒绝会回到 `planning`，由主笔读你的理由（`patch show`）并和你修改计划。
+- `patch apply` 把批准的补丁写入工作区，`run gate` 查看放行结论。
 
 随时用 `scriptorium --json run status RUN_ID` 看当前位置，用
 `scriptorium run report RUN_ID --format markdown > review.md` 导出可读报告。
